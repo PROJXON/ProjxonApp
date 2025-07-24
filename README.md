@@ -6,15 +6,17 @@ Mobile application for Projxon featuring LinkedIn integration, contact forms, RO
 
 ```
 ProjxonApp/
-├── backend/              # Node.js + Express API
-│   ├── server.js         # Main Express server
+├── backend/              # TypeScript + Express API
+│   ├── src/
+│   │   └── server.ts     # Main Express server (TypeScript)
+│   ├── tsconfig.json     # TypeScript configuration
 │   ├── package.json      # Backend dependencies
-│   └── ...
-├── frontend/             # React Native + Expo Mobile App
-│   ├── App.js            # Main React Native component
+│   └── dist/             # Compiled JavaScript (auto-generated)
+├── frontend/             # React Native + Expo + TypeScript
+│   ├── App.tsx           # Main React Native component (TypeScript)
+│   ├── tsconfig.json     # TypeScript configuration
 │   ├── app.json          # Expo configuration
-│   ├── package.json      # Frontend dependencies
-│   └── ...
+│   └── package.json      # Frontend dependencies
 ├── .gitignore            # Git ignore rules
 └── README.md             # This file
 ```
