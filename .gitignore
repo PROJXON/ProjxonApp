@@ -5,6 +5,11 @@ yarn-debug.log*
 yarn-error.log*
 .env
 
+# TypeScript
+*.tsbuildinfo
+dist/
+build/
+
 # React Native
 # (ignore build outputs and platform-specific files)
 ios/
