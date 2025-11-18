@@ -1,6 +1,8 @@
 import React from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, Button } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import ChatScreen from './src/screens/ChatScreen';
 
 import { Amplify } from "aws-amplify";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react-native";
@@ -28,22 +30,25 @@ const SignOutButton = () => {
 
 export default function App(): React.JSX.Element {
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Welcome to Projxon!</Text>
-      <Text style={styles.subtitle}>React Native + TypeScript + Expo</Text>
-      <Text style={styles.features}>📱 LinkedIn Integration</Text>
-      <Text style={styles.features}>📋 Contact Forms</Text>
-      <Text style={styles.features}>📊 ROI Calculator</Text>
-      <Text style={styles.features}>📝 Blog Content</Text>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container}>
+        <Authenticator.Provider>
+          <Authenticator
+            loginMechanisms={['email']}
+            signUpAttributes={['preferred_username']}
+          >
+            <View style={{ flex: 1, alignSelf: 'stretch' }}>
+              <SignOutButton />
+              <View style={{ flex: 1 }}>
+                <ChatScreen />
+              </View>
+            </View>
+          </Authenticator>
+        </Authenticator.Provider>
 
-      <Authenticator.Provider>
-        <Authenticator>
-          <SignOutButton />
-        </Authenticator>
-      </Authenticator.Provider>
-
-      <StatusBar style="auto" />
-    </View>
+        <StatusBar style="auto" />
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -51,25 +56,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    marginBottom: 10,
-    color: '#333',
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#666',
-    marginBottom: 30,
-  },
-  features: {
-    fontSize: 14,
-    color: '#555',
-    marginVertical: 2,
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
   },
   signOutButton: {
     alignSelf: 'flex-end',
