@@ -25,6 +25,10 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "WS_URL": "wss://a6ersp1gab.execute-api.us-east-2.amazonaws.com/production",
+      "API_URL": ""
     }
   }
 }
