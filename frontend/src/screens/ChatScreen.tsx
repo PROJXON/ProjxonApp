@@ -1,8 +1,8 @@
 import React from 'react';
 import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { WS_URL } from '../config/env';
-const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
+import { WS_URL, API_URL } from '../config/env';
+// const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
 // const WS_URL = "wss://ws.ifelse.io"
 import { useAuthenticator } from '@aws-amplify/ui-react-native';
 import Constants from 'expo-constants';
