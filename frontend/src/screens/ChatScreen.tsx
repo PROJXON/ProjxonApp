@@ -1,7 +1,8 @@
 import React from 'react';
 import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { WS_URL } from '../config/env';
+import { WS_URL, API_URL } from '../config/env';
+// const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
 // const WS_URL = "wss://ws.ifelse.io"
 import { useAuthenticator } from '@aws-amplify/ui-react-native';
 import Constants from 'expo-constants';
@@ -23,6 +24,7 @@ export default function ChatScreen(): React.JSX.Element {
   const [error, setError] = React.useState<string | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
   const [displayName, setDisplayName] = React.useState<string>('anon');
+  const hasLoadedHistoryRef = React.useRef<boolean>(false);
 
   React.useEffect(() => {
     console.log('WS_URL =', WS_URL)
@@ -104,6 +106,34 @@ export default function ChatScreen(): React.JSX.Element {
       mounted = false;
     };
   }, [user]);
+
+  // Fetch recent history from HTTP API (if configured)
+  React.useEffect(() => {
+    const fetchHistory = async () => {
+      if (!API_URL || hasLoadedHistoryRef.current) return;
+      try {
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/messages?channelId=global&limit=50`);
+        if (!res.ok) return;
+        const items = await res.json();
+        if (Array.isArray(items)) {
+          const normalized = items
+            .map((it: any) => ({
+              id: String(it.messageId ?? it.createdAt ?? Date.now()),
+              user: it.user ?? 'anon',
+              text: String(it.text ?? ''),
+              createdAt: Number(it.createdAt ?? Date.now()),
+            }))
+            .filter(m => m.text.length > 0)
+            .sort((a, b) => b.createdAt - a.createdAt);
+          setMessages(normalized);
+          hasLoadedHistoryRef.current = true;
+        }
+      } catch {
+        // ignore fetch errors; WS will still populate
+      }
+    };
+    fetchHistory();
+  }, [API_URL, user]);
 
   const sendMessage = React.useCallback(() => {
     if (!input.trim()) return;

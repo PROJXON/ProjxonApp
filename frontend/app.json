@@ -28,7 +28,7 @@
     },
     "extra": {
       "WS_URL": "wss://a6ersp1gab.execute-api.us-east-2.amazonaws.com/production",
-      "API_URL": ""
+      "API_URL": "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
     }
   }
 }
