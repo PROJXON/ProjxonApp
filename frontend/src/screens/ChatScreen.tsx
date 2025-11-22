@@ -176,14 +176,22 @@ export default function ChatScreen(): React.JSX.Element {
           data={messages}
           keyExtractor={(m) => m.id}
           inverted
-          renderItem={({ item }) => (
-            <View style={styles.message}>
-              <Text style={styles.messageUser}>
-                {(item.user ?? 'anon')}{' · '}{new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </Text>
-              <Text style={styles.messageText}>{item.text}</Text>
-            </View>
-          )}
+          renderItem={({ item }) => {
+            const timestamp = new Date(item.createdAt); 
+            const formatted = `${timestamp.toLocaleDateString()} · ${timestamp.toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}`;
+
+            return (           
+              <View style={styles.message}>
+                <Text style={styles.messageUser}>
+                  {(item.user ?? 'anon')}{' · '}{formatted}
+                </Text>
+                <Text style={styles.messageText}>{item.text}</Text>
+              </View>
+            );
+          }}
           contentContainerStyle={styles.listContent}
         />
         <View style={styles.inputRow}>
