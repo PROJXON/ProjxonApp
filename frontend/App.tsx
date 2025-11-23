@@ -6,6 +6,7 @@ import ChatScreen from './src/screens/ChatScreen';
 
 import { Amplify } from "aws-amplify";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react-native";
+import { fetchUserAttributes } from 'aws-amplify/auth';
 
 import 'react-native-get-random-values'
 import 'react-native-url-polyfill/auto'
@@ -30,10 +31,31 @@ const SignOutButton = () => {
 
 const MainAppContent = () => {
   const { user } = useAuthenticator();
+  const [displayName, setDisplayName] = useState<string>('anon');
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const attrs = await fetchUserAttributes();
+        const name =
+          (attrs.preferred_username as string | undefined) ||
+          (attrs.email as string | undefined) ||
+          (user as any)?.username ||
+          'anon';
+        if (mounted) setDisplayName(name);
+      } catch {
+        if (mounted) setDisplayName((user as any)?.username || 'anon');
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [user]);
+
   const currentUsername =
-    ((user as any)?.attributes?.preferred_username as string | undefined) ||
-    (user?.username as string | undefined) ||
-    'anon';
+    (displayName.length ? displayName : (
+      (user as any)?.username as string | undefined || 'anon'
+    ));
 
   const [conversationId, setConversationId] = useState<string>('global');
   const [peer, setPeer] = useState<string | null>(null);
@@ -68,22 +90,27 @@ const MainAppContent = () => {
               placeholder="User to Message"
               style={styles.searchInput}
             />
-            <Button
-              title="Start DM"
-              onPress={() => {
-                const trimmed = peerInput.trim();
-                if (!trimmed || trimmed === currentUsername) {
-                  setSearchError(trimmed === currentUsername ? 'Choose a different user' : 'Enter a username');
-                  return;
-                }
-                const id = [currentUsername, trimmed].sort().join('#');
-                setPeer(trimmed);
-                setConversationId(id);
-                setSearchOpen(false);
-                setPeerInput('');
-                setSearchError(null);
-              }}
-            />
+                  <Button
+                    title="Start DM"
+                    onPress={() => {
+                      const trimmed = peerInput.trim();
+                      const normalizedInput = trimmed.toLowerCase();
+                      const normalizedCurrent = currentUsername.trim().toLowerCase();
+                      console.log(normalizedCurrent, normalizedInput)
+                      if (!trimmed || normalizedInput === normalizedCurrent) {
+                        setSearchError(
+                          normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username'
+                        );
+                        return;
+                      }
+                      const id = [normalizedCurrent, normalizedInput].sort().join('#');
+                      setPeer(trimmed);
+                      setConversationId(id);
+                      setSearchOpen(false);
+                      setPeerInput('');
+                      setSearchError(null);
+                    }}
+                  />
             <Button
               title="Cancel"
               onPress={() => {
@@ -96,7 +123,7 @@ const MainAppContent = () => {
       )}
       {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
       <View style={{ flex: 1 }}>
-        <ChatScreen conversationId={conversationId} peer={peer} />
+        <ChatScreen conversationId={conversationId} peer={peer} displayName={displayName} />
       </View>
     </View>
   );

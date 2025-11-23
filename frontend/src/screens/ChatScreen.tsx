@@ -6,11 +6,11 @@ import { WS_URL, API_URL } from '../config/env';
 // const WS_URL = "wss://ws.ifelse.io"
 import { useAuthenticator } from '@aws-amplify/ui-react-native';
 import Constants from 'expo-constants';
-import { fetchUserAttributes } from 'aws-amplify/auth';
 
 type ChatScreenProps = {
   conversationId?: string | null;
   peer?: string | null;
+  displayName: string;
 };
 
 type ChatMessage = {
@@ -20,7 +20,7 @@ type ChatMessage = {
   createdAt: number;
 };
 
-export default function ChatScreen({ conversationId, peer }: ChatScreenProps): React.JSX.Element {
+export default function ChatScreen({ conversationId, peer, displayName }: ChatScreenProps): React.JSX.Element {
   const { user } = useAuthenticator();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState<string>('');
@@ -28,7 +28,6 @@ export default function ChatScreen({ conversationId, peer }: ChatScreenProps): R
   const [isConnected, setIsConnected] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
-  const [displayName, setDisplayName] = React.useState<string>('anon');
   const activeConversationId = React.useMemo(
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
@@ -91,27 +90,6 @@ export default function ChatScreen({ conversationId, peer }: ChatScreenProps): R
     return () => {
       ws.close();
       wsRef.current = null;
-    };
-  }, [user]);
-
-  // Load a display name from Cognito attributes
-  React.useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const attrs = await fetchUserAttributes();
-        const name =
-          (attrs.preferred_username as string | undefined) ||
-          (attrs.email as string | undefined) ||
-          (user as any)?.username ||
-          'anon';
-        if (mounted) setDisplayName(name);
-      } catch {
-        if (mounted) setDisplayName((user as any)?.username || 'anon');
-      }
-    })();
-    return () => {
-      mounted = false;
     };
   }, [user]);
 
