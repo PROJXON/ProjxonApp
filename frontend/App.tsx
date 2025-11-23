@@ -1,11 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, Button } from 'react-native';
+import { StyleSheet, Text, View, Button, TextInput, Pressable } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import ChatScreen from './src/screens/ChatScreen';
 
 import { Amplify } from "aws-amplify";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react-native";
+import { fetchUserAttributes } from 'aws-amplify/auth';
+import { fetchAuthSession } from '@aws-amplify/auth';
+import { API_URL } from './src/config/env';
+
 
 import 'react-native-get-random-values'
 import 'react-native-url-polyfill/auto'
@@ -28,6 +32,131 @@ const SignOutButton = () => {
   );
 };
 
+const MainAppContent = () => {
+  const { user } = useAuthenticator();
+  const [displayName, setDisplayName] = useState<string>('anon');
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const attrs = await fetchUserAttributes();
+        const name =
+          (attrs.preferred_username as string | undefined) ||
+          (attrs.email as string | undefined) ||
+          (user as any)?.username ||
+          'anon';
+        if (mounted) setDisplayName(name);
+      } catch {
+        if (mounted) setDisplayName((user as any)?.username || 'anon');
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [user]);
+
+  const currentUsername =
+    (displayName.length ? displayName : (
+      (user as any)?.username as string | undefined || 'anon'
+    ));
+
+  const [conversationId, setConversationId] = useState<string>('global');
+  const [peer, setPeer] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState<boolean>(false);
+  const [peerInput, setPeerInput] = useState<string>('');
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  const startDM = async () => {
+      const trimmed = peerInput.trim();
+      const normalizedInput = trimmed.toLowerCase();
+      const normalizedCurrent = currentUsername.trim().toLowerCase();
+      if (!trimmed || normalizedInput === normalizedCurrent) {
+        setSearchError(
+          normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username'
+        );
+        return;
+      }
+
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) {
+        setSearchError('Unable to authenticate');
+        return;
+      }
+
+      const res = await fetch(
+        `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(trimmed)}`,
+        { headers: { Authorization: `Bearer ${idToken}` } }
+      );
+      if (res.status === 404) {
+        setSearchError('No such user!');
+        return;
+      }
+
+      const data = await res.json();
+      const canonical = (data.preferred_username ?? data.email ?? data.username ?? trimmed).trim();
+      const normalizedCanonical = canonical.toLowerCase();
+      if (normalizedCanonical === normalizedCurrent) {
+        setSearchError('Not you silly!');
+        return;
+      }
+      const id = [normalizedCurrent, normalizedCanonical].sort().join('#');
+      setPeer(canonical);
+      setConversationId(id);
+      setSearchOpen(false);
+      setPeerInput('');
+      setSearchError(null);
+    };
+
+  return (
+    <View style={styles.appContent}>
+      <View style={styles.topRow}>
+        <Button title="Direct Message" onPress={() => setSearchOpen((prev) => !prev)} />
+        <Button
+          title="Global"
+          onPress={() => {
+            setConversationId('global');
+            setPeer(null);
+            setPeerInput('');
+            setSearchError(null);
+            setSearchOpen(false);
+          }}
+        />
+        <SignOutButton />
+      </View>
+      {searchOpen && (
+        <View style={styles.searchRow}>
+            <TextInput
+              value={peerInput}
+              onChangeText={(value) => {
+                setPeerInput(value);
+                setSearchError(null);
+              }}
+              placeholder="User to Message"
+              style={styles.searchInput}
+            />
+                  <Button
+                    title="Start DM"
+                    onPress={startDM}
+                  />
+            <Button
+              title="Cancel"
+              onPress={() => {
+                setSearchOpen(false);
+                setPeerInput('');
+                setSearchError(null);
+              }}
+            />
+        </View>
+      )}
+      {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
+      <View style={{ flex: 1 }}>
+        <ChatScreen conversationId={conversationId} peer={peer} displayName={displayName} />
+      </View>
+    </View>
+  );
+};
+
 export default function App(): React.JSX.Element {
   return (
     <SafeAreaProvider>
@@ -37,12 +166,7 @@ export default function App(): React.JSX.Element {
             loginMechanisms={['email']}
             signUpAttributes={['preferred_username']}
           >
-            <View style={{ flex: 1, alignSelf: 'stretch' }}>
-              <SignOutButton />
-              <View style={{ flex: 1 }}>
-                <ChatScreen />
-              </View>
-            </View>
+            <MainAppContent />
           </Authenticator>
         </Authenticator.Provider>
 
@@ -61,5 +185,39 @@ const styles = StyleSheet.create({
   },
   signOutButton: {
     alignSelf: 'flex-end',
+  },
+  topRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+    gap: 8,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+    gap: 8,
+    zIndex: 1,
+  },
+  searchInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    height: 40,
+  },
+  errorText: {
+    color: '#d32f2f',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  appContent: {
+    flex: 1,
+    alignSelf: 'stretch',
+    position: 'relative',
   },
 });

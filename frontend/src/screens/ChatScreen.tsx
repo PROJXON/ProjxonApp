@@ -6,7 +6,12 @@ import { WS_URL, API_URL } from '../config/env';
 // const WS_URL = "wss://ws.ifelse.io"
 import { useAuthenticator } from '@aws-amplify/ui-react-native';
 import Constants from 'expo-constants';
-import { fetchUserAttributes } from 'aws-amplify/auth';
+
+type ChatScreenProps = {
+  conversationId?: string | null;
+  peer?: string | null;
+  displayName: string;
+};
 
 type ChatMessage = {
   id: string;
@@ -15,7 +20,7 @@ type ChatMessage = {
   createdAt: number;
 };
 
-export default function ChatScreen(): React.JSX.Element {
+export default function ChatScreen({ conversationId, peer, displayName }: ChatScreenProps): React.JSX.Element {
   const { user } = useAuthenticator();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState<string>('');
@@ -23,8 +28,10 @@ export default function ChatScreen(): React.JSX.Element {
   const [isConnected, setIsConnected] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
-  const [displayName, setDisplayName] = React.useState<string>('anon');
-  const hasLoadedHistoryRef = React.useRef<boolean>(false);
+  const activeConversationId = React.useMemo(
+    () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
+    [conversationId]
+  );
 
   React.useEffect(() => {
     console.log('WS_URL =', WS_URL)
@@ -45,8 +52,6 @@ export default function ChatScreen(): React.JSX.Element {
       setIsConnected(true);
     };
     ws.onmessage = (event) => {
-      // Useful for debugging echo services
-      // console.log('WS message:', event.data);
       try {
         const payload = JSON.parse(event.data);
         if (payload && payload.text) {
@@ -86,33 +91,17 @@ export default function ChatScreen(): React.JSX.Element {
     };
   }, [user]);
 
-  // Load a display name from Cognito attributes
-  React.useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const attrs = await fetchUserAttributes();
-        const name =
-          (attrs.preferred_username as string | undefined) ||
-          (attrs.email as string | undefined) ||
-          (user as any)?.username ||
-          'anon';
-        if (mounted) setDisplayName(name);
-      } catch {
-        if (mounted) setDisplayName((user as any)?.username || 'anon');
-      }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [user]);
-
   // Fetch recent history from HTTP API (if configured)
   React.useEffect(() => {
     const fetchHistory = async () => {
-      if (!API_URL || hasLoadedHistoryRef.current) return;
+      if (!API_URL) return;
+      setMessages([]);
       try {
-        const res = await fetch(`${API_URL.replace(/\/$/, '')}/messages?channelId=global&limit=50`);
+        const res = await fetch(
+          `${API_URL.replace(/\/$/, '')}/messages?conversationId=${encodeURIComponent(
+            activeConversationId
+          )}&limit=50`
+        );
         if (!res.ok) return;
         const items = await res.json();
         if (Array.isArray(items)) {
@@ -126,14 +115,13 @@ export default function ChatScreen(): React.JSX.Element {
             .filter(m => m.text.length > 0)
             .sort((a, b) => b.createdAt - a.createdAt);
           setMessages(normalized);
-          hasLoadedHistoryRef.current = true;
         }
       } catch {
         // ignore fetch errors; WS will still populate
       }
     };
     fetchHistory();
-  }, [API_URL, user]);
+  }, [API_URL, activeConversationId]);
 
   const sendMessage = React.useCallback(() => {
     if (!input.trim()) return;
@@ -144,13 +132,13 @@ export default function ChatScreen(): React.JSX.Element {
     const outgoing = {
       action: 'message',
       text: input.trim(),
-      channelId: 'global',
+      conversationId: activeConversationId,
       user: displayName,
       createdAt: Date.now(),
     };
     wsRef.current.send(JSON.stringify(outgoing));
     setInput('');
-  }, [input, displayName]);
+  }, [input, displayName, activeConversationId]);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -159,7 +147,7 @@ export default function ChatScreen(): React.JSX.Element {
         behavior={Platform.select({ ios: 'padding', android: undefined })}
       >
         <View style={styles.header}>
-          <Text style={styles.title}>Global Chat</Text>
+          <Text style={styles.title}>{peer ? `DM with ${peer}` : 'Global Chat'}</Text>
           {isConnecting ? (
             <View style={styles.statusRow}>
               <ActivityIndicator size="small" />
@@ -176,14 +164,22 @@ export default function ChatScreen(): React.JSX.Element {
           data={messages}
           keyExtractor={(m) => m.id}
           inverted
-          renderItem={({ item }) => (
-            <View style={styles.message}>
-              <Text style={styles.messageUser}>
-                {(item.user ?? 'anon')}{' · '}{new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </Text>
-              <Text style={styles.messageText}>{item.text}</Text>
-            </View>
-          )}
+          renderItem={({ item }) => {
+            const timestamp = new Date(item.createdAt); 
+            const formatted = `${timestamp.toLocaleDateString()} · ${timestamp.toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}`;
+
+            return (           
+              <View style={styles.message}>
+                <Text style={styles.messageUser}>
+                  {(item.user ?? 'anon')}{' · '}{formatted}
+                </Text>
+                <Text style={styles.messageText}>{item.text}</Text>
+              </View>
+            );
+          }}
           contentContainerStyle={styles.listContent}
         />
         <View style={styles.inputRow}>
