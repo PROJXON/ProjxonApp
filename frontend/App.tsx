@@ -66,6 +66,48 @@ const MainAppContent = () => {
   const [peerInput, setPeerInput] = useState<string>('');
   const [searchError, setSearchError] = useState<string | null>(null);
 
+  const startDM = async () => {
+      const trimmed = peerInput.trim();
+      const normalizedInput = trimmed.toLowerCase();
+      const normalizedCurrent = currentUsername.trim().toLowerCase();
+      if (!trimmed || normalizedInput === normalizedCurrent) {
+        setSearchError(
+          normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username'
+        );
+        return;
+      }
+
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) {
+        setSearchError('Unable to authenticate');
+        return;
+      }
+
+      const res = await fetch(
+        `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(trimmed)}`,
+        { headers: { Authorization: `Bearer ${idToken}` } }
+      );
+      if (res.status === 404) {
+        setSearchError('No such user!');
+        return;
+      }
+
+      const data = await res.json();
+      const canonical = (data.preferred_username ?? data.email ?? data.username ?? trimmed).trim();
+      const normalizedCanonical = canonical.toLowerCase();
+      if (normalizedCanonical === normalizedCurrent) {
+        setSearchError('Not you silly!');
+        return;
+      }
+      const id = [normalizedCurrent, normalizedCanonical].sort().join('#');
+      setPeer(canonical);
+      setConversationId(id);
+      setSearchOpen(false);
+      setPeerInput('');
+      setSearchError(null);
+    };
+
   return (
     <View style={styles.appContent}>
       <View style={styles.topRow}>
@@ -95,47 +137,7 @@ const MainAppContent = () => {
             />
                   <Button
                     title="Start DM"
-                    onPress={async () => {
-                      const trimmed = peerInput.trim();
-                      const normalizedInput = trimmed.toLowerCase();
-                      const normalizedCurrent = currentUsername.trim().toLowerCase();
-                      if (!trimmed || normalizedInput === normalizedCurrent) {
-                        setSearchError(
-                          normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username'
-                        );
-                        return;
-                      }
-
-                      const { tokens } = await fetchAuthSession();
-                      const idToken = tokens?.idToken?.toString();
-                      if (!idToken) {
-                        setSearchError('Unable to authenticate');
-                        return;
-                      }
-
-                      const res = await fetch(
-                        `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(trimmed)}`,
-                        { headers: { Authorization: `Bearer ${idToken}` } }
-                      );
-                      if (res.status === 404) {
-                        setSearchError('No such user!');
-                        return;
-                      }
-
-                      const data = await res.json();
-                      const canonical = (data.preferred_username ?? data.email ?? data.username ?? trimmed).trim();
-                      const normalizedCanonical = canonical.toLowerCase();
-                      if (normalizedCanonical === normalizedCurrent) {
-                        setSearchError('Not you silly!');
-                        return;
-                      }
-                      const id = [normalizedCurrent, normalizedCanonical].sort().join('#');
-                      setPeer(canonical);
-                      setConversationId(id);
-                      setSearchOpen(false);
-                      setPeerInput('');
-                      setSearchError(null);
-                    }}
+                    onPress={startDM}
                   />
             <Button
               title="Cancel"
