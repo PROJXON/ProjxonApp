@@ -7,6 +7,9 @@ import ChatScreen from './src/screens/ChatScreen';
 import { Amplify } from "aws-amplify";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react-native";
 import { fetchUserAttributes } from 'aws-amplify/auth';
+import { fetchAuthSession } from '@aws-amplify/auth';
+import { API_URL } from './src/config/env';
+
 
 import 'react-native-get-random-values'
 import 'react-native-url-polyfill/auto'
@@ -92,19 +95,42 @@ const MainAppContent = () => {
             />
                   <Button
                     title="Start DM"
-                    onPress={() => {
+                    onPress={async () => {
                       const trimmed = peerInput.trim();
                       const normalizedInput = trimmed.toLowerCase();
                       const normalizedCurrent = currentUsername.trim().toLowerCase();
-                      console.log(normalizedCurrent, normalizedInput)
                       if (!trimmed || normalizedInput === normalizedCurrent) {
                         setSearchError(
                           normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username'
                         );
                         return;
                       }
-                      const id = [normalizedCurrent, normalizedInput].sort().join('#');
-                      setPeer(trimmed);
+
+                      const { tokens } = await fetchAuthSession();
+                      const idToken = tokens?.idToken?.toString();
+                      if (!idToken) {
+                        setSearchError('Unable to authenticate');
+                        return;
+                      }
+
+                      const res = await fetch(
+                        `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(trimmed)}`,
+                        { headers: { Authorization: `Bearer ${idToken}` } }
+                      );
+                      if (res.status === 404) {
+                        setSearchError('No such user!');
+                        return;
+                      }
+
+                      const data = await res.json();
+                      const canonical = (data.preferred_username ?? data.email ?? data.username ?? trimmed).trim();
+                      const normalizedCanonical = canonical.toLowerCase();
+                      if (normalizedCanonical === normalizedCurrent) {
+                        setSearchError('Not you silly!');
+                        return;
+                      }
+                      const id = [normalizedCurrent, normalizedCanonical].sort().join('#');
+                      setPeer(canonical);
                       setConversationId(id);
                       setSearchOpen(false);
                       setPeerInput('');
