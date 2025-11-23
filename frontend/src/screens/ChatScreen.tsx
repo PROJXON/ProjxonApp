@@ -52,8 +52,6 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       setIsConnected(true);
     };
     ws.onmessage = (event) => {
-      // Useful for debugging echo services
-      // console.log('WS message:', event.data);
       try {
         const payload = JSON.parse(event.data);
         if (payload && payload.text) {
