@@ -9,6 +9,7 @@ import Constants from 'expo-constants';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { decryptChatMessageV1, encryptChatMessageV1, EncryptedChatPayloadV1, derivePublicKey, loadKeyPair } from '../../utils/crypto';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type ChatScreenProps = {
   conversationId?: string | null;
@@ -42,8 +43,14 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
   const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
   const [peerPublicKey, setPeerPublicKey] = React.useState<string | null>(null);
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
-  const [peerReadUpTo, setPeerReadUpTo] = React.useState<number | null>(null);
-  const lastReadSentRef = React.useRef<number>(0);
+  const [cipherOpen, setCipherOpen] = React.useState(false);
+  const [cipherText, setCipherText] = React.useState<string>('');
+  // Per-message "Seen" state for outgoing messages (keyed by message createdAt ms)
+  const [peerSeenAtByCreatedAt, setPeerSeenAtByCreatedAt] = React.useState<Record<string, number>>(
+    {}
+  ); // createdAt(ms) -> readAt(sec)
+  const [mySeenAtByCreatedAt, setMySeenAtByCreatedAt] = React.useState<Record<string, number>>({});
+  const pendingReadCreatedAtRef = React.useRef<number>(0);
   const [nowSec, setNowSec] = React.useState<number>(() => Math.floor(Date.now() / 1000));
   const TTL_OPTIONS = React.useMemo(
     () => [
@@ -68,6 +75,105 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     [conversationId]
   );
   const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+
+  // Reset per-conversation read bookkeeping
+  React.useEffect(() => {
+    pendingReadCreatedAtRef.current = 0;
+    setPeerSeenAtByCreatedAt({});
+  }, [activeConversationId]);
+
+  // Fetch persisted read state so "Seen" works even if sender was offline when peer decrypted.
+  React.useEffect(() => {
+    (async () => {
+      if (!API_URL || !isDm) {
+        setPeerSeenAtByCreatedAt({});
+        return;
+      }
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const res = await fetch(
+          `${API_URL.replace(/\/$/, '')}/reads?conversationId=${encodeURIComponent(activeConversationId)}`,
+          { headers: { Authorization: `Bearer ${idToken}` } }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        // Expected shape (new): { reads: [{ user: string, messageCreatedAt: number, readAt: number }] }
+        // Backward compat: accept { readUpTo } as a messageCreatedAt.
+        const reads = Array.isArray(data.reads) ? data.reads : [];
+        const map: Record<string, number> = {};
+        for (const r of reads) {
+          if (!r || typeof r.user !== 'string' || r.user === displayName) continue;
+          const mc = Number(r.messageCreatedAt ?? r.readUpTo);
+          const ra = Number(r.readAt);
+          if (!Number.isFinite(mc) || !Number.isFinite(ra)) continue;
+          const key = String(mc);
+          map[key] = Math.max(map[key] ?? 0, ra);
+        }
+        setPeerSeenAtByCreatedAt(map);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [API_URL, isDm, activeConversationId, displayName]);
+
+  React.useEffect(() => {
+    setMySeenAtByCreatedAt({});
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(`chat:seen:${activeConversationId}`);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          setMySeenAtByCreatedAt(parsed);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem(
+          `chat:seen:${activeConversationId}`,
+          JSON.stringify(mySeenAtByCreatedAt)
+        );
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId, mySeenAtByCreatedAt]);
+
+  // Persist autoDecrypt per-conversation so users don't need to keep re-enabling it after relogin.
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const key = `chat:autoDecrypt:${activeConversationId}`;
+        const v = await AsyncStorage.getItem(key);
+        if (v === '1') setAutoDecrypt(true);
+        if (v === '0') setAutoDecrypt(false);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const key = `chat:autoDecrypt:${activeConversationId}`;
+        await AsyncStorage.setItem(key, autoDecrypt ? '1' : '0');
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId, autoDecrypt]);
 
   // ttlIdx is UI state for the disappearing-message setting.
 
@@ -156,18 +262,30 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     [myPrivateKey, myPublicKey, peerPublicKey]
   );
 
+  const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
+    setMySeenAtByCreatedAt((prev) => ({
+      ...prev,
+      [String(messageCreatedAt)]: Math.max(prev[String(messageCreatedAt)] ?? 0, readAt),
+    }));
+  }, []);
+
   const sendReadReceipt = React.useCallback(
-    (readUpTo: number) => {
+    (messageCreatedAt: number) => {
       if (!isDm) return;
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-      if (readUpTo <= lastReadSentRef.current) return;
-      lastReadSentRef.current = readUpTo;
+      // If WS isn't ready yet (common right after login), queue and flush on connect.
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        pendingReadCreatedAtRef.current = Math.max(pendingReadCreatedAtRef.current, messageCreatedAt);
+        return;
+      }
       wsRef.current.send(
         JSON.stringify({
           action: 'read',
           conversationId: activeConversationId,
           user: displayName,
-          readUpTo,
+          // New: per-message read receipt
+          messageCreatedAt,
+          // Backward compat: older backend treats readUpTo as a single value
+          readUpTo: messageCreatedAt,
           readAt: Math.floor(Date.now() / 1000),
           createdAt: Date.now(),
         })
@@ -175,6 +293,15 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     },
     [isDm, activeConversationId, displayName]
   );
+
+  const flushPendingRead = React.useCallback(() => {
+    if (!isDm) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const pending = pendingReadCreatedAtRef.current;
+    if (!pending) return;
+    pendingReadCreatedAtRef.current = 0;
+    sendReadReceipt(pending);
+  }, [isDm, sendReadReceipt]);
 
   const refreshMyKeys = React.useCallback(async (sub: string) => {
     const kp = await loadKeyPair(sub);
@@ -229,29 +356,51 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
   // Auto-decrypt pass: whenever enabled and keys are ready, decrypt any encrypted messages once.
   React.useEffect(() => {
     if (!autoDecrypt || !myPrivateKey) return;
+    const needsDecrypt = messages.some(
+      (m) => m.encrypted && !m.decryptedText && !m.decryptFailed
+    );
+    if (!needsDecrypt) return;
+
     let maxReadUpTo = 0;
     const readAt = Math.floor(Date.now() / 1000);
-    setMessages((prev) =>
-      prev.map((m) => {
-        if (!m.encrypted || m.decryptedText || m.decryptFailed) return m;
-        try {
-          const plaintext = decryptForDisplay(m);
-          const isFromMe = !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
-          if (!isFromMe) {
-            maxReadUpTo = Math.max(maxReadUpTo, m.createdAt);
-            // TTL-from-read: start countdown only after successful decrypt (read).
-            const expiresAt =
-              m.ttlSeconds && m.ttlSeconds > 0 ? readAt + m.ttlSeconds : m.expiresAt;
-            return { ...m, decryptedText: plaintext, text: plaintext, expiresAt };
-          }
-          return { ...m, decryptedText: plaintext, text: plaintext };
-        } catch {
-          return { ...m, decryptFailed: true };
+    let changed = false;
+
+    const nextMessages = messages.map((m) => {
+      if (!m.encrypted || m.decryptedText || m.decryptFailed) return m;
+      const isFromMe = !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
+      if (isFromMe && !peerPublicKey) return m; // wait for peer key
+      try {
+        const plaintext = decryptForDisplay(m);
+        changed = true;
+        if (!isFromMe) {
+          maxReadUpTo = Math.max(maxReadUpTo, m.createdAt);
+          const expiresAt =
+            m.ttlSeconds && m.ttlSeconds > 0 ? readAt + m.ttlSeconds : m.expiresAt;
+          markMySeen(m.createdAt, readAt);
+          return { ...m, decryptedText: plaintext, text: plaintext, expiresAt };
         }
-      })
-    );
-    if (maxReadUpTo) sendReadReceipt(maxReadUpTo);
-  }, [autoDecrypt, myPrivateKey, decryptForDisplay, myPublicKey, sendReadReceipt]);
+        markMySeen(m.createdAt, readAt);
+        return { ...m, decryptedText: plaintext, text: plaintext };
+      } catch {
+        changed = true;
+        return { ...m, decryptFailed: true };
+      }
+    });
+
+    if (changed) {
+      setMessages(nextMessages);
+      if (maxReadUpTo) sendReadReceipt(maxReadUpTo);
+    }
+  }, [
+    autoDecrypt,
+    myPrivateKey,
+    decryptForDisplay,
+    myPublicKey,
+    sendReadReceipt,
+    markMySeen,
+    messages,
+    peerPublicKey,
+  ]);
 
   React.useEffect(() => {
     (async () => {
@@ -311,57 +460,73 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     ws.onopen = () => {
       setIsConnecting(false);
       setIsConnected(true);
+      flushPendingRead();
     };
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
         // Read receipt events (broadcast by backend)
         if (payload && payload.type === 'read' && payload.conversationId === activeConversationId) {
-          if (payload.user && payload.user !== displayName && typeof payload.readUpTo === 'number') {
-            setPeerReadUpTo((prev) => Math.max(prev ?? 0, payload.readUpTo));
-          }
-          // TTL-from-read for outgoing messages: when peer reads, start countdown for any of our
-          // messages up to readUpTo (requires ttlSeconds to be present on those messages).
-          if (payload.user && payload.user !== displayName && typeof payload.readUpTo === 'number') {
-            const readAt = typeof payload.readAt === 'number' ? payload.readAt : Math.floor(Date.now() / 1000);
-            setMessages((prev) =>
-              prev.map((m) => {
-                const isEncryptedOutgoing =
-                  !!m.encrypted && !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
-                const isPlainOutgoing = !m.encrypted && (m.user ?? 'anon') === displayName;
-                const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
-                if (!isOutgoing) return m;
-                if (m.createdAt > payload.readUpTo) return m;
-                if (m.expiresAt) return m;
-                if (!m.ttlSeconds || m.ttlSeconds <= 0) return m;
-                return { ...m, expiresAt: readAt + m.ttlSeconds };
-              })
-            );
+          if (payload.user && payload.user !== displayName) {
+            const readAt =
+              typeof payload.readAt === 'number' ? payload.readAt : Math.floor(Date.now() / 1000);
+            // New: per-message receipt (messageCreatedAt). Backward compat: treat readUpTo as a messageCreatedAt.
+            const messageCreatedAt =
+              typeof payload.messageCreatedAt === 'number'
+                ? payload.messageCreatedAt
+                : (typeof payload.readUpTo === 'number' ? payload.readUpTo : undefined);
+
+            if (typeof messageCreatedAt === 'number') {
+              setPeerSeenAtByCreatedAt((prev) => ({
+                ...prev,
+                [String(messageCreatedAt)]: Math.max(prev[String(messageCreatedAt)] ?? 0, readAt),
+              }));
+
+              // TTL-from-read for outgoing messages: start countdown for that specific message (if it has ttlSeconds).
+              setMessages((prev) =>
+                prev.map((m) => {
+                  const isEncryptedOutgoing =
+                    !!m.encrypted && !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
+                  const isPlainOutgoing = !m.encrypted && (m.user ?? 'anon') === displayName;
+                  const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
+                  if (!isOutgoing) return m;
+                  if (m.createdAt !== messageCreatedAt) return m;
+                  if (m.expiresAt) return m;
+                  if (!m.ttlSeconds || m.ttlSeconds <= 0) return m;
+                  return { ...m, expiresAt: readAt + m.ttlSeconds };
+                })
+              );
+            }
           }
           return;
         }
         if (payload && payload.text) {
           const rawText = String(payload.text);
           const encrypted = parseEncrypted(rawText);
+          const createdAt = Number(payload.createdAt || Date.now());
+          const stableId =
+            (payload.messageId && String(payload.messageId)) ||
+            (payload.id && String(payload.id)) ||
+            `${createdAt}-${Math.random().toString(36).slice(2)}`;
           const msg: ChatMessage = {
-            id: payload.id || `${payload.createdAt || Date.now()}`,
+            id: stableId,
             user: payload.user,
             rawText,
             encrypted: encrypted ?? undefined,
-            text: encrypted ? 'Encrypted message (tap to decrypt)' : rawText,
-            createdAt: Number(payload.createdAt || Date.now()),
+            text: encrypted ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)' : rawText,
+            createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
             ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
           };
-          setMessages((prev) => [msg, ...prev]);
+          setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
         }
       } catch {
         const msg: ChatMessage = {
-          id: `${Date.now()}`,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           text: String(event.data),
           createdAt: Date.now(),
         };
-        setMessages((prev) => [msg, ...prev]);
+        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
       }
     };
     ws.onerror = (e: any) => {
@@ -381,7 +546,7 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       ws.close();
       wsRef.current = null;
     };
-  }, [user]);
+  }, [user, flushPendingRead]);
 
   // Fetch recent history from HTTP API (if configured)
   React.useEffect(() => {
@@ -399,12 +564,12 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
         if (Array.isArray(items)) {
           const normalized = items
             .map((it: any) => ({
-              id: String(it.messageId ?? it.createdAt ?? Date.now()),
+              id: String(it.messageId ?? `${it.createdAt ?? Date.now()}-${Math.random().toString(36).slice(2)}`),
               user: it.user ?? 'anon',
               rawText: String(it.text ?? ''),
               encrypted: parseEncrypted(String(it.text ?? '')) ?? undefined,
               text: parseEncrypted(String(it.text ?? ''))
-                ? 'Encrypted message (tap to decrypt)'
+                ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)'
                 : String(it.text ?? ''),
               createdAt: Number(it.createdAt ?? Date.now()),
               expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
@@ -412,7 +577,10 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
             }))
             .filter(m => m.text.length > 0)
             .sort((a, b) => b.createdAt - a.createdAt);
-          setMessages(normalized);
+          // Deduplicate by id (history may overlap with WS delivery)
+          const seen = new Set<string>();
+          const deduped = normalized.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+          setMessages(deduped);
         }
       } catch {
         // ignore fetch errors; WS will still populate
@@ -490,6 +658,7 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
           )
         );
         if (!isFromMe) sendReadReceipt(msg.createdAt);
+      if (!isFromMe) markMySeen(msg.createdAt, readAt);
       } catch (e: any) {
         Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
       }
@@ -497,21 +666,22 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     [decryptForDisplay, myPublicKey, sendReadReceipt]
   );
 
-  const lastSeenOutgoingId = React.useMemo(() => {
-    if (!isDm || peerReadUpTo == null) return null;
-    let best: { id: string; createdAt: number } | null = null;
-    for (const m of messages) {
-      const isEncryptedOutgoing =
-        !!m.encrypted && !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
-      const isPlainOutgoing = !m.encrypted && (m.user ?? 'anon') === displayName;
-      const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
-      if (!isOutgoing) continue;
-      if (m.createdAt <= peerReadUpTo && (!best || m.createdAt > best.createdAt)) {
-        best = { id: m.id, createdAt: m.createdAt };
-      }
-    }
-    return best?.id ?? null;
-  }, [isDm, peerReadUpTo, messages, myPublicKey, displayName]);
+  const formatSeenLabel = React.useCallback((readAtSec: number): string => {
+    const dt = new Date(readAtSec * 1000);
+    return `Seen · ${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    })}`;
+  }, []);
+
+  const getSeenLabelFor = React.useCallback(
+    (map: Record<string, number>, messageCreatedAtMs: number): string | null => {
+      const readAtSec = map[String(messageCreatedAtMs)];
+      if (!readAtSec) return null;
+      return formatSeenLabel(readAtSec);
+    },
+    [formatSeenLabel]
+  );
 
   const summarize = React.useCallback(async () => {
     if (!API_URL) {
@@ -579,6 +749,7 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       >
         <View style={styles.header}>
           <Text style={styles.title}>{peer ? `DM with ${peer}` : 'Global Chat'}</Text>
+          <Text style={styles.welcomeText}>{`Welcome ${displayName}!`}</Text>
           {isDm ? (
             <View style={styles.decryptRow}>
               <Text style={styles.decryptLabel}>Auto-decrypt</Text>
@@ -627,16 +798,35 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
             const expiresIn =
               isDm && typeof item.expiresAt === 'number' ? item.expiresAt - nowSec : null;
 
+          const isEncryptedOutgoing =
+            !!item.encrypted && !!myPublicKey && item.encrypted.senderPublicKey === myPublicKey;
+          const isPlainOutgoing = !item.encrypted && (item.user ?? 'anon') === displayName;
+          const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
+          const outgoingSeenLabel = isDm
+            ? getSeenLabelFor(peerSeenAtByCreatedAt, item.createdAt)
+            : null;
+          const incomingSeenLabel = isDm
+            ? getSeenLabelFor(mySeenAtByCreatedAt, item.createdAt)
+            : null;
+          const seenLabel = isOutgoing ? outgoingSeenLabel : incomingSeenLabel;
+
             return (           
-              <Pressable onPress={() => onPressMessage(item)}>
+              <Pressable
+                onPress={() => onPressMessage(item)}
+                onLongPress={() => {
+                  if (!item.encrypted) return;
+                  setCipherText(item.rawText ?? '');
+                  setCipherOpen(true);
+                }}
+              >
                 <View style={styles.message}>
                   <Text style={styles.messageUser}>
                     {(item.user ?? 'anon')}{' · '}{formatted}
                     {expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''}
                   </Text>
                   <Text style={styles.messageText}>{item.text}</Text>
-                  {isDm && lastSeenOutgoingId === item.id ? (
-                    <Text style={styles.seenText}>Seen</Text>
+                  {seenLabel ? (
+                    <Text style={styles.seenText}>{seenLabel}</Text>
                   ) : null}
                 </View>
               </Pressable>
@@ -682,6 +872,22 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
                   setSummaryText('');
                 }}
               >
+                <Text style={styles.toolBtnText}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={cipherOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.summaryModal}>
+            <Text style={styles.summaryTitle}>Encrypted payload</Text>
+            <ScrollView style={styles.summaryScroll}>
+              <Text style={styles.summaryText}>{cipherText || '(empty)'}</Text>
+            </ScrollView>
+            <View style={styles.summaryButtons}>
+              <Pressable style={styles.toolBtn} onPress={() => setCipherOpen(false)}>
                 <Text style={styles.toolBtnText}>Close</Text>
               </Pressable>
             </View>
@@ -745,6 +951,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fafafa',
   },
   title: { fontSize: 20, fontWeight: '600', color: '#222' },
+  welcomeText: { fontSize: 14, color: '#555', marginTop: 4 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
   decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
@@ -784,7 +991,14 @@ const styles = StyleSheet.create({
   },
   messageUser: { fontSize: 12, color: '#555' },
   messageText: { fontSize: 16, color: '#222', marginTop: 2 },
-  seenText: { marginTop: 6, fontSize: 12, color: '#2e7d32', fontWeight: '700' },
+  seenText: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#1976d2',
+    fontStyle: 'italic',
+    fontWeight: '600',
+    alignSelf: 'flex-end',
+  },
   inputRow: {
     flexDirection: 'row',
     padding: 12,
