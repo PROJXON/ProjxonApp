@@ -76,6 +76,14 @@ export interface BackupBlob {
   salt: string;
 }
 
+export type EncryptedChatPayloadV1 = {
+  v: 1;
+  alg: 'secp256k1-ecdh+aes-256-gcm';
+  iv: string; // hex (12 bytes)
+  ciphertext: string; // hex (ciphertext + authTag)
+  senderPublicKey: string; // hex (uncompressed or compressed)
+};
+
 const deriveBackupKey = (passphrase: string, salt: Uint8Array) =>
   pbkdf2(sha256, new TextEncoder().encode(passphrase), salt, { c: 100000, dkLen: 32 });
 
@@ -105,4 +113,48 @@ export const decryptPrivateKey = async (blob: BackupBlob, passphrase: string): P
   const cipher = gcm(key, iv);
   const decrypted = cipher.decrypt(combined);
   return bytesToHex(decrypted);
+};
+
+const deriveChatKey = (myPrivateKeyHex: string, theirPublicKeyHex: string): Uint8Array => {
+  const priv = hexToBytes(myPrivateKeyHex);
+  const pub = hexToBytes(theirPublicKeyHex);
+  // 65 bytes uncompressed when isCompressed=false
+  const shared = secp256k1.getSharedSecret(priv, pub, false);
+  // Use X coordinate (32 bytes) then hash to get 32-byte AES key
+  const x = shared.slice(1, 33);
+  return sha256(x);
+};
+
+export const encryptChatMessageV1 = (
+  plaintext: string,
+  senderPrivateKeyHex: string,
+  recipientPublicKeyHex: string
+): EncryptedChatPayloadV1 => {
+  const key = deriveChatKey(senderPrivateKeyHex, recipientPublicKeyHex);
+  const iv = getRandomBytes(12);
+  const cipher = gcm(key, iv);
+  const messageBytes = new TextEncoder().encode(plaintext);
+  const encrypted = cipher.encrypt(messageBytes); // includes authTag at end
+  const senderPublicKey = bytesToHex(secp256k1.getPublicKey(hexToBytes(senderPrivateKeyHex), false));
+  return {
+    v: 1,
+    alg: 'secp256k1-ecdh+aes-256-gcm',
+    iv: bytesToHex(iv),
+    ciphertext: bytesToHex(encrypted),
+    senderPublicKey,
+  };
+};
+
+export const decryptChatMessageV1 = (
+  payload: EncryptedChatPayloadV1,
+  recipientPrivateKeyHex: string,
+  senderPublicKeyHexOverride?: string
+): string => {
+  const theirPub = senderPublicKeyHexOverride ?? payload.senderPublicKey;
+  const key = deriveChatKey(recipientPrivateKeyHex, theirPub);
+  const iv = hexToBytes(payload.iv);
+  const combined = hexToBytes(payload.ciphertext);
+  const cipher = gcm(key, iv);
+  const decrypted = cipher.decrypt(combined);
+  return new TextDecoder().decode(decrypted);
 };
