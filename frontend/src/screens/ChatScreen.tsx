@@ -15,6 +15,7 @@ type ChatScreenProps = {
   conversationId?: string | null;
   peer?: string | null;
   displayName: string;
+  onNewDmNotification?: (conversationId: string, user: string) => void;
 };
 
 type ChatMessage = {
@@ -30,7 +31,12 @@ type ChatMessage = {
   createdAt: number;
 };
 
-export default function ChatScreen({ conversationId, peer, displayName }: ChatScreenProps): React.JSX.Element {
+export default function ChatScreen({
+  conversationId,
+  peer,
+  displayName,
+  onNewDmNotification,
+}: ChatScreenProps): React.JSX.Element {
   const { user } = useAuthenticator();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState<string>('');
@@ -465,6 +471,21 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
+        const isPayloadDm =
+          typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
+        const isDifferentConversation = payload?.conversationId !== activeConversationId;
+        const fromOtherUser =
+          typeof payload?.user === 'string' && payload.user !== displayName;
+        const hasText = typeof payload?.text === 'string';
+        if (
+          isPayloadDm &&
+          isDifferentConversation &&
+          fromOtherUser &&
+          hasText &&
+          typeof payload.conversationId === 'string'
+        ) {
+          onNewDmNotification?.(payload.conversationId, payload.user || 'someone');
+        }
         // Read receipt events (broadcast by backend)
         if (payload && payload.type === 'read' && payload.conversationId === activeConversationId) {
           if (payload.user && payload.user !== displayName) {
