@@ -1,5 +1,5 @@
 import React from 'react';
-import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
@@ -40,6 +40,9 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
   const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
   const [peerPublicKey, setPeerPublicKey] = React.useState<string | null>(null);
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
+  const [summaryOpen, setSummaryOpen] = React.useState(false);
+  const [summaryText, setSummaryText] = React.useState<string>('');
+  const [summaryLoading, setSummaryLoading] = React.useState(false);
   const activeConversationId = React.useMemo(
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
@@ -339,6 +342,64 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     [decryptForDisplay]
   );
 
+  const summarize = React.useCallback(async () => {
+    if (!API_URL) {
+      Alert.alert('AI not configured', 'API_URL is not configured.');
+      return;
+    }
+    try {
+      setSummaryLoading(true);
+      setSummaryOpen(true);
+      setSummaryText('');
+
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) throw new Error('Not authenticated');
+
+      // messages[] is newest-first (FlatList inverted), so take the most recent 50 and send oldest-first.
+      const recent = messages.slice(0, 50).slice().reverse();
+      const transcript = recent
+        .map((m) => {
+          // Only send plaintext. If message is still encrypted, skip it.
+          const raw = m.decryptedText ?? (m.encrypted ? '' : (m.rawText ?? m.text));
+          const text = raw.length > 500 ? `${raw.slice(0, 500)}…` : raw;
+          return text
+            ? {
+                user: m.user ?? 'anon',
+                text,
+                createdAt: m.createdAt,
+              }
+            : null;
+        })
+        .filter(Boolean);
+
+      const resp = await fetch(`${API_URL.replace(/\/$/, '')}/ai/summary`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          conversationId: activeConversationId,
+          peer: peer ?? null,
+          messages: transcript,
+        }),
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(`AI summary failed (${resp.status}): ${text || 'no body'}`);
+      }
+      const data = await resp.json();
+      setSummaryText(String(data.summary ?? ''));
+    } catch (e: any) {
+      Alert.alert('Summary failed', e?.message ?? 'Unknown error');
+      setSummaryOpen(false);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, [messages, activeConversationId, peer]);
+
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView
@@ -357,6 +418,11 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
               />
             </View>
           ) : null}
+          <View style={styles.toolsRow}>
+            <Pressable style={styles.toolBtn} onPress={summarize}>
+              <Text style={styles.toolBtnText}>Summarize</Text>
+            </Pressable>
+          </View>
           {isConnecting ? (
             <View style={styles.statusRow}>
               <ActivityIndicator size="small" />
@@ -407,11 +473,47 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+      <Modal visible={summaryOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.summaryModal}>
+            <Text style={styles.summaryTitle}>Summary</Text>
+            {summaryLoading ? (
+              <View style={styles.summaryLoadingRow}>
+                <ActivityIndicator />
+                <Text style={styles.summaryLoadingText}>Summarizing…</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.summaryScroll}>
+                <Text style={styles.summaryText}>
+                  {summaryText.length ? summaryText : 'No summary returned.'}
+                </Text>
+              </ScrollView>
+            )}
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={styles.toolBtn}
+                onPress={() => {
+                  setSummaryOpen(false);
+                  setSummaryText('');
+                }}
+              >
+                <Text style={styles.toolBtnText}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   safe: { flex: 1, backgroundColor: '#fff' },
   container: { flex: 1 },
   header: {
@@ -426,6 +528,9 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
   decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   decryptLabel: { fontSize: 12, color: '#555', fontWeight: '600' },
+  toolsRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
+  toolBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: '#222' },
+  toolBtnText: { color: '#fff', fontWeight: '600' },
   ok: { color: '#2e7d32' },
   err: { color: '#d32f2f' },
   error: { color: '#d32f2f', marginTop: 6 },
@@ -464,6 +569,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#1976d2',
   },
   sendTxt: { color: '#fff', fontWeight: '600' },
+
+  summaryModal: {
+    width: '88%',
+    maxHeight: '80%',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+  },
+  summaryTitle: { fontSize: 18, fontWeight: '700', marginBottom: 10, color: '#111' },
+  summaryLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  summaryLoadingText: { color: '#555', fontWeight: '600' },
+  summaryScroll: { maxHeight: 420 },
+  summaryText: { color: '#222', lineHeight: 20 },
+  summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
 });
 
 
