@@ -110,16 +110,46 @@ const MainAppContent = () => {
     privateKeyHex: string,
     passphrase: string
   ) => {
+    const t0 = Date.now();
+    console.log('encrypting backup...');
     const blob = await encryptPrivateKey(privateKeyHex, passphrase);
+    console.log('backup encrypted in', Date.now() - t0, 'ms');
     console.log('sending recovery blob', blob);
-    await fetch(`${API_URL.replace(/\/$/, '')}/users/recovery`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(blob),
-    });
+
+    const controller = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const fetchPromise = fetch(`${API_URL.replace(/\/$/, '')}/users/recovery`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(blob),
+        signal: controller.signal,
+      });
+
+      const timeoutPromise = new Promise<Response>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {
+            // ignore
+          }
+          reject(new Error('createRecovery timed out'));
+        }, 20000);
+      });
+
+      const resp = await Promise.race([fetchPromise, timeoutPromise]);
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        console.warn('createRecovery non-2xx', resp.status, text);
+        throw new Error(`createRecovery failed (${resp.status})`);
+      }
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
   };
 
   React.useEffect(() => {
@@ -127,6 +157,10 @@ const MainAppContent = () => {
 
     (async () => {
       try {
+        // reset per-user UI state on sign-in changes
+        setHasRecoveryBlob(false);
+        setProcessing(false);
+
         const attrs = await fetchUserAttributes();
         const name =
           (attrs.preferred_username as string | undefined) ||
@@ -206,6 +240,10 @@ const MainAppContent = () => {
             setHasRecoveryBlob(true);
           } catch (err) {
             console.warn('Recovery backup skipped:', err);
+          } finally {
+            // ensure the UI doesn't get stuck in "processing" for setup flow
+            setProcessing(false);
+            closePrompt();
           }
           await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
             method: 'POST',
@@ -280,9 +318,10 @@ const MainAppContent = () => {
     };
 
   const promptVisible = !!passphrasePrompt;
-  const promptLabel = hasRecoveryBlob
-    ? 'Enter your recovery passphrase'
-    : 'Create a recovery passphrase';
+  const promptLabel =
+    passphrasePrompt?.mode === 'restore'
+      ? 'Enter your recovery passphrase'
+      : 'Create a recovery passphrase';
 
   return (
     <View style={styles.appContent}>
@@ -332,7 +371,7 @@ const MainAppContent = () => {
                       {processing
                         ? (passphrasePrompt?.mode === 'restore'
                           ? 'Decrypting...'
-                          : 'Saving backup...')
+                          : 'Encrypting backup...')
                         : 'Submit'}
                     </Text>
                 </Pressable>
