@@ -1,11 +1,14 @@
 import React from 'react';
-import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
 // const WS_URL = "wss://ws.ifelse.io"
 import { useAuthenticator } from '@aws-amplify/ui-react-native';
 import Constants from 'expo-constants';
+import { fetchAuthSession } from '@aws-amplify/auth';
+import { fetchUserAttributes } from 'aws-amplify/auth';
+import { decryptChatMessageV1, encryptChatMessageV1, EncryptedChatPayloadV1, derivePublicKey, loadKeyPair } from '../../utils/crypto';
 
 type ChatScreenProps = {
   conversationId?: string | null;
@@ -17,6 +20,10 @@ type ChatMessage = {
   id: string;
   user?: string;
   text: string;
+  rawText?: string;
+  encrypted?: EncryptedChatPayloadV1;
+  decryptedText?: string;
+  decryptFailed?: boolean;
   createdAt: number;
 };
 
@@ -28,10 +35,164 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
   const [isConnected, setIsConnected] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const [myUserId, setMyUserId] = React.useState<string | null>(null);
+  const [myPrivateKey, setMyPrivateKey] = React.useState<string | null>(null);
+  const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
+  const [peerPublicKey, setPeerPublicKey] = React.useState<string | null>(null);
+  const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
   const activeConversationId = React.useMemo(
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
   );
+  const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+
+  const parseEncrypted = React.useCallback((text: string): EncryptedChatPayloadV1 | null => {
+    try {
+      const obj = JSON.parse(text);
+      if (
+        obj &&
+        obj.v === 1 &&
+        obj.alg === 'secp256k1-ecdh+aes-256-gcm' &&
+        typeof obj.iv === 'string' &&
+        typeof obj.ciphertext === 'string' &&
+        typeof obj.senderPublicKey === 'string'
+      ) {
+        return obj as EncryptedChatPayloadV1;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const decryptForDisplay = React.useCallback(
+    (msg: ChatMessage): string => {
+      if (!msg.encrypted) throw new Error('Not encrypted');
+      if (!myPrivateKey) throw new Error('Missing your private key on this device.');
+
+      const isFromMe = !!myPublicKey && msg.encrypted.senderPublicKey === myPublicKey;
+      const primaryTheirPub = isFromMe
+        ? (peerPublicKey ?? msg.encrypted.senderPublicKey)
+        : msg.encrypted.senderPublicKey;
+
+      try {
+        return decryptChatMessageV1(msg.encrypted, myPrivateKey, primaryTheirPub);
+      } catch (e) {
+        if (peerPublicKey && peerPublicKey !== primaryTheirPub) {
+          return decryptChatMessageV1(msg.encrypted, myPrivateKey, peerPublicKey);
+        }
+        throw e;
+      }
+    },
+    [myPrivateKey, myPublicKey, peerPublicKey]
+  );
+
+  const refreshMyKeys = React.useCallback(async (sub: string) => {
+    const kp = await loadKeyPair(sub);
+    setMyPrivateKey(kp?.privateKey ?? null);
+    setMyPublicKey(kp?.privateKey ? derivePublicKey(kp.privateKey) : null);
+  }, []);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const attrs = await fetchUserAttributes();
+        const sub = attrs.sub as string | undefined;
+        if (sub) {
+          setMyUserId(sub);
+          await refreshMyKeys(sub);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, [user]);
+
+  // If ChatScreen mounts before App.tsx finishes generating/storing keys, retry a few times.
+  React.useEffect(() => {
+    if (!myUserId || myPrivateKey) return;
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 20; // ~10s
+    const tick = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      try {
+        const kp = await loadKeyPair(myUserId);
+        if (kp?.privateKey) {
+          setMyPrivateKey(kp.privateKey);
+          setMyPublicKey(derivePublicKey(kp.privateKey));
+          return;
+        }
+      } catch {
+        // ignore
+      }
+      if (!cancelled && !myPrivateKey && attempts < maxAttempts) {
+        setTimeout(tick, 500);
+      }
+    };
+    tick();
+    return () => {
+      cancelled = true;
+    };
+  }, [myUserId, myPrivateKey]);
+
+  // Auto-decrypt pass: whenever enabled and keys are ready, decrypt any encrypted messages once.
+  React.useEffect(() => {
+    if (!autoDecrypt || !myPrivateKey) return;
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (!m.encrypted || m.decryptedText || m.decryptFailed) return m;
+        try {
+          const plaintext = decryptForDisplay(m);
+          return { ...m, decryptedText: plaintext, text: plaintext };
+        } catch {
+          return { ...m, decryptFailed: true };
+        }
+      })
+    );
+  }, [autoDecrypt, myPrivateKey, decryptForDisplay]);
+
+  React.useEffect(() => {
+    (async () => {
+      if (!peer || !API_URL || !isDm) {
+        setPeerPublicKey(null);
+        return;
+      }
+      // Clear any previously cached key so we don't encrypt to the wrong recipient if peer changes.
+      setPeerPublicKey(null);
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const controller = new AbortController();
+        const currentPeer = peer;
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const cleanup = () => clearTimeout(timeoutId);
+        const res = await fetch(
+          `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(peer)}`,
+          { headers: { Authorization: `Bearer ${idToken}` }, signal: controller.signal }
+        );
+        cleanup();
+        if (!res.ok) {
+          setPeerPublicKey(null);
+          return;
+        }
+        const data = await res.json();
+        const pk =
+          (data.public_key as string | undefined) ||
+          (data.publicKey as string | undefined) ||
+          (data['custom:public_key'] as string | undefined) ||
+          (data.custom_public_key as string | undefined);
+        // Only apply if peer hasn't changed mid-request
+        if (currentPeer === peer) {
+          setPeerPublicKey(typeof pk === 'string' && pk.length > 0 ? pk : null);
+        }
+      } catch {
+        setPeerPublicKey(null);
+      }
+    })();
+  }, [peer, isDm, API_URL, activeConversationId]);
 
   React.useEffect(() => {
     console.log('WS_URL =', WS_URL)
@@ -55,10 +216,14 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       try {
         const payload = JSON.parse(event.data);
         if (payload && payload.text) {
+          const rawText = String(payload.text);
+          const encrypted = parseEncrypted(rawText);
           const msg: ChatMessage = {
             id: payload.id || `${payload.createdAt || Date.now()}`,
             user: payload.user,
-            text: String(payload.text),
+            rawText,
+            encrypted: encrypted ?? undefined,
+            text: encrypted ? 'Encrypted message (tap to decrypt)' : rawText,
             createdAt: Number(payload.createdAt || Date.now()),
           };
           setMessages((prev) => [msg, ...prev]);
@@ -109,7 +274,11 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
             .map((it: any) => ({
               id: String(it.messageId ?? it.createdAt ?? Date.now()),
               user: it.user ?? 'anon',
-              text: String(it.text ?? ''),
+              rawText: String(it.text ?? ''),
+              encrypted: parseEncrypted(String(it.text ?? '')) ?? undefined,
+              text: parseEncrypted(String(it.text ?? ''))
+                ? 'Encrypted message (tap to decrypt)'
+                : String(it.text ?? ''),
               createdAt: Number(it.createdAt ?? Date.now()),
             }))
             .filter(m => m.text.length > 0)
@@ -129,16 +298,46 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       setError('Not connected');
       return;
     }
+    let outgoingText = input.trim();
+    if (isDm) {
+      if (!myPrivateKey) {
+        Alert.alert('Encryption not ready', 'Missing your private key on this device.');
+        return;
+      }
+      if (!peerPublicKey) {
+        Alert.alert('Encryption not ready', "Can't find the recipient's public key.");
+        return;
+      }
+      const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
+      outgoingText = JSON.stringify(enc);
+    }
     const outgoing = {
       action: 'message',
-      text: input.trim(),
+      text: outgoingText,
       conversationId: activeConversationId,
       user: displayName,
       createdAt: Date.now(),
     };
     wsRef.current.send(JSON.stringify(outgoing));
     setInput('');
-  }, [input, displayName, activeConversationId]);
+  }, [input, displayName, activeConversationId, isDm, myPrivateKey, peerPublicKey]);
+
+  const onPressMessage = React.useCallback(
+    (msg: ChatMessage) => {
+      if (!msg.encrypted) return;
+      try {
+        const plaintext = decryptForDisplay(msg);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msg.id ? { ...m, decryptedText: plaintext, text: plaintext } : m
+          )
+        );
+      } catch (e: any) {
+        Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
+      }
+    },
+    [decryptForDisplay]
+  );
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -148,6 +347,16 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       >
         <View style={styles.header}>
           <Text style={styles.title}>{peer ? `DM with ${peer}` : 'Global Chat'}</Text>
+          {isDm ? (
+            <View style={styles.decryptRow}>
+              <Text style={styles.decryptLabel}>Auto-decrypt</Text>
+              <Switch
+                value={autoDecrypt}
+                onValueChange={setAutoDecrypt}
+                disabled={!myPrivateKey}
+              />
+            </View>
+          ) : null}
           {isConnecting ? (
             <View style={styles.statusRow}>
               <ActivityIndicator size="small" />
@@ -172,12 +381,14 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
             })}`;
 
             return (           
-              <View style={styles.message}>
-                <Text style={styles.messageUser}>
-                  {(item.user ?? 'anon')}{' · '}{formatted}
-                </Text>
-                <Text style={styles.messageText}>{item.text}</Text>
-              </View>
+              <Pressable onPress={() => onPressMessage(item)}>
+                <View style={styles.message}>
+                  <Text style={styles.messageUser}>
+                    {(item.user ?? 'anon')}{' · '}{formatted}
+                  </Text>
+                  <Text style={styles.messageText}>{item.text}</Text>
+                </View>
+              </Pressable>
             );
           }}
           contentContainerStyle={styles.listContent}
@@ -213,6 +424,8 @@ const styles = StyleSheet.create({
   title: { fontSize: 20, fontWeight: '600', color: '#222' },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
+  decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
+  decryptLabel: { fontSize: 12, color: '#555', fontWeight: '600' },
   ok: { color: '#2e7d32' },
   err: { color: '#d32f2f' },
   error: { color: '#d32f2f', marginTop: 6 },

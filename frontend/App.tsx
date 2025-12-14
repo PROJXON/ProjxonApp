@@ -171,6 +171,27 @@ const MainAppContent = () => {
         if (mounted) setDisplayName(name);
 
         let keyPair = await loadKeyPair(userId);
+        // If a keypair exists locally, ensure it's internally consistent.
+        // (We previously had cases where a stale Cognito public key was stored alongside a different private key.)
+        if (keyPair) {
+          const derivedPublicKey = derivePublicKey(keyPair.privateKey);
+          if (derivedPublicKey !== keyPair.publicKey) {
+            console.warn('Local keypair mismatch: fixing public key from private key');
+            keyPair = { ...keyPair, publicKey: derivedPublicKey };
+            await storeKeyPair(userId, keyPair);
+            const token = (await fetchAuthSession()).tokens?.idToken?.toString();
+            if (token) {
+              await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ publicKey: derivedPublicKey }),
+              });
+            }
+          }
+        }
         if (!keyPair) {
           const token = (await fetchAuthSession()).tokens?.idToken?.toString();
           console.log('token', token);
@@ -199,12 +220,25 @@ const MainAppContent = () => {
 
                 try {
                   const restoredPrivateKey = await decryptPrivateKey(blob, passphrase);
+                  const derivedPublicKey = derivePublicKey(restoredPrivateKey);
                   keyPair = {
                     privateKey: restoredPrivateKey,
-                    publicKey:
-                      attrs['custom:public_key'] || derivePublicKey(restoredPrivateKey),
+                    // IMPORTANT: always derive from the recovered private key to avoid
+                    // mismatches with a stale Cognito public key.
+                    publicKey: derivedPublicKey,
                   };
                   await storeKeyPair(userId, keyPair);
+                  // Ensure Cognito has the matching public key so other devices encrypt to the right key.
+                  if (token) {
+                    await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
+                      method: 'POST',
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                      },
+                      body: JSON.stringify({ publicKey: derivedPublicKey }),
+                    });
+                  }
                   recovered = true;
                   closePrompt();
                 } catch (err) {
