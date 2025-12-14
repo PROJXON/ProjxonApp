@@ -24,6 +24,7 @@ type ChatMessage = {
   encrypted?: EncryptedChatPayloadV1;
   decryptedText?: string;
   decryptFailed?: boolean;
+  expiresAt?: number; // epoch seconds
   createdAt: number;
 };
 
@@ -40,6 +41,21 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
   const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
   const [peerPublicKey, setPeerPublicKey] = React.useState<string | null>(null);
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
+  const TTL_OPTIONS = React.useMemo(
+    () => [
+      { label: 'Off', seconds: 0 },
+      { label: '5 min', seconds: 5 * 60 },
+      { label: '30 min', seconds: 30 * 60 },
+      { label: '1 hour', seconds: 60 * 60 },
+      { label: '6 hours', seconds: 6 * 60 * 60 },
+      { label: '1 day', seconds: 24 * 60 * 60 },
+      { label: '1 week', seconds: 7 * 24 * 60 * 60 },
+      { label: '30 days', seconds: 30 * 24 * 60 * 60 },
+    ],
+    []
+  );
+  const [ttlIdx, setTtlIdx] = React.useState<number>(0);
+  const [ttlPickerOpen, setTtlPickerOpen] = React.useState(false);
   const [summaryOpen, setSummaryOpen] = React.useState(false);
   const [summaryText, setSummaryText] = React.useState<string>('');
   const [summaryLoading, setSummaryLoading] = React.useState(false);
@@ -228,6 +244,7 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
             encrypted: encrypted ?? undefined,
             text: encrypted ? 'Encrypted message (tap to decrypt)' : rawText,
             createdAt: Number(payload.createdAt || Date.now()),
+            expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
           };
           setMessages((prev) => [msg, ...prev]);
         }
@@ -283,6 +300,7 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
                 ? 'Encrypted message (tap to decrypt)'
                 : String(it.text ?? ''),
               createdAt: Number(it.createdAt ?? Date.now()),
+              expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
             }))
             .filter(m => m.text.length > 0)
             .sort((a, b) => b.createdAt - a.createdAt);
@@ -294,6 +312,16 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     };
     fetchHistory();
   }, [API_URL, activeConversationId]);
+
+  // Client-side hiding of expired DM messages (server-side TTL still required for real deletion).
+  React.useEffect(() => {
+    if (!isDm) return;
+    const interval = setInterval(() => {
+      const nowSec = Math.floor(Date.now() / 1000);
+      setMessages((prev) => prev.filter((m) => !(m.expiresAt && m.expiresAt <= nowSec)));
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [isDm]);
 
   const sendMessage = React.useCallback(() => {
     if (!input.trim()) return;
@@ -320,10 +348,16 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       conversationId: activeConversationId,
       user: displayName,
       createdAt: Date.now(),
+      // Optional TTL (backend must support + DynamoDB TTL enabled). Only set for DMs.
+      // NOTE: This is TTL-from-send. TTL-from-read would require read receipts + server-side state.
+      expiresAt:
+        isDm && TTL_OPTIONS[ttlIdx]?.seconds
+          ? Math.floor((Date.now() + TTL_OPTIONS[ttlIdx].seconds * 1000) / 1000)
+          : undefined,
     };
     wsRef.current.send(JSON.stringify(outgoing));
     setInput('');
-  }, [input, displayName, activeConversationId, isDm, myPrivateKey, peerPublicKey]);
+  }, [input, displayName, activeConversationId, isDm, myPrivateKey, peerPublicKey, ttlIdx, TTL_OPTIONS]);
 
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
@@ -418,6 +452,14 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
               />
             </View>
           ) : null}
+          {isDm ? (
+            <View style={styles.decryptRow}>
+              <Text style={styles.decryptLabel}>Disappearing messages</Text>
+              <Pressable style={styles.ttlChip} onPress={() => setTtlPickerOpen(true)}>
+                <Text style={styles.ttlChipText}>{TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}</Text>
+              </Pressable>
+            </View>
+          ) : null}
           <View style={styles.toolsRow}>
             <Pressable style={styles.toolBtn} onPress={summarize}>
               <Text style={styles.toolBtnText}>Summarize</Text>
@@ -503,6 +545,39 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
           </View>
         </View>
       </Modal>
+
+      <Modal visible={ttlPickerOpen} transparent animationType="fade">
+        <Pressable style={styles.modalOverlay} onPress={() => setTtlPickerOpen(false)}>
+          <Pressable style={styles.summaryModal} onPress={() => {}}>
+            <Text style={styles.summaryTitle}>Disappearing messages</Text>
+            <Text style={styles.summaryText}>
+              Messages will disappear after the selected time from when they are sent.
+            </Text>
+            <View style={{ height: 12 }} />
+            {TTL_OPTIONS.map((opt, idx) => {
+              const selected = idx === ttlIdx;
+              return (
+                <Pressable
+                  key={opt.label}
+                  style={[styles.ttlOptionRow, selected ? styles.ttlOptionRowSelected : null]}
+                  onPress={() => setTtlIdx(idx)}
+                >
+                  <Text style={styles.ttlOptionLabel}>{opt.label}</Text>
+                  <Text style={styles.ttlOptionRadio}>{selected ? '◉' : '○'}</Text>
+                </Pressable>
+              );
+            })}
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={styles.toolBtn}
+                onPress={() => setTtlPickerOpen(false)}
+              >
+                <Text style={styles.toolBtnText}>Done</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -528,6 +603,26 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
   decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   decryptLabel: { fontSize: 12, color: '#555', fontWeight: '600' },
+  ttlChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#eee',
+  },
+  ttlChipText: { fontSize: 12, color: '#333', fontWeight: '700' },
+  ttlOptionRow: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+    backgroundColor: '#f4f4f4',
+  },
+  ttlOptionRowSelected: { backgroundColor: '#e8eefc' },
+  ttlOptionLabel: { color: '#222', fontWeight: '600' },
+  ttlOptionRadio: { color: '#222', fontSize: 18, fontWeight: '800' },
   toolsRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
   toolBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: '#222' },
   toolBtnText: { color: '#fff', fontWeight: '600' },
