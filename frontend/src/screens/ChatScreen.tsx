@@ -1,4 +1,4 @@
-wheimport React from 'react';
+import React from 'react';
 import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
@@ -81,6 +81,10 @@ export default function ChatScreen({
     [conversationId]
   );
   const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+
+  const normalizeUser = React.useCallback((v: unknown): string => {
+    return String(v ?? '').trim().toLowerCase();
+  }, []);
 
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
@@ -475,7 +479,8 @@ export default function ChatScreen({
           typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
         const isDifferentConversation = payload?.conversationId !== activeConversationId;
         const fromOtherUser =
-          typeof payload?.user === 'string' && payload.user !== displayName;
+          typeof payload?.user === 'string' &&
+          normalizeUser(payload.user) !== normalizeUser(displayName);
         const hasText = typeof payload?.text === 'string';
         if (
           isPayloadDm &&

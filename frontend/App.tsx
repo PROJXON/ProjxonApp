@@ -365,8 +365,9 @@ const MainAppContent = () => {
       if (!targetConversationId) return;
       const normalizedTarget = targetConversationId;
       const names = normalizedTarget.split('#');
+      const normalizedCurrent = currentUsername.trim().toLowerCase();
       const peerName =
-        names.length === 2 ? names.find((n) => n !== currentUsername) ?? names[0] : names[0];
+        names.length === 2 ? names.find((n) => n !== normalizedCurrent) ?? names[0] : names[0];
       setConversationId(normalizedTarget);
       setPeer(peerName);
       setSearchOpen(false);
@@ -395,10 +396,7 @@ const MainAppContent = () => {
 
   React.useEffect(() => {
     if (!conversationId) return;
-    if (conversationId === 'global') {
-      setUnreadDmMap({});
-      return;
-    }
+    if (conversationId === 'global') return;
     setUnreadDmMap((prev) => {
       if (!prev[conversationId]) return prev;
       const next = { ...prev };
@@ -406,6 +404,35 @@ const MainAppContent = () => {
       return next;
     });
   }, [conversationId]);
+
+  // Hydrate unread DMs on login so the badge survives logout/login.
+  React.useEffect(() => {
+    (async () => {
+      if (!API_URL) return;
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/unreads`, {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const unread = Array.isArray(data.unread) ? data.unread : [];
+        const next: Record<string, { user: string; count: number }> = {};
+        for (const it of unread) {
+          const convId = String(it.conversationId || '');
+          if (!convId) continue;
+          const sender = String(it.sender || it.user || 'someone');
+          const count = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
+          next[convId] = { user: sender, count: Math.max(1, Math.floor(count)) };
+        }
+        setUnreadDmMap((prev) => ({ ...next, ...prev }));
+      } catch {
+        // ignore
+      }
+    })();
+  }, [API_URL, user]);
 
   const promptVisible = !!passphrasePrompt;
   const promptLabel =
