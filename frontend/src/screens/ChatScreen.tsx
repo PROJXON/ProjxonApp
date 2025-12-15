@@ -15,6 +15,7 @@ type ChatScreenProps = {
   conversationId?: string | null;
   peer?: string | null;
   displayName: string;
+  onNewDmNotification?: (conversationId: string, user: string) => void;
 };
 
 type ChatMessage = {
@@ -30,7 +31,12 @@ type ChatMessage = {
   createdAt: number;
 };
 
-export default function ChatScreen({ conversationId, peer, displayName }: ChatScreenProps): React.JSX.Element {
+export default function ChatScreen({
+  conversationId,
+  peer,
+  displayName,
+  onNewDmNotification,
+}: ChatScreenProps): React.JSX.Element {
   const { user } = useAuthenticator();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState<string>('');
@@ -75,6 +81,10 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     [conversationId]
   );
   const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+
+  const normalizeUser = React.useCallback((v: unknown): string => {
+    return String(v ?? '').trim().toLowerCase();
+  }, []);
 
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
@@ -465,6 +475,22 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
+        const isPayloadDm =
+          typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
+        const isDifferentConversation = payload?.conversationId !== activeConversationId;
+        const fromOtherUser =
+          typeof payload?.user === 'string' &&
+          normalizeUser(payload.user) !== normalizeUser(displayName);
+        const hasText = typeof payload?.text === 'string';
+        if (
+          isPayloadDm &&
+          isDifferentConversation &&
+          fromOtherUser &&
+          hasText &&
+          typeof payload.conversationId === 'string'
+        ) {
+          onNewDmNotification?.(payload.conversationId, payload.user || 'someone');
+        }
         // Read receipt events (broadcast by backend)
         if (payload && payload.type === 'read' && payload.conversationId === activeConversationId) {
           if (payload.user && payload.user !== displayName) {
@@ -554,12 +580,20 @@ export default function ChatScreen({ conversationId, peer, displayName }: ChatSc
       if (!API_URL) return;
       setMessages([]);
       try {
-        const res = await fetch(
-          `${API_URL.replace(/\/$/, '')}/messages?conversationId=${encodeURIComponent(
-            activeConversationId
-          )}&limit=50`
-        );
-        if (!res.ok) return;
+        // Some deployments protect GET /messages behind a Cognito authorizer.
+        // Include the idToken when available; harmless if the route is public.
+        const { tokens } = await fetchAuthSession().catch(() => ({ tokens: undefined }));
+        const idToken = tokens?.idToken?.toString();
+        const url = `${API_URL.replace(/\/$/, '')}/messages?conversationId=${encodeURIComponent(
+          activeConversationId
+        )}&limit=50`;
+        const res = await fetch(url, idToken ? { headers: { Authorization: `Bearer ${idToken}` } } : undefined);
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          console.warn('fetchHistory failed', res.status, text);
+          setError(`History fetch failed (${res.status})`);
+          return;
+        }
         const items = await res.json();
         if (Array.isArray(items)) {
           const normalized = items

@@ -308,6 +308,9 @@ const MainAppContent = () => {
   const [searchOpen, setSearchOpen] = useState<boolean>(false);
   const [peerInput, setPeerInput] = useState<string>('');
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [unreadDmMap, setUnreadDmMap] = useState<Record<string, { user: string; count: number }>>(
+    () => ({})
+  );
 
   const startDM = async () => {
       const trimmed = peerInput.trim();
@@ -350,6 +353,86 @@ const MainAppContent = () => {
       setPeerInput('');
       setSearchError(null);
     };
+
+  const hasUnreadDms = Object.keys(unreadDmMap).length > 0;
+  const unreadEntries = React.useMemo(
+    () => Object.entries(unreadDmMap),
+    [unreadDmMap]
+  );
+
+  const goToConversation = React.useCallback(
+    (targetConversationId: string) => {
+      if (!targetConversationId) return;
+      const normalizedTarget = targetConversationId;
+      const names = normalizedTarget.split('#');
+      const normalizedCurrent = currentUsername.trim().toLowerCase();
+      const peerName =
+        names.length === 2 ? names.find((n) => n !== normalizedCurrent) ?? names[0] : names[0];
+      setConversationId(normalizedTarget);
+      setPeer(peerName);
+      setSearchOpen(false);
+      setPeerInput('');
+      setSearchError(null);
+    },
+    [currentUsername]
+  );
+
+  const handleNewDmNotification = React.useCallback(
+    (newConversationId: string, sender: string) => {
+      setUnreadDmMap((prev) => {
+        if (!newConversationId || newConversationId === 'global') return prev;
+        if (newConversationId === conversationId) return prev;
+        const existing = prev[newConversationId];
+        const next = { ...prev };
+        next[newConversationId] = {
+          user: sender || existing?.user || 'someone',
+          count: (existing?.count ?? 0) + 1,
+        };
+        return next;
+      });
+    },
+    [conversationId]
+  );
+
+  React.useEffect(() => {
+    if (!conversationId) return;
+    if (conversationId === 'global') return;
+    setUnreadDmMap((prev) => {
+      if (!prev[conversationId]) return prev;
+      const next = { ...prev };
+      delete next[conversationId];
+      return next;
+    });
+  }, [conversationId]);
+
+  // Hydrate unread DMs on login so the badge survives logout/login.
+  React.useEffect(() => {
+    (async () => {
+      if (!API_URL) return;
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/unreads`, {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const unread = Array.isArray(data.unread) ? data.unread : [];
+        const next: Record<string, { user: string; count: number }> = {};
+        for (const it of unread) {
+          const convId = String(it.conversationId || '');
+          if (!convId) continue;
+          const sender = String(it.sender || it.user || 'someone');
+          const count = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
+          next[convId] = { user: sender, count: Math.max(1, Math.floor(count)) };
+        }
+        setUnreadDmMap((prev) => ({ ...next, ...prev }));
+      } catch {
+        // ignore
+      }
+    })();
+  }, [API_URL, user]);
 
   const promptVisible = !!passphrasePrompt;
   const promptLabel =
@@ -414,7 +497,10 @@ const MainAppContent = () => {
           </View>
         </Modal>
       <View style={styles.topRow}>
-        <Button title="Direct Message" onPress={() => setSearchOpen((prev) => !prev)} />
+        <View style={styles.dmButtonWrapper}>
+          <Button title="Direct Message" onPress={() => setSearchOpen((prev) => !prev)} />
+          {hasUnreadDms ? <View style={styles.unreadDot} /> : null}
+        </View>
         <Button
           title="Global"
           onPress={() => {
@@ -428,7 +514,8 @@ const MainAppContent = () => {
         <SignOutButton />
       </View>
       {searchOpen && (
-        <View style={styles.searchRow}>
+        <View style={styles.searchWrapper}>
+          <View style={styles.searchRow}>
             <TextInput
               value={peerInput}
               onChangeText={(value) => {
@@ -438,10 +525,10 @@ const MainAppContent = () => {
               placeholder="User to Message"
               style={styles.searchInput}
             />
-                  <Button
-                    title="Start DM"
-                    onPress={startDM}
-                  />
+            <Button
+              title="Start DM"
+              onPress={startDM}
+            />
             <Button
               title="Cancel"
               onPress={() => {
@@ -450,11 +537,33 @@ const MainAppContent = () => {
                 setSearchError(null);
               }}
             />
+          </View>
+          {unreadEntries.length ? (
+            <View style={styles.unreadList}>
+              {unreadEntries.map(([convId, info]) => (
+                <Pressable
+                  key={convId}
+                  style={styles.unreadHintWrapper}
+                  onPress={() => goToConversation(convId)}
+                >
+                  <Text style={styles.unreadHint}>
+                    {info.count} unread {info.count === 1 ? 'message' : 'messages'} from{' '}
+                    <Text style={styles.unreadHintBold}>{info.user}</Text>
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
         </View>
       )}
       {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
       <View style={{ flex: 1 }}>
-        <ChatScreen conversationId={conversationId} peer={peer} displayName={displayName} />
+        <ChatScreen
+          conversationId={conversationId}
+          peer={peer}
+          displayName={displayName}
+          onNewDmNotification={handleNewDmNotification}
+        />
       </View>
     </View>
   );
@@ -497,6 +606,20 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     gap: 8,
   },
+  dmButtonWrapper: {
+    position: 'relative',
+  },
+  unreadDot: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#d32f2f',
+    top: 6,
+    right: -6,
+    borderWidth: 1,
+    borderColor: '#fff',
+  },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -505,6 +628,10 @@ const styles = StyleSheet.create({
     gap: 8,
     zIndex: 1,
   },
+  searchWrapper: {
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
   searchInput: {
     flex: 1,
     borderWidth: 1,
@@ -512,6 +639,22 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     height: 40,
+  },
+  unreadList: {
+    paddingHorizontal: 4,
+  },
+  unreadHintWrapper: {
+    paddingVertical: 2,
+  },
+  unreadHint: {
+    color: '#555',
+    fontSize: 13,
+    marginTop: 4,
+    paddingHorizontal: 4,
+  },
+  unreadHintBold: {
+    fontWeight: '700',
+    color: '#1976d2',
   },
   errorText: {
     color: '#d32f2f',
