@@ -1,5 +1,23 @@
 import React from 'react';
-import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  AppState,
+  AppStateStatus,
+  FlatList,
+  Image,
+  KeyboardAvoidingView,
+  Linking,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
@@ -10,6 +28,66 @@ import { fetchAuthSession } from '@aws-amplify/auth';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { decryptChatMessageV1, encryptChatMessageV1, EncryptedChatPayloadV1, derivePublicKey, loadKeyPair } from '../../utils/crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import { getUrl, uploadData } from 'aws-amplify/storage';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import * as ImageManipulator from 'expo-image-manipulator';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+
+function InlineVideoThumb({
+  url,
+  onPress,
+}: {
+  url: string;
+  onPress: () => void;
+}): React.JSX.Element {
+  const player = useVideoPlayer(url, (p: any) => {
+    // Ensure we don't auto-play in the message list.
+    try {
+      p.pause();
+    } catch {}
+  });
+
+  React.useEffect(() => {
+    try {
+      player.pause();
+    } catch {}
+  }, [player]);
+
+  return (
+    <Pressable onPress={onPress}>
+      <View style={styles.videoThumbWrap}>
+        <VideoView
+          player={player}
+          style={styles.mediaThumb}
+          contentFit="cover"
+          nativeControls={false}
+        />
+        <View style={styles.videoPlayOverlay}>
+          <Text style={styles.videoPlayText}>▶</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function FullscreenVideo({ url }: { url: string }): React.JSX.Element {
+  const player = useVideoPlayer(url, (p: any) => {
+    try {
+      p.play();
+    } catch {}
+  });
+
+  return (
+    <VideoView
+      player={player}
+      style={styles.viewerVideo}
+      contentFit="contain"
+      nativeControls
+    />
+  );
+}
 
 type ChatScreenProps = {
   conversationId?: string | null;
@@ -28,7 +106,73 @@ type ChatMessage = {
   decryptFailed?: boolean;
   expiresAt?: number; // epoch seconds
   ttlSeconds?: number; // duration, seconds (TTL-from-read)
+  media?: {
+    path: string;
+    thumbPath?: string;
+    kind: 'image' | 'video' | 'file';
+    contentType?: string;
+    thumbContentType?: string;
+    fileName?: string;
+    size?: number;
+  };
   createdAt: number;
+};
+
+type ChatEnvelope = {
+  type: 'chat';
+  text?: string;
+  media?: {
+    path: string;
+    thumbPath?: string;
+    kind: 'image' | 'video' | 'file';
+    contentType?: string;
+    thumbContentType?: string;
+    fileName?: string;
+    size?: number;
+  };
+};
+
+const parseChatEnvelope = (raw: string): ChatEnvelope | null => {
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return null;
+    if (obj.type !== 'chat') return null;
+    return obj as ChatEnvelope;
+  } catch {
+    return null;
+  }
+};
+
+const guessContentTypeFromName = (name?: string): string | undefined => {
+  if (!name) return undefined;
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.m4v')) return 'video/x-m4v';
+  return undefined;
+};
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
+const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25MB (GIFs/documents)
+const THUMB_MAX_DIM = 720; // px
+const THUMB_JPEG_QUALITY = 0.85; // preview-only; original stays untouched
+
+const formatBytes = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 };
 
 export default function ChatScreen({
@@ -44,6 +188,13 @@ export default function ChatScreen({
   const [isConnected, setIsConnected] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const wsReconnectTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wsReconnectAttemptRef = React.useRef<number>(0);
+  const appStateRef = React.useRef<AppStateStatus>(AppState.currentState);
+  const activeConversationIdRef = React.useRef<string>('global');
+  const displayNameRef = React.useRef<string>('');
+  const myPublicKeyRef = React.useRef<string | null>(null);
+  const onNewDmNotificationRef = React.useRef<typeof onNewDmNotification | undefined>(undefined);
   const [myUserId, setMyUserId] = React.useState<string | null>(null);
   const [myPrivateKey, setMyPrivateKey] = React.useState<string | null>(null);
   const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
@@ -76,15 +227,366 @@ export default function ChatScreen({
   const [summaryOpen, setSummaryOpen] = React.useState(false);
   const [summaryText, setSummaryText] = React.useState<string>('');
   const [summaryLoading, setSummaryLoading] = React.useState(false);
+  const [isUploading, setIsUploading] = React.useState(false);
+  const [pendingMedia, setPendingMedia] = React.useState<{
+    uri: string;
+    kind: 'image' | 'video' | 'file';
+    contentType?: string;
+    fileName?: string;
+    size?: number;
+  } | null>(null);
+  const [mediaUrlByPath, setMediaUrlByPath] = React.useState<Record<string, string>>({});
+  const inFlightMediaUrlRef = React.useRef<Set<string>>(new Set());
+  const [imageAspectByPath, setImageAspectByPath] = React.useState<Record<string, number>>({});
+  const inFlightImageSizeRef = React.useRef<Set<string>>(new Set());
+  const [viewerOpen, setViewerOpen] = React.useState(false);
+  const [viewerMedia, setViewerMedia] = React.useState<{
+    url: string;
+    kind: 'image' | 'video' | 'file';
+    fileName?: string;
+  } | null>(null);
   const activeConversationId = React.useMemo(
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
   );
   const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
 
+  React.useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+  React.useEffect(() => {
+    displayNameRef.current = displayName;
+  }, [displayName]);
+  React.useEffect(() => {
+    myPublicKeyRef.current = myPublicKey;
+  }, [myPublicKey]);
+  React.useEffect(() => {
+    onNewDmNotificationRef.current = onNewDmNotification;
+  }, [onNewDmNotification]);
+
   const normalizeUser = React.useCallback((v: unknown): string => {
     return String(v ?? '').trim().toLowerCase();
   }, []);
+
+  // If Android kills the activity while the picker is open, we can recover the result.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const pending = await ImagePicker.getPendingResultAsync();
+        if (cancelled) return;
+        if (!pending || (pending as any).canceled) return;
+        const first = (pending as any).assets?.[0];
+        if (!first) return;
+        const kind =
+          first.type === 'video' ? 'video' : first.type === 'image' ? 'image' : 'file';
+        const fileName = (first as any).fileName as string | undefined;
+        const size = (first as any).fileSize as number | undefined;
+        setPendingMedia({
+          uri: first.uri,
+          kind,
+          contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
+          fileName,
+          size,
+        });
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const pickFromLibrary = React.useCallback(async () => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission needed', 'Please allow photo library access to pick media.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        // MediaTypeOptions is deprecated in SDK 54+. Use MediaType (or array) instead.
+        mediaTypes: ['images', 'videos'],
+        quality: 1,
+      });
+
+      if (result.canceled) return;
+      const first = result.assets?.[0];
+      if (!first) return;
+
+      const kind =
+        first.type === 'video'
+          ? 'video'
+          : first.type === 'image'
+            ? 'image'
+            : 'file';
+      const fileName = (first as any).fileName as string | undefined;
+      const size = (first as any).fileSize as number | undefined;
+
+      setPendingMedia({
+        uri: first.uri,
+        kind,
+        contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
+        fileName,
+        size,
+      });
+    } catch (e: any) {
+      Alert.alert('Picker failed', e?.message ?? 'Unknown error');
+    }
+  }, []);
+
+  const pickDocument = React.useCallback(async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const first = result.assets?.[0];
+      if (!first) return;
+
+      const fileName = first.name;
+      const contentType = first.mimeType ?? guessContentTypeFromName(fileName);
+      setPendingMedia({
+        uri: first.uri,
+        kind: contentType?.startsWith('image/')
+          ? 'image'
+          : contentType?.startsWith('video/')
+            ? 'video'
+            : 'file',
+        contentType,
+        fileName,
+        size: typeof first.size === 'number' ? first.size : undefined,
+      });
+    } catch (e: any) {
+      Alert.alert('File picker failed', e?.message ?? 'Unknown error');
+    }
+  }, []);
+
+  // Global chat attachments (DM attachments will be E2EE later)
+  const handlePickMedia = React.useCallback(() => {
+    if (isDm) {
+      Alert.alert('Not supported yet', 'Media attachments for DMs will be added with E2EE later.');
+      return;
+    }
+    Alert.alert('Attach', 'Choose a source', [
+      { text: 'Photos / Videos', onPress: () => void pickFromLibrary() },
+      { text: 'File (GIF, etc.)', onPress: () => void pickDocument() },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [isDm, pickFromLibrary, pickDocument]);
+
+  const uploadPendingMedia = React.useCallback(
+    async (
+      media: NonNullable<typeof pendingMedia>
+    ): Promise<ChatEnvelope['media']> => {
+      const declaredSize = typeof media.size === 'number' ? media.size : undefined;
+      const hardLimit =
+        media.kind === 'image' ? MAX_IMAGE_BYTES : media.kind === 'video' ? MAX_VIDEO_BYTES : MAX_FILE_BYTES;
+      if (declaredSize && declaredSize > hardLimit) {
+        throw new Error(
+          `File too large (${formatBytes(declaredSize)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
+        );
+      }
+
+      const res = await fetch(media.uri);
+      const blob = await res.blob();
+      if (blob.size > hardLimit) {
+        throw new Error(
+          `File too large (${formatBytes(blob.size)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
+        );
+      }
+
+      const safeName =
+        (media.fileName || `${media.kind}-${Date.now()}`)
+          .replace(/[^\w.\-() ]+/g, '_')
+          .slice(0, 120) || `file-${Date.now()}`;
+      // NOTE: current Amplify Storage auth policies (from amplify_outputs.json) allow `uploads/*`.
+      // Keep uploads under that prefix so authenticated users can PUT.
+      const baseKey = `${Date.now()}-${safeName}`;
+      const path = `uploads/global/${baseKey}`;
+      const thumbPath = `uploads/global/thumbs/${baseKey}.jpg`;
+
+      await uploadData({
+        path,
+        data: blob,
+        options: {
+          contentType: media.contentType,
+        },
+      }).result;
+
+      // Upload a separate thumbnail for fast list rendering (original stays full quality).
+      let uploadedThumbPath: string | undefined;
+      let uploadedThumbContentType: string | undefined;
+      if (media.kind === 'image') {
+        try {
+          const thumb = await ImageManipulator.manipulateAsync(
+            media.uri,
+            [{ resize: { width: THUMB_MAX_DIM } }],
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.JPEG }
+          );
+          const thumbRes = await fetch(thumb.uri);
+          const thumbBlob = await thumbRes.blob();
+          await uploadData({
+            path: thumbPath,
+            data: thumbBlob,
+            options: { contentType: 'image/jpeg' },
+          }).result;
+          uploadedThumbPath = thumbPath;
+          uploadedThumbContentType = 'image/jpeg';
+        } catch {
+          // ignore thumb failures; fall back to original
+        }
+      } else if (media.kind === 'video') {
+        try {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(media.uri, {
+            time: 500,
+            quality: THUMB_JPEG_QUALITY,
+          });
+          const thumbRes = await fetch(uri);
+          const thumbBlob = await thumbRes.blob();
+          await uploadData({
+            path: thumbPath,
+            data: thumbBlob,
+            options: { contentType: 'image/jpeg' },
+          }).result;
+          uploadedThumbPath = thumbPath;
+          uploadedThumbContentType = 'image/jpeg';
+        } catch {
+          // ignore thumb failures; fall back to video preview
+        }
+      }
+
+      return {
+        path,
+        ...(uploadedThumbPath ? { thumbPath: uploadedThumbPath } : {}),
+        kind: media.kind,
+        contentType: media.contentType,
+        ...(uploadedThumbContentType ? { thumbContentType: uploadedThumbContentType } : {}),
+        fileName: media.fileName,
+        size: media.size,
+      };
+    },
+    [pendingMedia]
+  );
+
+  const openMedia = React.useCallback(async (path: string) => {
+    try {
+      const { url } = await getUrl({ path });
+      await Linking.openURL(url.toString());
+    } catch (e: any) {
+      Alert.alert('Open failed', e?.message ?? 'Could not open attachment');
+    }
+  }, []);
+
+  // Lazily resolve signed URLs for any media we see in message list (Global only).
+  React.useEffect(() => {
+    if (isDm) return;
+    let cancelled = false;
+    const needed: string[] = [];
+
+    for (const m of messages) {
+      const env = !m.encrypted ? parseChatEnvelope(m.rawText ?? m.text) : null;
+      const media = env?.media ?? m.media;
+      const paths: string[] = [];
+      if (media?.path) paths.push(media.path);
+      if (media?.thumbPath) paths.push(media.thumbPath);
+      for (const path of paths) {
+        if (!path) continue;
+        if (mediaUrlByPath[path]) continue;
+        if (inFlightMediaUrlRef.current.has(path)) continue;
+        needed.push(path);
+      }
+    }
+
+    if (!needed.length) return;
+    needed.forEach((path) => inFlightMediaUrlRef.current.add(path));
+
+    (async () => {
+      const pairs: Array<[string, string]> = [];
+      for (const path of needed) {
+        try {
+          const { url } = await getUrl({ path });
+          pairs.push([path, url.toString()]);
+        } catch {
+          // ignore
+        }
+      }
+      if (cancelled) return;
+      if (pairs.length) {
+        setMediaUrlByPath((prev) => {
+          const next = { ...prev };
+          for (const [p, u] of pairs) next[p] = u;
+          return next;
+        });
+      }
+      for (const p of needed) inFlightMediaUrlRef.current.delete(p);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isDm, messages, mediaUrlByPath]);
+
+  // Lazily fetch image aspect ratios so thumbnails can render without letterboxing (and thus can be truly rounded).
+  React.useEffect(() => {
+    if (isDm) return;
+    const needed: Array<{ path: string; url: string }> = [];
+
+    for (const m of messages) {
+      const env = !m.encrypted ? parseChatEnvelope(m.rawText ?? m.text) : null;
+      const media = env?.media ?? m.media;
+      if (!media?.path) continue;
+      const looksImage =
+        media.kind === 'image' || (media.kind === 'file' && (media.contentType || '').startsWith('image/'));
+      if (!looksImage) continue;
+      const url = mediaUrlByPath[media.path];
+      if (!url) continue;
+      if (imageAspectByPath[media.path]) continue;
+      if (inFlightImageSizeRef.current.has(media.path)) continue;
+      needed.push({ path: media.path, url });
+    }
+
+    if (!needed.length) return;
+    needed.forEach(({ path }) => inFlightImageSizeRef.current.add(path));
+
+    needed.forEach(({ path, url }) => {
+      Image.getSize(
+        url,
+        (w, h) => {
+          const aspect = w > 0 && h > 0 ? w / h : 1;
+          setImageAspectByPath((prev) => ({ ...prev, [path]: aspect }));
+          inFlightImageSizeRef.current.delete(path);
+        },
+        () => {
+          inFlightImageSizeRef.current.delete(path);
+        }
+      );
+    });
+  }, [isDm, messages, mediaUrlByPath, imageAspectByPath]);
+
+  const openViewer = React.useCallback(
+    (media: NonNullable<ChatEnvelope['media']>) => {
+      const url = mediaUrlByPath[media.path];
+      if (!url) return;
+      const kind =
+        media.kind === 'file' && (media.contentType || '').startsWith('image/')
+          ? 'image'
+          : media.kind === 'file' && (media.contentType || '').startsWith('video/')
+            ? 'video'
+            : media.kind;
+      if (kind !== 'image' && kind !== 'video') {
+        void openMedia(media.path);
+        return;
+      }
+      setViewerMedia({ url, kind, fileName: media.fileName });
+      setViewerOpen(true);
+    },
+    [mediaUrlByPath, openMedia]
+  );
 
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
@@ -453,14 +955,50 @@ export default function ChatScreen({
     })();
   }, [peer, isDm, API_URL, activeConversationId]);
 
-  React.useEffect(() => {
-    console.log('WS_URL =', WS_URL)
-    console.log('expoConfig.extra', Constants.expoConfig?.extra)
-    console.log('manifestExtra', (Constants as any).manifestExtra)
+  const closeWs = React.useCallback(() => {
+    if (wsReconnectTimerRef.current) {
+      clearTimeout(wsReconnectTimerRef.current);
+      wsReconnectTimerRef.current = null;
+    }
+    const ws = wsRef.current;
+    wsRef.current = null;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      try {
+        ws.close(1000, 'app background');
+      } catch {
+        // ignore
+      }
+    }
+    setIsConnecting(false);
+    setIsConnected(false);
+  }, []);
+
+  const scheduleReconnect = React.useCallback(() => {
+    if (wsReconnectTimerRef.current) return;
+    if (!user) return;
+    if (!WS_URL) return;
+    if (appStateRef.current !== 'active') return;
+    const attempt = Math.min(wsReconnectAttemptRef.current + 1, 8);
+    wsReconnectAttemptRef.current = attempt;
+    const delayMs = Math.min(10_000, 500 * Math.pow(1.7, attempt - 1));
+    wsReconnectTimerRef.current = setTimeout(() => {
+      wsReconnectTimerRef.current = null;
+      // connectWs will no-op if already open/connecting
+      connectWs();
+    }, delayMs);
+  }, [user]);
+
+  const connectWs = React.useCallback(() => {
+    if (!user) return;
     if (!WS_URL) {
       setError('WebSocket URL not configured. Set expo.extra.WS_URL in app.json');
       return;
     }
+    const existing = wsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
     setError(null);
     setIsConnecting(true);
 
@@ -468,19 +1006,24 @@ export default function ChatScreen({
     wsRef.current = ws;
 
     ws.onopen = () => {
+      wsReconnectAttemptRef.current = 0;
       setIsConnecting(false);
       setIsConnected(true);
       flushPendingRead();
     };
+
     ws.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
+        const activeConv = activeConversationIdRef.current;
+        const dn = displayNameRef.current;
+
         const isPayloadDm =
           typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
-        const isDifferentConversation = payload?.conversationId !== activeConversationId;
+        const isDifferentConversation = payload?.conversationId !== activeConv;
         const fromOtherUser =
           typeof payload?.user === 'string' &&
-          normalizeUser(payload.user) !== normalizeUser(displayName);
+          normalizeUser(payload.user) !== normalizeUser(dn);
         const hasText = typeof payload?.text === 'string';
         if (
           isPayloadDm &&
@@ -489,18 +1032,21 @@ export default function ChatScreen({
           hasText &&
           typeof payload.conversationId === 'string'
         ) {
-          onNewDmNotification?.(payload.conversationId, payload.user || 'someone');
+          onNewDmNotificationRef.current?.(payload.conversationId, payload.user || 'someone');
         }
+
         // Read receipt events (broadcast by backend)
-        if (payload && payload.type === 'read' && payload.conversationId === activeConversationId) {
-          if (payload.user && payload.user !== displayName) {
+        if (payload && payload.type === 'read' && payload.conversationId === activeConv) {
+          if (payload.user && payload.user !== dn) {
             const readAt =
               typeof payload.readAt === 'number' ? payload.readAt : Math.floor(Date.now() / 1000);
             // New: per-message receipt (messageCreatedAt). Backward compat: treat readUpTo as a messageCreatedAt.
             const messageCreatedAt =
               typeof payload.messageCreatedAt === 'number'
                 ? payload.messageCreatedAt
-                : (typeof payload.readUpTo === 'number' ? payload.readUpTo : undefined);
+                : typeof payload.readUpTo === 'number'
+                  ? payload.readUpTo
+                  : undefined;
 
             if (typeof messageCreatedAt === 'number') {
               setPeerSeenAtByCreatedAt((prev) => ({
@@ -512,8 +1058,10 @@ export default function ChatScreen({
               setMessages((prev) =>
                 prev.map((m) => {
                   const isEncryptedOutgoing =
-                    !!m.encrypted && !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
-                  const isPlainOutgoing = !m.encrypted && (m.user ?? 'anon') === displayName;
+                    !!m.encrypted &&
+                    !!myPublicKeyRef.current &&
+                    m.encrypted.senderPublicKey === myPublicKeyRef.current;
+                  const isPlainOutgoing = !m.encrypted && (m.user ?? 'anon') === dn;
                   const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
                   if (!isOutgoing) return m;
                   if (m.createdAt !== messageCreatedAt) return m;
@@ -526,6 +1074,7 @@ export default function ChatScreen({
           }
           return;
         }
+
         if (payload && payload.text) {
           const rawText = String(payload.text);
           const encrypted = parseEncrypted(rawText);
@@ -539,7 +1088,9 @@ export default function ChatScreen({
             user: payload.user,
             rawText,
             encrypted: encrypted ?? undefined,
-            text: encrypted ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)' : rawText,
+            text: encrypted
+              ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)'
+              : rawText,
             createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
             ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
@@ -555,6 +1106,7 @@ export default function ChatScreen({
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
       }
     };
+
     ws.onerror = (e: any) => {
       // RN WebSocket doesn't expose much, but log what we can
       // eslint-disable-next-line no-console
@@ -562,17 +1114,35 @@ export default function ChatScreen({
       setIsConnecting(false);
       setIsConnected(false);
       setError(e?.message ? `WebSocket error: ${e.message}` : 'WebSocket error');
+      scheduleReconnect();
     };
     ws.onclose = (e) => {
       // eslint-disable-next-line no-console
       console.log('WS close:', (e as any)?.code, (e as any)?.reason);
       setIsConnected(false);
+      scheduleReconnect();
     };
-    return () => {
-      ws.close();
-      wsRef.current = null;
-    };
-  }, [user, flushPendingRead]);
+  }, [user, normalizeUser, flushPendingRead, scheduleReconnect]);
+
+  // Keep WS alive across "open picker -> app background -> return" transitions.
+  React.useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+      if (nextState === 'active') {
+        connectWs();
+      } else {
+        // Free resources while backgrounded; we'll reconnect on resume.
+        closeWs();
+      }
+    });
+    return () => sub.remove();
+  }, [connectWs, closeWs]);
+
+  // Initial connect on mount / when user changes
+  React.useEffect(() => {
+    connectWs();
+    return () => closeWs();
+  }, [connectWs, closeWs]);
 
   // Fetch recent history from HTTP API (if configured)
   React.useEffect(() => {
@@ -633,8 +1203,9 @@ export default function ChatScreen({
     return () => clearInterval(interval);
   }, [isDm]);
 
-  const sendMessage = React.useCallback(() => {
-    if (!input.trim()) return;
+  const sendMessage = React.useCallback(async () => {
+    if (isUploading) return;
+    if (!input.trim() && !pendingMedia) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
       return;
@@ -651,6 +1222,22 @@ export default function ChatScreen({
       }
       const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
       outgoingText = JSON.stringify(enc);
+    } else if (pendingMedia) {
+      try {
+        setIsUploading(true);
+        const uploaded = await uploadPendingMedia(pendingMedia);
+        const envelope: ChatEnvelope = {
+          type: 'chat',
+          text: outgoingText,
+          media: uploaded,
+        };
+        outgoingText = JSON.stringify(envelope);
+      } catch (e: any) {
+        Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
+        return;
+      } finally {
+        setIsUploading(false);
+      }
     }
     const outgoing = {
       action: 'message',
@@ -663,7 +1250,20 @@ export default function ChatScreen({
     };
     wsRef.current.send(JSON.stringify(outgoing));
     setInput('');
-  }, [input, displayName, activeConversationId, isDm, myPrivateKey, peerPublicKey, ttlIdx, TTL_OPTIONS]);
+    setPendingMedia(null);
+  }, [
+    input,
+    pendingMedia,
+    isUploading,
+    uploadPendingMedia,
+    displayName,
+    activeConversationId,
+    isDm,
+    myPrivateKey,
+    peerPublicKey,
+    ttlIdx,
+    TTL_OPTIONS,
+  ]);
 
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
@@ -844,6 +1444,24 @@ export default function ChatScreen({
             : null;
           const seenLabel = isOutgoing ? outgoingSeenLabel : incomingSeenLabel;
 
+          const envelope =
+            !item.encrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;
+          const captionText =
+            envelope && typeof envelope.text === 'string' ? envelope.text : item.text;
+          const media = envelope?.media ?? item.media;
+          const mediaUrl = media?.path ? mediaUrlByPath[media.path] : null;
+          const mediaThumbUrl = media?.thumbPath ? mediaUrlByPath[media.thumbPath] : null;
+          const mediaLooksImage =
+            !!media &&
+            (media.kind === 'image' ||
+              (media.kind === 'file' && (media.contentType || '').startsWith('image/')));
+          const mediaLooksVideo =
+            !!media &&
+            (media.kind === 'video' ||
+              (media.kind === 'file' && (media.contentType || '').startsWith('video/')));
+          const imageAspect =
+            mediaLooksImage && media?.path ? imageAspectByPath[media.path] : undefined;
+
             return (           
               <Pressable
                 onPress={() => onPressMessage(item)}
@@ -858,7 +1476,49 @@ export default function ChatScreen({
                     {(item.user ?? 'anon')}{' · '}{formatted}
                     {expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''}
                   </Text>
-                  <Text style={styles.messageText}>{item.text}</Text>
+                  {captionText?.length ? (
+                    <Text style={styles.messageText}>{captionText}</Text>
+                  ) : null}
+                  {media?.path ? (
+                    (mediaThumbUrl || mediaUrl) && mediaLooksImage ? (
+                      <Pressable onPress={() => openViewer(media)}>
+                        {typeof imageAspect === 'number' ? (
+                          <Image
+                            source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                            style={[styles.imagePreview, { aspectRatio: imageAspect }]}
+                            resizeMode="cover"
+                          />
+                        ) : (
+                          <View style={[styles.mediaFrame, styles.imageFrame]}>
+                            <Image
+                              source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                              style={styles.mediaFill}
+                              resizeMode="contain"
+                            />
+                          </View>
+                        )}
+                      </Pressable>
+                    ) : (mediaThumbUrl || mediaUrl) && mediaLooksVideo ? (
+                      <Pressable onPress={() => openViewer(media)}>
+                        <View style={styles.videoThumbWrap}>
+                          <Image
+                            source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                            style={[styles.mediaThumb, { borderRadius: 16 }]}
+                            resizeMode="cover"
+                          />
+                          <View style={styles.videoPlayOverlay}>
+                            <Text style={styles.videoPlayText}>▶</Text>
+                          </View>
+                        </View>
+                      </Pressable>
+                    ) : (
+                      <Pressable onPress={() => void openMedia(media.path)}>
+                        <Text style={styles.attachmentLink}>
+                          {`Attachment: ${media.kind}${media.fileName ? ` · ${media.fileName}` : ''} (tap to open)`}
+                        </Text>
+                      </Pressable>
+                    )
+                  ) : null}
                   {seenLabel ? (
                     <Text style={styles.seenText}>{seenLabel}</Text>
                   ) : null}
@@ -869,18 +1529,34 @@ export default function ChatScreen({
           contentContainerStyle={styles.listContent}
         />
         <View style={styles.inputRow}>
+          {!isDm ? (
+            <Pressable style={styles.pickBtn} onPress={handlePickMedia} disabled={isUploading}>
+              <Text style={styles.pickTxt}>＋</Text>
+            </Pressable>
+          ) : null}
           <TextInput
             style={styles.input}
-            placeholder="Type a message"
+            placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
             value={input}
             onChangeText={setInput}
             onSubmitEditing={sendMessage}
             returnKeyType="send"
           />
-          <Pressable style={styles.sendBtn} onPress={sendMessage}>
-            <Text style={styles.sendTxt}>Send..</Text>
+          <Pressable style={styles.sendBtn} onPress={sendMessage} disabled={isUploading}>
+            <Text style={styles.sendTxt}>{isUploading ? 'Uploading…' : 'Send'}</Text>
           </Pressable>
         </View>
+        {!isDm && pendingMedia ? (
+          <Pressable
+            style={styles.attachmentPill}
+            onPress={() => setPendingMedia(null)}
+            disabled={isUploading}
+          >
+            <Text style={styles.attachmentPillText}>
+              {`Attached: ${pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
+            </Text>
+          </Pressable>
+        ) : null}
       </KeyboardAvoidingView>
       <Modal visible={summaryOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -964,6 +1640,41 @@ export default function ChatScreen({
           </View>
         </View>
       </Modal>
+
+      <Modal visible={viewerOpen} transparent animationType="fade">
+        <View style={styles.viewerOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              setViewerOpen(false);
+              setViewerMedia(null);
+            }}
+          />
+          <View style={styles.viewerCard}>
+            <View style={styles.viewerTopBar}>
+              <Text style={styles.viewerTitle}>{viewerMedia?.fileName || 'Attachment'}</Text>
+              <Pressable
+                style={styles.viewerCloseBtn}
+                onPress={() => {
+                  setViewerOpen(false);
+                  setViewerMedia(null);
+                }}
+              >
+                <Text style={styles.viewerCloseText}>Close</Text>
+              </Pressable>
+            </View>
+            <View style={styles.viewerBody}>
+              {viewerMedia?.kind === 'image' && viewerMedia?.url ? (
+                <Image source={{ uri: viewerMedia.url }} style={styles.viewerImage} />
+              ) : viewerMedia?.kind === 'video' && viewerMedia?.url ? (
+                <FullscreenVideo url={viewerMedia.url} />
+              ) : (
+                <Text style={styles.viewerFallback}>No preview available.</Text>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1025,6 +1736,65 @@ const styles = StyleSheet.create({
   },
   messageUser: { fontSize: 12, color: '#555' },
   messageText: { fontSize: 16, color: '#222', marginTop: 2 },
+  attachmentLink: {
+    marginTop: 6,
+    fontSize: 13,
+    color: '#1976d2',
+    fontWeight: '700',
+    textDecorationLine: 'underline',
+  },
+  imagePreview: {
+    marginTop: 8,
+    width: '50%',
+    alignSelf: 'flex-start',
+    borderRadius: 16,
+    backgroundColor: '#e9e9e9',
+  },
+  mediaFrame: {
+    marginTop: 8,
+    width: '100%',
+    borderRadius: 16,
+    overflow: 'hidden',
+    // Match the message bubble background so "contain" letterboxing doesn't show as white.
+    backgroundColor: '#f1f1f1',
+  },
+  mediaFill: {
+    width: '100%',
+    height: '100%',
+  },
+  mediaThumb: {
+    marginTop: 8,
+    width: '100%',
+    height: 220,
+    borderRadius: 16,
+    backgroundColor: '#e9e9e9',
+  },
+  imageFrame: {
+    // Prefer showing the entire image (no cropping). Slightly shorter so tall images don't dominate.
+    height: 180,
+  },
+  videoThumbWrap: {
+    marginTop: 8,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  videoPlayOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  videoPlayText: {
+    color: '#fff',
+    fontSize: 42,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 6,
+  },
   seenText: {
     marginTop: 6,
     fontSize: 12,
@@ -1040,6 +1810,27 @@ const styles = StyleSheet.create({
     borderTopColor: '#e3e3e3',
     backgroundColor: '#fff',
   },
+  attachmentPill: {
+    marginHorizontal: 12,
+    marginBottom: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: '#e8eefc',
+    borderWidth: 1,
+    borderColor: '#c7d6ff',
+  },
+  attachmentPillText: { color: '#1b3a7a', fontWeight: '700' },
+  pickBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#222',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  pickTxt: { color: '#fff', fontWeight: '800', fontSize: 18, lineHeight: 18 },
   input: {
     flex: 1,
     height: 44,
@@ -1073,6 +1864,35 @@ const styles = StyleSheet.create({
   summaryScroll: { maxHeight: 420 },
   summaryText: { color: '#222', lineHeight: 20 },
   summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+
+  viewerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  viewerCard: {
+    width: '94%',
+    height: '86%',
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  viewerTopBar: {
+    height: 52,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(0,0,0,0.65)',
+  },
+  viewerTitle: { color: '#fff', fontWeight: '700', flex: 1, marginRight: 12 },
+  viewerCloseBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#222' },
+  viewerCloseText: { color: '#fff', fontWeight: '700' },
+  viewerBody: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  viewerImage: { width: '100%', height: '100%', resizeMode: 'contain' },
+  viewerVideo: { width: '100%', height: '100%' },
+  viewerFallback: { color: '#fff' },
 });
 
 
