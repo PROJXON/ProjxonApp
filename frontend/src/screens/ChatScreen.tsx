@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   AppStateStatus,
+  useWindowDimensions,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -162,6 +163,8 @@ const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25MB (GIFs/documents)
 const THUMB_MAX_DIM = 720; // px
 const THUMB_JPEG_QUALITY = 0.85; // preview-only; original stays untouched
+const CHAT_MEDIA_MAX_HEIGHT = 240; // dp
+const CHAT_MEDIA_MAX_WIDTH_FRACTION = 0.86; // fraction of screen width (roughly bubble width)
 
 const formatBytes = (bytes: number): string => {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
@@ -182,6 +185,7 @@ export default function ChatScreen({
   onNewDmNotification,
 }: ChatScreenProps): React.JSX.Element {
   const { user } = useAuthenticator();
+  const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState<string>('');
   const [isConnecting, setIsConnecting] = React.useState<boolean>(false);
@@ -267,6 +271,26 @@ export default function ChatScreen({
   const normalizeUser = React.useCallback((v: unknown): string => {
     return String(v ?? '').trim().toLowerCase();
   }, []);
+
+  const getCappedMediaSize = React.useCallback(
+    (aspect: number | undefined) => {
+      const maxW = Math.max(220, Math.floor(windowWidth * CHAT_MEDIA_MAX_WIDTH_FRACTION));
+      const maxH = CHAT_MEDIA_MAX_HEIGHT;
+      const a = typeof aspect === 'number' && Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+      // start with max width
+      let w = maxW;
+      let h = Math.floor(w / a);
+      if (h > maxH) {
+        h = maxH;
+        w = Math.floor(h * a);
+      }
+      // Avoid 0 height/width
+      w = Math.max(140, w);
+      h = Math.max(120, h);
+      return { w, h };
+    },
+    [windowWidth]
+  );
 
   // If Android kills the activity while the picker is open, we can recover the result.
   React.useEffect(() => {
@@ -543,11 +567,12 @@ export default function ChatScreen({
       const looksImage =
         media.kind === 'image' || (media.kind === 'file' && (media.contentType || '').startsWith('image/'));
       if (!looksImage) continue;
-      const url = mediaUrlByPath[media.path];
+      const keyPath = media.thumbPath || media.path;
+      const url = mediaUrlByPath[keyPath];
       if (!url) continue;
-      if (imageAspectByPath[media.path]) continue;
-      if (inFlightImageSizeRef.current.has(media.path)) continue;
-      needed.push({ path: media.path, url });
+      if (imageAspectByPath[keyPath]) continue;
+      if (inFlightImageSizeRef.current.has(keyPath)) continue;
+      needed.push({ path: keyPath, url });
     }
 
     if (!needed.length) return;
@@ -1459,8 +1484,19 @@ export default function ChatScreen({
             !!media &&
             (media.kind === 'video' ||
               (media.kind === 'file' && (media.contentType || '').startsWith('video/')));
+          const hasMedia = !!media?.path;
+          const imageKeyPath = mediaLooksImage ? (media?.thumbPath || media?.path) : undefined;
           const imageAspect =
-            mediaLooksImage && media?.path ? imageAspectByPath[media.path] : undefined;
+            imageKeyPath && imageAspectByPath[imageKeyPath] ? imageAspectByPath[imageKeyPath] : undefined;
+          const thumbKeyPath =
+            mediaLooksImage || mediaLooksVideo ? (media?.thumbPath || media?.path) : undefined;
+          const thumbAspect =
+            thumbKeyPath && imageAspectByPath[thumbKeyPath] ? imageAspectByPath[thumbKeyPath] : undefined;
+          const capped = getCappedMediaSize(thumbAspect);
+          const metaPrefix = isOutgoing ? '' : `${item.user ?? 'anon'} · `;
+          const metaLine = `${metaPrefix}${formatted}${
+            expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''
+          }`;
 
             return (           
               <Pressable
@@ -1471,57 +1507,129 @@ export default function ChatScreen({
                   setCipherOpen(true);
                 }}
               >
-                <View style={styles.message}>
-                  <Text style={styles.messageUser}>
-                    {(item.user ?? 'anon')}{' · '}{formatted}
-                    {expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''}
-                  </Text>
-                  {captionText?.length ? (
-                    <Text style={styles.messageText}>{captionText}</Text>
-                  ) : null}
-                  {media?.path ? (
-                    (mediaThumbUrl || mediaUrl) && mediaLooksImage ? (
-                      <Pressable onPress={() => openViewer(media)}>
-                        {typeof imageAspect === 'number' ? (
-                          <Image
-                            source={{ uri: mediaThumbUrl || mediaUrl || '' }}
-                            style={[styles.imagePreview, { aspectRatio: imageAspect }]}
-                            resizeMode="cover"
-                          />
-                        ) : (
-                          <View style={[styles.mediaFrame, styles.imageFrame]}>
-                            <Image
-                              source={{ uri: mediaThumbUrl || mediaUrl || '' }}
-                              style={styles.mediaFill}
-                              resizeMode="contain"
-                            />
-                          </View>
-                        )}
-                      </Pressable>
-                    ) : (mediaThumbUrl || mediaUrl) && mediaLooksVideo ? (
-                      <Pressable onPress={() => openViewer(media)}>
-                        <View style={styles.videoThumbWrap}>
-                          <Image
-                            source={{ uri: mediaThumbUrl || mediaUrl || '' }}
-                            style={[styles.mediaThumb, { borderRadius: 16 }]}
-                            resizeMode="cover"
-                          />
-                          <View style={styles.videoPlayOverlay}>
-                            <Text style={styles.videoPlayText}>▶</Text>
-                          </View>
+                <View
+                  style={[
+                    styles.messageRow,
+                    isOutgoing ? styles.messageRowOutgoing : styles.messageRowIncoming,
+                  ]}
+                >
+                  {hasMedia ? (
+                    <View
+                      style={[
+                        styles.mediaMsg,
+                        isOutgoing ? styles.mediaMsgOutgoing : styles.mediaMsgIncoming,
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.mediaCard,
+                          isOutgoing ? styles.mediaCardOutgoing : styles.mediaCardIncoming,
+                          { width: capped.w },
+                        ]}
+                      >
+                        <View
+                          style={[
+                            styles.mediaHeader,
+                            isOutgoing ? styles.mediaHeaderOutgoing : styles.mediaHeaderIncoming,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.mediaHeaderMeta,
+                              isOutgoing
+                                ? styles.mediaHeaderMetaOutgoing
+                                : styles.mediaHeaderMetaIncoming,
+                            ]}
+                          >
+                            {metaLine}
+                          </Text>
+                          {captionText?.length ? (
+                            <Text
+                              style={[
+                                styles.mediaHeaderCaption,
+                                isOutgoing
+                                  ? styles.mediaHeaderCaptionOutgoing
+                                  : styles.mediaHeaderCaptionIncoming,
+                              ]}
+                            >
+                              {captionText}
+                            </Text>
+                          ) : null}
                         </View>
-                      </Pressable>
-                    ) : (
-                      <Pressable onPress={() => void openMedia(media.path)}>
-                        <Text style={styles.attachmentLink}>
-                          {`Attachment: ${media.kind}${media.fileName ? ` · ${media.fileName}` : ''} (tap to open)`}
+                        {media?.path ? (
+                          (mediaThumbUrl || mediaUrl) && mediaLooksImage ? (
+                            <Pressable onPress={() => openViewer(media)}>
+                              {typeof thumbAspect === 'number' ? (
+                                <Image
+                                  source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                                  style={[styles.mediaCappedImage, { width: capped.w, height: capped.h }]}
+                                  // No crop: we size the view to the image aspect ratio.
+                                  resizeMode="contain"
+                                />
+                              ) : (
+                                <View style={styles.imageThumbWrap}>
+                                  <Image
+                                    source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                                    style={styles.mediaFill}
+                                    // Fallback while we haven't measured aspect ratio yet.
+                                    resizeMode="contain"
+                                  />
+                                </View>
+                              )}
+                            </Pressable>
+                          ) : (mediaThumbUrl || mediaUrl) && mediaLooksVideo ? (
+                            <Pressable onPress={() => openViewer(media)}>
+                              <View style={[styles.videoThumbWrap, { width: capped.w, height: capped.h }]}>
+                                <Image
+                                  source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                                  style={[styles.mediaFill]}
+                                  resizeMode="cover"
+                                />
+                                <View style={styles.videoPlayOverlay}>
+                                  <Text style={styles.videoPlayText}>▶</Text>
+                                </View>
+                              </View>
+                            </Pressable>
+                          ) : (
+                            <Pressable onPress={() => void openMedia(media.path)}>
+                              <Text style={styles.attachmentLink}>
+                                {`Attachment: ${media.kind}${media.fileName ? ` · ${media.fileName}` : ''} (tap to open)`}
+                              </Text>
+                            </Pressable>
+                          )
+                        ) : null}
+                      </View>
+
+                      {seenLabel ? <Text style={styles.seenText}>{seenLabel}</Text> : null}
+                    </View>
+                  ) : (
+                    <View
+                      style={[
+                        styles.messageBubble,
+                        isOutgoing ? styles.messageBubbleOutgoing : styles.messageBubbleIncoming,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.messageMeta,
+                          isOutgoing ? styles.messageMetaOutgoing : styles.messageMetaIncoming,
+                        ]}
+                      >
+                        {metaLine}
+                      </Text>
+                      {captionText?.length ? (
+                        <Text
+                          style={[
+                            styles.messageText,
+                            isOutgoing ? styles.messageTextOutgoing : styles.messageTextIncoming,
+                          ]}
+                        >
+                          {captionText}
                         </Text>
-                      </Pressable>
-                    )
-                  ) : null}
-                  {seenLabel ? (
-                    <Text style={styles.seenText}>{seenLabel}</Text>
-                  ) : null}
+                      ) : null}
+                      {seenLabel ? <Text style={styles.seenText}>{seenLabel}</Text> : null}
+                    </View>
+                  )}
                 </View>
               </Pressable>
             );
@@ -1728,14 +1836,29 @@ const styles = StyleSheet.create({
   err: { color: '#d32f2f' },
   error: { color: '#d32f2f', marginTop: 6 },
   listContent: { padding: 12 },
-  message: {
+  messageRow: {
     marginBottom: 8,
-    padding: 10,
-    borderRadius: 8,
-    backgroundColor: '#f1f1f1',
+    flexDirection: 'row',
   },
-  messageUser: { fontSize: 12, color: '#555' },
-  messageText: { fontSize: 16, color: '#222', marginTop: 2 },
+  messageRowIncoming: { justifyContent: 'flex-start' },
+  messageRowOutgoing: { justifyContent: 'flex-end' },
+  messageBubble: {
+    maxWidth: '82%',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+  },
+  // Media thumbnails should be allowed to be much wider (like typical chat apps),
+  // while keeping text-only bubbles tighter.
+  // (legacy) media bubble styles removed in favor of mediaCard layout
+  messageBubbleIncoming: { backgroundColor: '#f1f1f1' },
+  messageBubbleOutgoing: { backgroundColor: '#1976d2' },
+  messageMeta: { fontSize: 12, marginBottom: 1 },
+  messageMetaIncoming: { color: '#555' },
+  messageMetaOutgoing: { color: 'rgba(255,255,255,0.9)' },
+  messageText: { fontSize: 16, marginTop: 1 },
+  messageTextIncoming: { color: '#222' },
+  messageTextOutgoing: { color: '#fff' },
   attachmentLink: {
     marginTop: 6,
     fontSize: 13,
@@ -1743,12 +1866,32 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textDecorationLine: 'underline',
   },
+  mediaAlignIncoming: { alignSelf: 'flex-start' },
+  mediaAlignOutgoing: { alignSelf: 'flex-end' },
   imagePreview: {
     marginTop: 8,
-    width: '50%',
-    alignSelf: 'flex-start',
+    width: '100%',
     borderRadius: 16,
     backgroundColor: '#e9e9e9',
+  },
+  imageThumbWrap: {
+    width: '100%',
+    height: 220,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: 'transparent',
+  },
+  mediaAutoImage: {
+    width: '100%',
+    backgroundColor: 'transparent',
+  },
+  mediaCappedImage: {
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    backgroundColor: 'transparent',
   },
   mediaFrame: {
     marginTop: 8,
@@ -1763,21 +1906,48 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   mediaThumb: {
-    marginTop: 8,
     width: '100%',
     height: 220,
-    borderRadius: 16,
-    backgroundColor: '#e9e9e9',
+    backgroundColor: '#000',
   },
   imageFrame: {
     // Prefer showing the entire image (no cropping). Slightly shorter so tall images don't dominate.
     height: 180,
   },
   videoThumbWrap: {
-    marginTop: 8,
+    width: '100%',
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+    borderBottomLeftRadius: 16,
+    borderBottomRightRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  mediaMsg: {
+    width: '96%',
+  },
+  mediaMsgIncoming: { alignItems: 'flex-start' },
+  mediaMsgOutgoing: { alignItems: 'flex-end' },
+  mediaCard: {
+    width: '100%',
     borderRadius: 16,
     overflow: 'hidden',
   },
+  mediaCardIncoming: { backgroundColor: '#f1f1f1' },
+  mediaCardOutgoing: { backgroundColor: '#1976d2' },
+  mediaHeader: {
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 4,
+  },
+  mediaHeaderIncoming: { backgroundColor: '#f1f1f1' },
+  mediaHeaderOutgoing: { backgroundColor: '#1976d2' },
+  mediaHeaderMeta: { fontSize: 12, fontWeight: '700' },
+  mediaHeaderMetaIncoming: { color: '#555' },
+  mediaHeaderMetaOutgoing: { color: 'rgba(255,255,255,0.9)' },
+  mediaHeaderCaption: { marginTop: 4, fontSize: 16, fontWeight: '700' },
+  mediaHeaderCaptionIncoming: { color: '#222' },
+  mediaHeaderCaptionOutgoing: { color: '#fff' },
   videoPlayOverlay: {
     position: 'absolute',
     top: 0,
