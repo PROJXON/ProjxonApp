@@ -31,7 +31,8 @@
       "API_URL": "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-video"
     ]
   }
 }
