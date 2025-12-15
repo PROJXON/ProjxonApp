@@ -1,4 +1,4 @@
-import React from 'react';
+wheimport React from 'react';
 import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
@@ -575,12 +575,20 @@ export default function ChatScreen({
       if (!API_URL) return;
       setMessages([]);
       try {
-        const res = await fetch(
-          `${API_URL.replace(/\/$/, '')}/messages?conversationId=${encodeURIComponent(
-            activeConversationId
-          )}&limit=50`
-        );
-        if (!res.ok) return;
+        // Some deployments protect GET /messages behind a Cognito authorizer.
+        // Include the idToken when available; harmless if the route is public.
+        const { tokens } = await fetchAuthSession().catch(() => ({ tokens: undefined }));
+        const idToken = tokens?.idToken?.toString();
+        const url = `${API_URL.replace(/\/$/, '')}/messages?conversationId=${encodeURIComponent(
+          activeConversationId
+        )}&limit=50`;
+        const res = await fetch(url, idToken ? { headers: { Authorization: `Bearer ${idToken}` } } : undefined);
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          console.warn('fetchHistory failed', res.status, text);
+          setError(`History fetch failed (${res.status})`);
+          return;
+        }
         const items = await res.json();
         if (Array.isArray(items)) {
           const normalized = items
