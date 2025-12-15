@@ -21,17 +21,31 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.frontend"
+      "package": "com.anonymous.frontend",
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "extra": {
       "WS_URL": "wss://a6ersp1gab.execute-api.us-east-2.amazonaws.com/production",
-      "API_URL": "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
+      "API_URL": "https://828bp5ailc.execute-api.us-east-2.amazonaws.com",
+      "eas": {
+        "projectId": "f977cc9c-dc31-445e-9184-a892e4c08cf1"
+      }
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos.",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera."
+        }
+      ],
+      "expo-document-picker"
     ]
   }
 }

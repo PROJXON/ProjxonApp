@@ -1,5 +1,5 @@
 import React from 'react';
-import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
@@ -10,6 +10,9 @@ import { fetchAuthSession } from '@aws-amplify/auth';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { decryptChatMessageV1, encryptChatMessageV1, EncryptedChatPayloadV1, derivePublicKey, loadKeyPair } from '../../utils/crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import { uploadData, getUrl } from 'aws-amplify/storage';
 
 type ChatScreenProps = {
   conversationId?: string | null;
@@ -24,6 +27,14 @@ type ChatMessage = {
   text: string;
   rawText?: string;
   encrypted?: EncryptedChatPayloadV1;
+  media?: {
+    path: string;
+    kind: 'image' | 'video' | 'gif' | 'file';
+    contentType: string;
+    fileName?: string;
+    size?: number;
+  };
+  caption?: string;
   decryptedText?: string;
   decryptFailed?: boolean;
   expiresAt?: number; // epoch seconds
@@ -51,6 +62,7 @@ export default function ChatScreen({
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
   const [cipherOpen, setCipherOpen] = React.useState(false);
   const [cipherText, setCipherText] = React.useState<string>('');
+  const [mediaUrlByPath, setMediaUrlByPath] = React.useState<Record<string, string>>({});
   // Per-message "Seen" state for outgoing messages (keyed by message createdAt ms)
   const [peerSeenAtByCreatedAt, setPeerSeenAtByCreatedAt] = React.useState<Record<string, number>>(
     {}
@@ -249,6 +261,60 @@ export default function ChatScreen({
       return null;
     }
   }, []);
+
+  const parseMediaEnvelope = React.useCallback(
+    (text: string): { media: ChatMessage['media']; caption?: string } | null => {
+    try {
+      const obj = JSON.parse(text);
+      if (!obj) return null;
+
+      // New format: { type: "chat", text?: string, media?: { path, kind, contentType, ... } }
+      if (obj.type === 'chat' && obj.media) {
+        const m = obj.media;
+        if (!m || typeof m.path !== 'string' || typeof m.contentType !== 'string') return null;
+        const kindRaw = String(m.kind || 'file');
+        if (!['image', 'video', 'gif', 'file'].includes(kindRaw)) return null;
+        const kind = kindRaw as NonNullable<ChatMessage['media']>['kind'];
+        const caption = typeof obj.text === 'string' ? obj.text : undefined;
+        return {
+          caption,
+          media: {
+            path: m.path,
+            kind,
+            contentType: m.contentType,
+            fileName: typeof m.fileName === 'string' ? m.fileName : undefined,
+            size: typeof m.size === 'number' ? m.size : undefined,
+          },
+        };
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const parseMedia = React.useCallback((text: string): ChatMessage['media'] | null => {
+    const env = parseMediaEnvelope(text);
+    return env?.media ?? null;
+  }, [parseMediaEnvelope]);
+
+  const parseMediaCaption = React.useCallback((text: string): string | undefined => {
+    const env = parseMediaEnvelope(text);
+    const c = env?.caption;
+    return typeof c === 'string' && c.trim().length ? c : undefined;
+  }, [parseMediaEnvelope]);
+
+  const ensureMediaUrl = React.useCallback(async (path: string) => {
+    if (!path) return;
+    if (mediaUrlByPath[path]) return;
+    try {
+      const { url } = await getUrl({ path, options: { expiresIn: 60 * 60 } });
+      setMediaUrlByPath((prev) => (prev[path] ? prev : { ...prev, [path]: String(url) }));
+    } catch {
+      // ignore
+    }
+  }, [mediaUrlByPath]);
 
   const decryptForDisplay = React.useCallback(
     (msg: ChatMessage): string => {
@@ -529,6 +595,8 @@ export default function ChatScreen({
         if (payload && payload.text) {
           const rawText = String(payload.text);
           const encrypted = parseEncrypted(rawText);
+          const media = !encrypted ? parseMedia(rawText) : null;
+          const caption = media && !encrypted ? parseMediaCaption(rawText) : undefined;
           const createdAt = Number(payload.createdAt || Date.now());
           const stableId =
             (payload.messageId && String(payload.messageId)) ||
@@ -539,7 +607,13 @@ export default function ChatScreen({
             user: payload.user,
             rawText,
             encrypted: encrypted ?? undefined,
-            text: encrypted ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)' : rawText,
+            media: media ?? undefined,
+            caption,
+            text: encrypted
+              ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)'
+              : (media
+                  ? (caption?.length ? caption : `Attachment: ${media.kind} (tap to open)`)
+                  : rawText),
             createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
             ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
@@ -602,9 +676,19 @@ export default function ChatScreen({
               user: it.user ?? 'anon',
               rawText: String(it.text ?? ''),
               encrypted: parseEncrypted(String(it.text ?? '')) ?? undefined,
-              text: parseEncrypted(String(it.text ?? ''))
-                ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)'
-                : String(it.text ?? ''),
+              media: parseMedia(String(it.text ?? '')) ?? undefined,
+              caption: parseMediaCaption(String(it.text ?? '')),
+              text: (() => {
+                const raw = String(it.text ?? '');
+                const enc = parseEncrypted(raw);
+                if (enc) return 'Encrypted message (tap to decrypt; long-press to view ciphertext)';
+                const media = parseMedia(raw);
+                if (media) {
+                  const cap = parseMediaCaption(raw);
+                  return cap?.length ? cap : `Attachment: ${media.kind} (tap to open)`;
+                }
+                return raw;
+              })(),
               createdAt: Number(it.createdAt ?? Date.now()),
               expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
               ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
@@ -667,6 +751,16 @@ export default function ChatScreen({
 
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
+      if (msg.media?.path) {
+        const url = mediaUrlByPath[msg.media.path];
+        if (!url) {
+          ensureMediaUrl(msg.media.path);
+          Alert.alert('Loading...', 'Fetching attachment link…');
+          return;
+        }
+        Linking.openURL(url).catch(() => {});
+        return;
+      }
       if (!msg.encrypted) return;
       try {
         const readAt = Math.floor(Date.now() / 1000);
@@ -697,8 +791,87 @@ export default function ChatScreen({
         Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
       }
     },
-    [decryptForDisplay, myPublicKey, sendReadReceipt]
+    [decryptForDisplay, myPublicKey, sendReadReceipt, ensureMediaUrl, mediaUrlByPath]
   );
+
+  const pickAndUpload = React.useCallback(async () => {
+    if (isDm) {
+      Alert.alert('Not yet', 'Media uploads in DMs will be added with true E2EE attachments next. For now, use Global chat.');
+      return;
+    }
+    try {
+      Alert.alert('Attach', 'Choose what to upload', [
+        {
+          text: 'Photo / Video',
+          onPress: async () => {
+            const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            if (!perm.granted) return;
+            const result = await ImagePicker.launchImageLibraryAsync({
+              mediaTypes: ImagePicker.MediaTypeOptions.All,
+              quality: 0.9,
+            });
+            if (result.canceled || !result.assets?.length) return;
+            const asset = result.assets[0];
+            const uri = asset.uri;
+            const contentType = String(asset.mimeType || 'application/octet-stream');
+            const kind: any = contentType.startsWith('video/') ? 'video' : (contentType === 'image/gif' ? 'gif' : 'image');
+            const fileName = asset.fileName ? String(asset.fileName) : undefined;
+            const size = typeof asset.fileSize === 'number' ? asset.fileSize : undefined;
+            const blob = await (await fetch(uri)).blob();
+            const path = `uploads/global/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            await uploadData({ path, data: blob, options: { contentType } }).result;
+            const captionText = input.trim();
+            const msgObj = {
+              type: 'chat',
+              text: captionText.length ? captionText : undefined,
+              media: { path, kind, contentType, fileName, size },
+            };
+            wsRef.current?.send(JSON.stringify({
+              action: 'message',
+              text: JSON.stringify(msgObj),
+              conversationId: activeConversationId,
+              user: displayName,
+              createdAt: Date.now(),
+            }));
+            if (captionText.length) setInput('');
+          },
+        },
+        {
+          text: 'GIF / File',
+          onPress: async () => {
+            const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
+            if (result.canceled || !result.assets?.length) return;
+            const asset = result.assets[0];
+            const uri = asset.uri;
+            const contentType = String(asset.mimeType || 'application/octet-stream');
+            const kind: any = contentType === 'image/gif' ? 'gif' : (contentType.startsWith('image/') ? 'image' : (contentType.startsWith('video/') ? 'video' : 'file'));
+            const fileName = asset.name ? String(asset.name) : undefined;
+            const size = typeof asset.size === 'number' ? asset.size : undefined;
+            const blob = await (await fetch(uri)).blob();
+            const path = `uploads/global/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            await uploadData({ path, data: blob, options: { contentType } }).result;
+            const captionText = input.trim();
+            const msgObj = {
+              type: 'chat',
+              text: captionText.length ? captionText : undefined,
+              media: { path, kind, contentType, fileName, size },
+            };
+            wsRef.current?.send(JSON.stringify({
+              action: 'message',
+              text: JSON.stringify(msgObj),
+              conversationId: activeConversationId,
+              user: displayName,
+              createdAt: Date.now(),
+            }));
+            if (captionText.length) setInput('');
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message ?? 'Unknown error');
+    }
+  }, [isDm, activeConversationId, displayName, input]);
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
     const dt = new Date(readAtSec * 1000);
@@ -736,7 +909,9 @@ export default function ChatScreen({
       const transcript = recent
         .map((m) => {
           // Only send plaintext. If message is still encrypted, skip it.
-          const raw = m.decryptedText ?? (m.encrypted ? '' : (m.rawText ?? m.text));
+          const raw =
+            m.decryptedText ??
+            (m.encrypted ? '' : (m.caption ?? (m.media ? '' : (m.rawText ?? m.text))));
           const text = raw.length > 500 ? `${raw.slice(0, 500)}…` : raw;
           return text
             ? {
@@ -858,7 +1033,18 @@ export default function ChatScreen({
                     {(item.user ?? 'anon')}{' · '}{formatted}
                     {expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''}
                   </Text>
-                  <Text style={styles.messageText}>{item.text}</Text>
+                  {item.media ? (
+                    <View>
+                      {item.caption?.length ? (
+                        <Text style={styles.messageText}>{item.caption}</Text>
+                      ) : null}
+                      <Text style={[styles.messageText, styles.attachmentText]}>
+                        {`Attachment: ${item.media.kind} (tap to open)`}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text style={styles.messageText}>{item.text}</Text>
+                  )}
                   {seenLabel ? (
                     <Text style={styles.seenText}>{seenLabel}</Text>
                   ) : null}
@@ -869,6 +1055,9 @@ export default function ChatScreen({
           contentContainerStyle={styles.listContent}
         />
         <View style={styles.inputRow}>
+          <Pressable style={styles.attachBtn} onPress={pickAndUpload}>
+            <Text style={styles.attachTxt}>＋</Text>
+          </Pressable>
           <TextInput
             style={styles.input}
             placeholder="Type a message"
@@ -1025,6 +1214,7 @@ const styles = StyleSheet.create({
   },
   messageUser: { fontSize: 12, color: '#555' },
   messageText: { fontSize: 16, color: '#222', marginTop: 2 },
+  attachmentText: { color: '#1976d2' },
   seenText: {
     marginTop: 6,
     fontSize: 12,
@@ -1040,6 +1230,15 @@ const styles = StyleSheet.create({
     borderTopColor: '#e3e3e3',
     backgroundColor: '#fff',
   },
+  attachBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#eee',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachTxt: { color: '#222', fontWeight: '900', fontSize: 18 },
   input: {
     flex: 1,
     height: 44,
