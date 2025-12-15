@@ -361,6 +361,45 @@ export default function ChatScreen({
     }
   }, []);
 
+  const captureFromCamera = React.useCallback(async () => {
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission needed', 'Please allow camera access to capture media.');
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images', 'videos'],
+        quality: 1,
+        allowsEditing: false,
+      });
+
+      if (result.canceled) return;
+      const first = result.assets?.[0];
+      if (!first) return;
+
+      const kind =
+        first.type === 'video'
+          ? 'video'
+          : first.type === 'image'
+            ? 'image'
+            : 'file';
+      const fileName = (first as any).fileName as string | undefined;
+      const size = (first as any).fileSize as number | undefined;
+
+      setPendingMedia({
+        uri: first.uri,
+        kind,
+        contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
+        fileName,
+        size,
+      });
+    } catch (e: any) {
+      Alert.alert('Camera failed', e?.message ?? 'Unknown error');
+    }
+  }, []);
+
   const pickDocument = React.useCallback(async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -398,10 +437,11 @@ export default function ChatScreen({
     }
     Alert.alert('Attach', 'Choose a source', [
       { text: 'Photos / Videos', onPress: () => void pickFromLibrary() },
+      { text: 'Camera (photo or video)', onPress: () => void captureFromCamera() },
       { text: 'File (GIF, etc.)', onPress: () => void pickDocument() },
       { text: 'Cancel', style: 'cancel' },
     ]);
-  }, [isDm, pickFromLibrary, pickDocument]);
+  }, [isDm, pickFromLibrary, captureFromCamera, pickDocument]);
 
   const uploadPendingMedia = React.useCallback(
     async (
