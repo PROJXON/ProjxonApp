@@ -125,6 +125,24 @@ const deriveChatKey = (myPrivateKeyHex: string, theirPublicKeyHex: string): Uint
   return sha256(x);
 };
 
+export const deriveChatKeyBytesV1 = (myPrivateKeyHex: string, theirPublicKeyHex: string): Uint8Array => {
+  return deriveChatKey(myPrivateKeyHex, theirPublicKeyHex);
+};
+
+export const aesGcmEncryptBytes = (key: Uint8Array, plaintext: Uint8Array) => {
+  const iv = getRandomBytes(12);
+  const cipher = gcm(key, iv);
+  const encrypted = cipher.encrypt(plaintext); // ciphertext + authTag
+  return { ivHex: bytesToHex(iv), ciphertextHex: bytesToHex(encrypted) };
+};
+
+export const aesGcmDecryptBytes = (key: Uint8Array, ivHex: string, ciphertextHex: string) => {
+  const iv = hexToBytes(ivHex);
+  const combined = hexToBytes(ciphertextHex);
+  const cipher = gcm(key, iv);
+  return cipher.decrypt(combined);
+};
+
 export const encryptChatMessageV1 = (
   plaintext: string,
   senderPrivateKeyHex: string,

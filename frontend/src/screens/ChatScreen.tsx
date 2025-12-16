@@ -27,14 +27,28 @@ import { useAuthenticator } from '@aws-amplify/ui-react-native';
 import Constants from 'expo-constants';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { fetchUserAttributes } from 'aws-amplify/auth';
-import { decryptChatMessageV1, encryptChatMessageV1, EncryptedChatPayloadV1, derivePublicKey, loadKeyPair } from '../../utils/crypto';
+import {
+  aesGcmDecryptBytes,
+  aesGcmEncryptBytes,
+  decryptChatMessageV1,
+  deriveChatKeyBytesV1,
+  encryptChatMessageV1,
+  EncryptedChatPayloadV1,
+  derivePublicKey,
+  loadKeyPair,
+} from '../../utils/crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getRandomBytes } from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { getUrl, uploadData } from 'aws-amplify/storage';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import * as FileSystem from 'expo-file-system';
+import { fromByteArray, toByteArray } from 'base64-js';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
+import { gcm } from '@noble/ciphers/aes.js';
 
 function InlineVideoThumb({
   url,
@@ -133,6 +147,44 @@ type ChatEnvelope = {
   };
 };
 
+const ENCRYPTED_PLACEHOLDER = 'Encrypted message (tap to decrypt; long-hold to view ciphertext)';
+
+type DmMediaEnvelopeV1 = {
+  type: 'dm_media_v1';
+  v: 1;
+  caption?: string;
+  media: {
+    kind: 'image' | 'video' | 'file';
+    contentType?: string;
+    fileName?: string;
+    size?: number;
+    path: string; // encrypted blob
+    iv: string; // hex
+    thumbPath?: string; // encrypted thumb blob
+    thumbIv?: string; // hex
+    thumbContentType?: string; // e.g. image/jpeg
+  };
+  wrap: {
+    iv: string; // hex
+    ciphertext: string; // hex (wrapped fileKey)
+  };
+};
+
+const parseDmMediaEnvelope = (raw: string): DmMediaEnvelopeV1 | null => {
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return null;
+    if (obj.type !== 'dm_media_v1' || obj.v !== 1) return null;
+    if (!obj.media || !obj.wrap) return null;
+    if (typeof obj.media.path !== 'string' || typeof obj.media.iv !== 'string') return null;
+    if (typeof obj.wrap.iv !== 'string' || typeof obj.wrap.ciphertext !== 'string') return null;
+    return obj as DmMediaEnvelopeV1;
+  } catch {
+    return null;
+  }
+};
+
 const parseChatEnvelope = (raw: string): ChatEnvelope | null => {
   if (!raw) return null;
   try {
@@ -163,8 +215,8 @@ const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25MB (GIFs/documents)
 const THUMB_MAX_DIM = 720; // px
 const THUMB_JPEG_QUALITY = 0.85; // preview-only; original stays untouched
-const CHAT_MEDIA_MAX_HEIGHT = 240; // dp
-const CHAT_MEDIA_MAX_WIDTH_FRACTION = 0.86; // fraction of screen width (roughly bubble width)
+  const CHAT_MEDIA_MAX_HEIGHT = 240; // dp
+  const CHAT_MEDIA_MAX_WIDTH_FRACTION = 0.86; // fraction of screen width (roughly bubble width)
 
 const formatBytes = (bytes: number): string => {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
@@ -429,11 +481,17 @@ export default function ChatScreen({
     }
   }, []);
 
-  // Global chat attachments (DM attachments will be E2EE later)
+  // Attachments: Global = plaintext S3; DM = E2EE (client-side encryption before upload)
   const handlePickMedia = React.useCallback(() => {
     if (isDm) {
-      Alert.alert('Not supported yet', 'Media attachments for DMs will be added with E2EE later.');
-      return;
+      if (!myPrivateKey) {
+        Alert.alert('Encryption not ready', 'Missing your private key on this device.');
+        return;
+      }
+      if (!peerPublicKey) {
+        Alert.alert('Encryption not ready', "Can't find the recipient's public key.");
+        return;
+      }
     }
     Alert.alert('Attach', 'Choose a source', [
       { text: 'Photos / Videos', onPress: () => void pickFromLibrary() },
@@ -441,7 +499,7 @@ export default function ChatScreen({
       { text: 'File (GIF, etc.)', onPress: () => void pickDocument() },
       { text: 'Cancel', style: 'cancel' },
     ]);
-  }, [isDm, pickFromLibrary, captureFromCamera, pickDocument]);
+  }, [isDm, myPrivateKey, peerPublicKey, pickFromLibrary, captureFromCamera, pickDocument]);
 
   const uploadPendingMedia = React.useCallback(
     async (
@@ -535,6 +593,136 @@ export default function ChatScreen({
       };
     },
     [pendingMedia]
+  );
+
+  const uploadPendingMediaDmEncrypted = React.useCallback(
+    async (
+      media: NonNullable<typeof pendingMedia>,
+      conversationKey: string,
+      senderPrivateKeyHex: string,
+      recipientPublicKeyHex: string
+    ): Promise<DmMediaEnvelopeV1> => {
+      const readUriBytes = async (uri: string): Promise<Uint8Array> => {
+        // Prefer fetch(...).arrayBuffer() (works for http(s) and often for file://),
+        // fallback to FileSystem Base64 read for cases where Blob.arrayBuffer is missing.
+        try {
+          const resp: any = await fetch(uri);
+          if (resp && typeof resp.arrayBuffer === 'function') {
+            return new Uint8Array(await resp.arrayBuffer());
+          }
+          if (resp && typeof resp.blob === 'function') {
+            const b: any = await resp.blob();
+            if (b && typeof b.arrayBuffer === 'function') {
+              return new Uint8Array(await b.arrayBuffer());
+            }
+          }
+        } catch {
+          // fall through
+        }
+        const b64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        return toByteArray(b64);
+      };
+
+      const declaredSize = typeof media.size === 'number' ? media.size : undefined;
+      const hardLimit =
+        media.kind === 'image' ? MAX_IMAGE_BYTES : media.kind === 'video' ? MAX_VIDEO_BYTES : MAX_FILE_BYTES;
+      if (declaredSize && declaredSize > hardLimit) {
+        throw new Error(
+          `File too large (${formatBytes(declaredSize)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
+        );
+      }
+
+      // 1) Read original bytes (avoid Blob.arrayBuffer on Android)
+      const plainBytes = await readUriBytes(media.uri);
+      if (plainBytes.byteLength > hardLimit) {
+        throw new Error(
+          `File too large (${formatBytes(plainBytes.byteLength)}). Limit for ${media.kind} is ${formatBytes(
+            hardLimit
+          )}.`
+        );
+      }
+
+      // 2) Generate per-attachment key and encrypt bytes
+      const fileKey = new Uint8Array(getRandomBytes(32));
+      const fileIv = new Uint8Array(getRandomBytes(12));
+      const fileCipher = gcm(fileKey, fileIv).encrypt(plainBytes);
+
+      // 3) Upload encrypted blob
+      const safeName =
+        (media.fileName || `${media.kind}-${Date.now()}`)
+          .replace(/[^\w.\-() ]+/g, '_')
+          .slice(0, 120) || `file-${Date.now()}`;
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const path = `uploads/dm/${conversationKey}/${uploadId}-${safeName}.enc`;
+      // NOTE: avoid Blob construction on RN (can throw). uploadData supports Uint8Array directly.
+      await uploadData({ path, data: fileCipher, options: { contentType: 'application/octet-stream' } }).result;
+
+      // 4) Create + encrypt thumbnail (also E2EE)
+      let thumbPath: string | undefined;
+      let thumbIvHex: string | undefined;
+      let thumbContentType: string | undefined;
+      try {
+        let thumbUri: string | null = null;
+        if (media.kind === 'image') {
+          const thumb = await ImageManipulator.manipulateAsync(
+            media.uri,
+            [{ resize: { width: THUMB_MAX_DIM } }],
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.JPEG }
+          );
+          thumbUri = thumb.uri;
+        } else if (media.kind === 'video') {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(media.uri, {
+            time: 500,
+            quality: THUMB_JPEG_QUALITY,
+          });
+          thumbUri = uri;
+        }
+
+        if (thumbUri) {
+          const tBytes = await readUriBytes(thumbUri);
+          const tIv = new Uint8Array(getRandomBytes(12));
+          const tCipher = gcm(fileKey, tIv).encrypt(tBytes);
+          thumbPath = `uploads/dm/${conversationKey}/thumbs/${uploadId}.jpg.enc`;
+          await uploadData({
+            path: thumbPath,
+            data: tCipher,
+            options: { contentType: 'application/octet-stream' },
+          }).result;
+          thumbIvHex = bytesToHex(tIv);
+          thumbContentType = 'image/jpeg';
+        }
+      } catch {
+        // ignore thumb failures
+      }
+
+      // 5) Wrap fileKey with conversation ECDH key
+      const chatKey = deriveChatKeyBytesV1(senderPrivateKeyHex, recipientPublicKeyHex);
+      const wrap = aesGcmEncryptBytes(chatKey, fileKey);
+
+      return {
+        type: 'dm_media_v1',
+        v: 1,
+        caption: input.trim() || undefined,
+        media: {
+          kind: media.kind,
+          contentType: media.contentType,
+          fileName: media.fileName,
+          size: media.size,
+          path,
+          iv: bytesToHex(fileIv),
+          ...(thumbPath ? { thumbPath } : {}),
+          ...(thumbIvHex ? { thumbIv: thumbIvHex } : {}),
+          ...(thumbContentType ? { thumbContentType } : {}),
+        },
+        wrap: {
+          iv: wrap.ivHex,
+          ciphertext: wrap.ciphertextHex,
+        },
+      };
+    },
+    [input]
   );
 
   const openMedia = React.useCallback(async (path: string) => {
@@ -839,6 +1027,131 @@ export default function ChatScreen({
     [myPrivateKey, myPublicKey, peerPublicKey]
   );
 
+  const buildDmMediaKey = React.useCallback(
+    (msg: ChatMessage): Uint8Array => {
+      if (!msg.encrypted) throw new Error('Not encrypted');
+      if (!myPrivateKey) throw new Error('Missing your private key on this device.');
+      const isFromMe = !!myPublicKey && msg.encrypted.senderPublicKey === myPublicKey;
+      const theirPub = isFromMe ? peerPublicKey : msg.encrypted.senderPublicKey;
+      if (!theirPub) throw new Error("Can't derive DM media key (missing peer key).");
+      return deriveChatKeyBytesV1(myPrivateKey, theirPub);
+    },
+    [myPrivateKey, myPublicKey, peerPublicKey]
+  );
+
+  const [dmThumbUriByPath, setDmThumbUriByPath] = React.useState<Record<string, string>>({});
+  const [dmFileUriByPath, setDmFileUriByPath] = React.useState<Record<string, string>>({});
+
+  const decryptDmThumbToDataUri = React.useCallback(
+    async (msg: ChatMessage, env: DmMediaEnvelopeV1): Promise<string | null> => {
+      if (!env.media.thumbPath || !env.media.thumbIv) return null;
+      const cacheKey = env.media.thumbPath;
+      if (dmThumbUriByPath[cacheKey]) return dmThumbUriByPath[cacheKey];
+
+      const chatKey = buildDmMediaKey(msg);
+      const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext); // 32 bytes
+
+      const { url } = await getUrl({ path: env.media.thumbPath });
+      const encResp = await fetch(url.toString());
+      const encBytes = new Uint8Array(await encResp.arrayBuffer());
+      const plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
+
+      const b64 = fromByteArray(plainThumbBytes);
+      const ct = env.media.thumbContentType || 'image/jpeg';
+      const dataUri = `data:${ct};base64,${b64}`;
+      setDmThumbUriByPath((prev) => ({ ...prev, [cacheKey]: dataUri }));
+
+      // Cache aspect ratio for sizing (DM thumbs are decrypted, so Image.getSize must run on the data URI)
+      Image.getSize(
+        dataUri,
+        (w, h) => {
+          const aspect = w > 0 && h > 0 ? w / h : 1;
+          setImageAspectByPath((prev) => ({ ...prev, [cacheKey]: aspect }));
+        },
+        () => {}
+      );
+      return dataUri;
+    },
+    [aesGcmDecryptBytes, buildDmMediaKey, dmThumbUriByPath]
+  );
+
+  const decryptDmFileToCacheUri = React.useCallback(
+    async (msg: ChatMessage, env: DmMediaEnvelopeV1): Promise<string> => {
+      const cacheKey = env.media.path;
+      if (dmFileUriByPath[cacheKey]) return dmFileUriByPath[cacheKey];
+
+      const chatKey = buildDmMediaKey(msg);
+      const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext);
+
+      const { url } = await getUrl({ path: env.media.path });
+      const encResp = await fetch(url.toString());
+      const encBytes = new Uint8Array(await encResp.arrayBuffer());
+      const fileIvBytes = hexToBytes(env.media.iv);
+      const plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
+
+      const ct = env.media.contentType || 'application/octet-stream';
+      const ext =
+        ct.startsWith('image/')
+          ? ct.split('/')[1] || 'jpg'
+          : ct.startsWith('video/')
+            ? ct.split('/')[1] || 'mp4'
+            : 'bin';
+      const fileNameSafe = (env.media.fileName || `dm-${Date.now()}`).replace(/[^\w.\-() ]+/g, '_');
+      const outUri = `${FileSystem.cacheDirectory}dm-${fileNameSafe}.${ext}`;
+      const b64 = fromByteArray(plainBytes);
+      await FileSystem.writeAsStringAsync(outUri, b64, { encoding: FileSystem.EncodingType.Base64 });
+
+      setDmFileUriByPath((prev) => ({ ...prev, [cacheKey]: outUri }));
+      return outUri;
+    },
+    [aesGcmDecryptBytes, buildDmMediaKey, dmFileUriByPath]
+  );
+
+  // DM: decrypt thumbnails once messages are decrypted (so we can render inline previews).
+  React.useEffect(() => {
+    if (!isDm) return;
+    let cancelled = false;
+    const run = async () => {
+      for (const m of messages) {
+        if (cancelled) return;
+        if (!m.decryptedText) continue;
+        const env = parseDmMediaEnvelope(m.decryptedText);
+        if (!env?.media?.thumbPath || !env.media.thumbIv) continue;
+        if (dmThumbUriByPath[env.media.thumbPath]) continue;
+        try {
+          await decryptDmThumbToDataUri(m, env);
+        } catch {
+          // ignore
+        }
+      }
+    };
+    setTimeout(() => void run(), 0);
+    return () => {
+      cancelled = true;
+    };
+  }, [isDm, messages, dmThumbUriByPath, decryptDmThumbToDataUri]);
+
+  const openDmMediaViewer = React.useCallback(
+    async (msg: ChatMessage) => {
+      if (!isDm) return;
+      if (!msg.decryptedText) return;
+      const env = parseDmMediaEnvelope(msg.decryptedText);
+      if (!env) return;
+      try {
+        const localUri = await decryptDmFileToCacheUri(msg, env);
+        setViewerMedia({
+          url: localUri,
+          kind: env.media.kind === 'video' ? 'video' : env.media.kind === 'image' ? 'image' : 'file',
+          fileName: env.media.fileName,
+        });
+        setViewerOpen(true);
+      } catch (e: any) {
+        Alert.alert('Open failed', e?.message ?? 'Could not decrypt attachment');
+      }
+    },
+    [isDm, decryptDmFileToCacheUri]
+  );
+
   const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
     setMySeenAtByCreatedAt((prev) => ({
       ...prev,
@@ -949,15 +1262,47 @@ export default function ChatScreen({
       try {
         const plaintext = decryptForDisplay(m);
         changed = true;
+        const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
         if (!isFromMe) {
           maxReadUpTo = Math.max(maxReadUpTo, m.createdAt);
           const expiresAt =
             m.ttlSeconds && m.ttlSeconds > 0 ? readAt + m.ttlSeconds : m.expiresAt;
           markMySeen(m.createdAt, readAt);
-          return { ...m, decryptedText: plaintext, text: plaintext, expiresAt };
+          return {
+            ...m,
+            decryptedText: plaintext,
+            text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
+            media: dmEnv
+              ? {
+                  path: dmEnv.media.path,
+                  thumbPath: dmEnv.media.thumbPath,
+                  kind: dmEnv.media.kind,
+                  contentType: dmEnv.media.contentType,
+                  thumbContentType: dmEnv.media.thumbContentType,
+                  fileName: dmEnv.media.fileName,
+                  size: dmEnv.media.size,
+                }
+              : m.media,
+            expiresAt,
+          };
         }
         markMySeen(m.createdAt, readAt);
-        return { ...m, decryptedText: plaintext, text: plaintext };
+        return {
+          ...m,
+          decryptedText: plaintext,
+          text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
+          media: dmEnv
+            ? {
+                path: dmEnv.media.path,
+                thumbPath: dmEnv.media.thumbPath,
+                kind: dmEnv.media.kind,
+                contentType: dmEnv.media.contentType,
+                thumbContentType: dmEnv.media.thumbContentType,
+                fileName: dmEnv.media.fileName,
+                size: dmEnv.media.size,
+              }
+            : m.media,
+        };
       } catch {
         changed = true;
         return { ...m, decryptFailed: true };
@@ -1141,6 +1486,14 @@ export default function ChatScreen({
         }
 
         if (payload && payload.text) {
+          // Only render messages for the currently open conversation.
+          // (We still emit DM notifications above for other conversations.)
+          const incomingConv =
+            typeof payload.conversationId === 'string' && payload.conversationId.length > 0
+              ? payload.conversationId
+              : 'global';
+          if (incomingConv !== activeConv) return;
+
           const rawText = String(payload.text);
           const encrypted = parseEncrypted(rawText);
           const createdAt = Number(payload.createdAt || Date.now());
@@ -1154,7 +1507,7 @@ export default function ChatScreen({
             rawText,
             encrypted: encrypted ?? undefined,
             text: encrypted
-              ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)'
+              ? ENCRYPTED_PLACEHOLDER
               : rawText,
             createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
@@ -1238,7 +1591,7 @@ export default function ChatScreen({
               rawText: String(it.text ?? ''),
               encrypted: parseEncrypted(String(it.text ?? '')) ?? undefined,
               text: parseEncrypted(String(it.text ?? ''))
-                ? 'Encrypted message (tap to decrypt; long-press to view ciphertext)'
+                ? ENCRYPTED_PLACEHOLDER
                 : String(it.text ?? ''),
               createdAt: Number(it.createdAt ?? Date.now()),
               expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
@@ -1285,8 +1638,30 @@ export default function ChatScreen({
         Alert.alert('Encryption not ready', "Can't find the recipient's public key.");
         return;
       }
-      const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
-      outgoingText = JSON.stringify(enc);
+
+      // DM media: encrypt + upload ciphertext, then encrypt the envelope as a normal DM message.
+      if (pendingMedia) {
+        try {
+          setIsUploading(true);
+          const dmEnv = await uploadPendingMediaDmEncrypted(
+            pendingMedia,
+            activeConversationId,
+            myPrivateKey,
+            peerPublicKey
+          );
+          const plaintextEnvelope = JSON.stringify(dmEnv);
+          const enc = encryptChatMessageV1(plaintextEnvelope, myPrivateKey, peerPublicKey);
+          outgoingText = JSON.stringify(enc);
+        } catch (e: any) {
+          Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
+          return;
+        } finally {
+          setIsUploading(false);
+        }
+      } else {
+        const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
+        outgoingText = JSON.stringify(enc);
+      }
     } else if (pendingMedia) {
       try {
         setIsUploading(true);
@@ -1321,6 +1696,7 @@ export default function ChatScreen({
     pendingMedia,
     isUploading,
     uploadPendingMedia,
+    uploadPendingMediaDmEncrypted,
     displayName,
     activeConversationId,
     isDm,
@@ -1336,6 +1712,7 @@ export default function ChatScreen({
       try {
         const readAt = Math.floor(Date.now() / 1000);
         const plaintext = decryptForDisplay(msg);
+        const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
         const isFromMe = !!myPublicKey && msg.encrypted?.senderPublicKey === myPublicKey;
         setMessages((prev) =>
           prev.map((m) =>
@@ -1343,7 +1720,18 @@ export default function ChatScreen({
               ? {
                   ...m,
                   decryptedText: plaintext,
-                  text: plaintext,
+                  text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
+                  media: dmEnv
+                    ? {
+                        path: dmEnv.media.path,
+                        thumbPath: dmEnv.media.thumbPath,
+                        kind: dmEnv.media.kind,
+                        contentType: dmEnv.media.contentType,
+                        thumbContentType: dmEnv.media.thumbContentType,
+                        fileName: dmEnv.media.fileName,
+                        size: dmEnv.media.size,
+                      }
+                    : m.media,
                   expiresAt:
                     // TTL-from-read:
                     // - Incoming messages: start countdown at decrypt time.
@@ -1362,7 +1750,7 @@ export default function ChatScreen({
         Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
       }
     },
-    [decryptForDisplay, myPublicKey, sendReadReceipt]
+    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm]
   );
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
@@ -1516,6 +1904,9 @@ export default function ChatScreen({
           const media = envelope?.media ?? item.media;
           const mediaUrl = media?.path ? mediaUrlByPath[media.path] : null;
           const mediaThumbUrl = media?.thumbPath ? mediaUrlByPath[media.thumbPath] : null;
+          const dmThumbUri =
+            isDm && media?.thumbPath ? dmThumbUriByPath[media.thumbPath] : null;
+          const displayThumbUri = isDm ? dmThumbUri : (mediaThumbUrl || mediaUrl);
           const mediaLooksImage =
             !!media &&
             (media.kind === 'image' ||
@@ -1524,7 +1915,10 @@ export default function ChatScreen({
             !!media &&
             (media.kind === 'video' ||
               (media.kind === 'file' && (media.contentType || '').startsWith('video/')));
-          const hasMedia = !!media?.path;
+          // IMPORTANT: if the message is still encrypted (not decrypted yet),
+          // always render it as a normal encrypted-text bubble so media placeholders
+          // don't appear larger than encrypted text placeholders.
+          const hasMedia = !!media?.path && (!item.encrypted || !!item.decryptedText);
           const imageKeyPath = mediaLooksImage ? (media?.thumbPath || media?.path) : undefined;
           const imageAspect =
             imageKeyPath && imageAspectByPath[imageKeyPath] ? imageAspectByPath[imageKeyPath] : undefined;
@@ -1597,11 +1991,16 @@ export default function ChatScreen({
                           ) : null}
                         </View>
                         {media?.path ? (
-                          (mediaThumbUrl || mediaUrl) && mediaLooksImage ? (
-                            <Pressable onPress={() => openViewer(media)}>
+                          displayThumbUri && mediaLooksImage ? (
+                            <Pressable
+                              onPress={() => {
+                                if (isDm) void openDmMediaViewer(item);
+                                else openViewer(media as any);
+                              }}
+                            >
                               {typeof thumbAspect === 'number' ? (
                                 <Image
-                                  source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                                  source={{ uri: displayThumbUri }}
                                   style={[styles.mediaCappedImage, { width: capped.w, height: capped.h }]}
                                   // No crop: we size the view to the image aspect ratio.
                                   resizeMode="contain"
@@ -1609,7 +2008,7 @@ export default function ChatScreen({
                               ) : (
                                 <View style={styles.imageThumbWrap}>
                                   <Image
-                                    source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                                    source={{ uri: displayThumbUri }}
                                     style={styles.mediaFill}
                                     // Fallback while we haven't measured aspect ratio yet.
                                     resizeMode="contain"
@@ -1617,16 +2016,32 @@ export default function ChatScreen({
                                 </View>
                               )}
                             </Pressable>
-                          ) : (mediaThumbUrl || mediaUrl) && mediaLooksVideo ? (
-                            <Pressable onPress={() => openViewer(media)}>
+                          ) : displayThumbUri && mediaLooksVideo ? (
+                            <Pressable
+                              onPress={() => {
+                                if (isDm) void openDmMediaViewer(item);
+                                else openViewer(media as any);
+                              }}
+                            >
                               <View style={[styles.videoThumbWrap, { width: capped.w, height: capped.h }]}>
                                 <Image
-                                  source={{ uri: mediaThumbUrl || mediaUrl || '' }}
+                                  source={{ uri: displayThumbUri }}
                                   style={[styles.mediaFill]}
                                   resizeMode="cover"
                                 />
                                 <View style={styles.videoPlayOverlay}>
                                   <Text style={styles.videoPlayText}>▶</Text>
+                                </View>
+                              </View>
+                            </Pressable>
+                          ) : isDm && mediaLooksImage ? (
+                            <Pressable onPress={() => void openDmMediaViewer(item)}>
+                              <View style={[styles.imageThumbWrap, { width: capped.w, height: capped.h }]}>
+                                <View style={[styles.mediaFill, { backgroundColor: '#ddd' }]} />
+                                <View style={styles.videoPlayOverlay}>
+                                  <Text style={[styles.attachmentLink, { color: '#555', textDecorationLine: 'none' }]}>
+                                    Encrypted media
+                                  </Text>
                                 </View>
                               </View>
                             </Pressable>
@@ -1640,7 +2055,16 @@ export default function ChatScreen({
                         ) : null}
                       </View>
 
-                      {seenLabel ? <Text style={styles.seenText}>{seenLabel}</Text> : null}
+                      {seenLabel ? (
+                        <Text
+                          style={[
+                            styles.seenText,
+                            isOutgoing ? styles.seenTextOutgoing : styles.seenTextIncoming,
+                          ]}
+                        >
+                          {seenLabel}
+                        </Text>
+                      ) : null}
                     </View>
                   ) : (
                     <View
@@ -1667,7 +2091,16 @@ export default function ChatScreen({
                           {captionText}
                         </Text>
                       ) : null}
-                      {seenLabel ? <Text style={styles.seenText}>{seenLabel}</Text> : null}
+                      {seenLabel ? (
+                        <Text
+                          style={[
+                            styles.seenText,
+                            isOutgoing ? styles.seenTextOutgoing : styles.seenTextIncoming,
+                          ]}
+                        >
+                          {seenLabel}
+                        </Text>
+                      ) : null}
                     </View>
                   )}
                 </View>
@@ -1677,11 +2110,13 @@ export default function ChatScreen({
           contentContainerStyle={styles.listContent}
         />
         <View style={styles.inputRow}>
-          {!isDm ? (
-            <Pressable style={styles.pickBtn} onPress={handlePickMedia} disabled={isUploading}>
-              <Text style={styles.pickTxt}>＋</Text>
-            </Pressable>
-          ) : null}
+          <Pressable
+            style={[styles.pickBtn, isUploading ? styles.btnDisabled : null]}
+            onPress={handlePickMedia}
+            disabled={isUploading}
+          >
+            <Text style={styles.pickTxt}>＋</Text>
+          </Pressable>
           <TextInput
             style={styles.input}
             placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
@@ -1690,11 +2125,15 @@ export default function ChatScreen({
             onSubmitEditing={sendMessage}
             returnKeyType="send"
           />
-          <Pressable style={styles.sendBtn} onPress={sendMessage} disabled={isUploading}>
+          <Pressable
+            style={[styles.sendBtn, isUploading ? styles.btnDisabled : null]}
+            onPress={sendMessage}
+            disabled={isUploading}
+          >
             <Text style={styles.sendTxt}>{isUploading ? 'Uploading…' : 'Send'}</Text>
           </Pressable>
         </View>
-        {!isDm && pendingMedia ? (
+        {pendingMedia ? (
           <Pressable
             style={styles.attachmentPill}
             onPress={() => setPendingMedia(null)}
@@ -2008,11 +2447,12 @@ const styles = StyleSheet.create({
   seenText: {
     marginTop: 6,
     fontSize: 12,
-    color: '#1976d2',
     fontStyle: 'italic',
     fontWeight: '600',
     alignSelf: 'flex-end',
   },
+  seenTextIncoming: { color: '#1976d2' },
+  seenTextOutgoing: { color: 'rgba(255,255,255,0.9)' },
   inputRow: {
     flexDirection: 'row',
     padding: 12,
@@ -2060,6 +2500,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#1976d2',
   },
   sendTxt: { color: '#fff', fontWeight: '600' },
+  btnDisabled: {
+    backgroundColor: '#7fb2e6',
+    opacity: 0.75,
+  },
 
   summaryModal: {
     width: '88%',
