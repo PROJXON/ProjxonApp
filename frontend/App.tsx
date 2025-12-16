@@ -9,9 +9,11 @@ import {
   Pressable,
   Modal,
   Alert,
+  Switch,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import ChatScreen from './src/screens/ChatScreen';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { Amplify } from "aws-amplify";
 import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react-native";
@@ -40,13 +42,30 @@ try {
   // amplify_outputs.json not present yet; run `npx ampx sandbox` to generate it.
 }
 
-const SignOutButton = () => {
+const SignOutButton = ({
+  style,
+  theme,
+}: {
+  style?: any;
+  theme: 'light' | 'dark';
+}) => {
   const { signOut } = useAuthenticator();
+  const isDark = theme === 'dark';
 
   return (
-    <View style={styles.signOutButton}>
-      <Button title="Sign Out" onPress={signOut} />
-    </View>
+    <Pressable
+      onPress={signOut}
+      style={({ pressed }) => [
+        styles.signOutPill,
+        isDark && styles.signOutPillDark,
+        pressed && { opacity: 0.85 },
+        style,
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel="Sign out"
+    >
+      <Text style={[styles.signOutPillText, isDark && styles.signOutPillTextDark]}>Sign out</Text>
+    </Pressable>
   );
 };
 
@@ -311,6 +330,30 @@ const MainAppContent = () => {
   const [unreadDmMap, setUnreadDmMap] = useState<Record<string, { user: string; count: number }>>(
     () => ({})
   );
+  const isDmMode = conversationId !== 'global';
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const isDark = theme === 'dark';
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem('ui:theme');
+        if (stored === 'dark' || stored === 'light') setTheme(stored);
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem('ui:theme', theme);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [theme]);
 
   const startDM = async () => {
       const trimmed = peerInput.trim();
@@ -440,8 +483,156 @@ const MainAppContent = () => {
       ? 'Enter your recovery passphrase'
       : 'Create a recovery passphrase';
 
+  const headerTop = (
+    <>
+      <View style={styles.topRow}>
+        <View style={[styles.segment, isDark && styles.segmentDark]}>
+          <Pressable
+            onPress={() => {
+              setConversationId('global');
+              setPeer(null);
+              setPeerInput('');
+              setSearchError(null);
+              setSearchOpen(false);
+            }}
+            style={({ pressed }) => [
+              styles.segmentBtn,
+              !isDmMode && styles.segmentBtnActive,
+              !isDmMode && isDark && styles.segmentBtnActiveDark,
+              pressed && { opacity: 0.9 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Global chat"
+          >
+            <Text
+              style={[
+                styles.segmentBtnText,
+                isDark && styles.segmentBtnTextDark,
+                !isDmMode && styles.segmentBtnTextActive,
+                !isDmMode && isDark && styles.segmentBtnTextActiveDark,
+              ]}
+            >
+              Global
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => setSearchOpen((prev) => !prev)}
+            style={({ pressed }) => [
+              styles.segmentBtn,
+              (isDmMode || searchOpen) && styles.segmentBtnActive,
+              (isDmMode || searchOpen) && isDark && styles.segmentBtnActiveDark,
+              pressed && { opacity: 0.9 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Direct messages"
+          >
+            <View style={styles.dmPillInner}>
+              <Text
+                style={[
+                  styles.segmentBtnText,
+                  isDark && styles.segmentBtnTextDark,
+                  (isDmMode || searchOpen) && styles.segmentBtnTextActive,
+                  (isDmMode || searchOpen) && isDark && styles.segmentBtnTextActiveDark,
+                ]}
+              >
+                DM
+              </Text>
+              {hasUnreadDms ? <View style={styles.unreadDot} /> : null}
+            </View>
+          </Pressable>
+        </View>
+
+        <View style={styles.rightControls}>
+          <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
+            <Text style={[styles.themeToggleText, isDark && styles.themeToggleTextDark]}>
+              {isDark ? 'Dark' : 'Light'}
+            </Text>
+            <Switch
+              value={isDark}
+              onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
+              trackColor={{
+                false: '#d1d1d6',
+                true: '#d1d1d6',
+              }}
+              thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+            />
+          </View>
+          <SignOutButton theme={theme} />
+        </View>
+      </View>
+
+      {searchOpen && (
+        <View style={styles.searchWrapper}>
+          <View style={styles.searchRow}>
+            <TextInput
+              value={peerInput}
+              onChangeText={(value) => {
+                setPeerInput(value);
+                setSearchError(null);
+              }}
+              placeholder="User to Message"
+              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+              style={[styles.searchInput, isDark && styles.searchInputDark]}
+            />
+            <Pressable
+              onPress={startDM}
+              style={({ pressed }) => [
+                styles.startDmBtn,
+                isDark && styles.startDmBtnDark,
+                pressed && { opacity: 0.9 },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Start direct message"
+            >
+              <Text style={[styles.startDmBtnText, isDark && styles.startDmBtnTextDark]}>
+                Start DM
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setSearchOpen(false);
+                setPeerInput('');
+                setSearchError(null);
+              }}
+              style={({ pressed }) => [
+                styles.cancelBtn,
+                isDark && styles.cancelBtnDark,
+                pressed && { opacity: 0.85 },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel direct message"
+            >
+              <Text style={[styles.cancelBtnText, isDark && styles.cancelBtnTextDark]}>
+                Cancel
+              </Text>
+            </Pressable>
+          </View>
+          {unreadEntries.length ? (
+            <View style={styles.unreadList}>
+              {unreadEntries.map(([convId, info]) => (
+                <Pressable
+                  key={convId}
+                  style={styles.unreadHintWrapper}
+                  onPress={() => goToConversation(convId)}
+                >
+                  <Text style={styles.unreadHint}>
+                    {info.count} unread {info.count === 1 ? 'message' : 'messages'} from{' '}
+                    <Text style={styles.unreadHintBold}>{info.user}</Text>
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      )}
+
+      {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
+    </>
+  );
+
   return (
-    <View style={styles.appContent}>
+    <View style={[styles.appContent, isDark ? styles.appContentDark : null]}>
         <Modal visible={promptVisible} transparent animationType="fade">
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
@@ -496,73 +687,14 @@ const MainAppContent = () => {
             </View>
           </View>
         </Modal>
-      <View style={styles.topRow}>
-        <View style={styles.dmButtonWrapper}>
-          <Button title="Direct Message" onPress={() => setSearchOpen((prev) => !prev)} />
-          {hasUnreadDms ? <View style={styles.unreadDot} /> : null}
-        </View>
-        <Button
-          title="Global"
-          onPress={() => {
-            setConversationId('global');
-            setPeer(null);
-            setPeerInput('');
-            setSearchError(null);
-            setSearchOpen(false);
-          }}
-        />
-        <SignOutButton />
-      </View>
-      {searchOpen && (
-        <View style={styles.searchWrapper}>
-          <View style={styles.searchRow}>
-            <TextInput
-              value={peerInput}
-              onChangeText={(value) => {
-                setPeerInput(value);
-                setSearchError(null);
-              }}
-              placeholder="User to Message"
-              style={styles.searchInput}
-            />
-            <Button
-              title="Start DM"
-              onPress={startDM}
-            />
-            <Button
-              title="Cancel"
-              onPress={() => {
-                setSearchOpen(false);
-                setPeerInput('');
-                setSearchError(null);
-              }}
-            />
-          </View>
-          {unreadEntries.length ? (
-            <View style={styles.unreadList}>
-              {unreadEntries.map(([convId, info]) => (
-                <Pressable
-                  key={convId}
-                  style={styles.unreadHintWrapper}
-                  onPress={() => goToConversation(convId)}
-                >
-                  <Text style={styles.unreadHint}>
-                    {info.count} unread {info.count === 1 ? 'message' : 'messages'} from{' '}
-                    <Text style={styles.unreadHintBold}>{info.user}</Text>
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-        </View>
-      )}
-      {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
       <View style={{ flex: 1 }}>
         <ChatScreen
           conversationId={conversationId}
           peer={peer}
           displayName={displayName}
           onNewDmNotification={handleNewDmNotification}
+          headerTop={headerTop}
+          theme={theme}
         />
       </View>
     </View>
@@ -572,7 +704,7 @@ const MainAppContent = () => {
 export default function App(): React.JSX.Element {
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={[styles.container, styles.appSafe]}>
         <Authenticator.Provider>
           <Authenticator
             loginMechanisms={['email']}
@@ -591,45 +723,125 @@ export default function App(): React.JSX.Element {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
     alignItems: 'stretch',
     justifyContent: 'flex-start',
   },
-  signOutButton: {
-    alignSelf: 'flex-end',
+  appSafe: {
+    backgroundColor: '#fff',
   },
   topRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 8,
+    gap: 12,
+  },
+  rightControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  segment: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f2f2f7',
+    padding: 3,
+    borderRadius: 12,
+    gap: 4,
+  },
+  segmentDark: {
+    backgroundColor: '#1c1c22',
+  },
+  segmentBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    minWidth: 84,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  segmentBtnActive: {
+    backgroundColor: '#fff',
+  },
+  segmentBtnActiveDark: {
+    backgroundColor: '#2a2a33',
+  },
+  segmentBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#666',
+  },
+  segmentBtnTextDark: {
+    color: '#b7b7c2',
+  },
+  segmentBtnTextActive: {
+    color: '#111',
+  },
+  segmentBtnTextActiveDark: {
+    color: '#fff',
+  },
+  dmPillInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
   },
-  dmButtonWrapper: {
-    position: 'relative',
-  },
   unreadDot: {
-    position: 'absolute',
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: '#d32f2f',
-    top: 6,
-    right: -6,
+  },
+  signOutPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: '#fff',
+    borderColor: '#e3e3e3',
+  },
+  signOutPillDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  signOutPillText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#111',
+  },
+  signOutPillTextDark: {
+    color: '#fff',
+  },
+  themeToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e3e3e3',
+  },
+  themeToggleDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  themeToggleText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#111',
+  },
+  themeToggleTextDark: {
+    color: '#fff',
   },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
     marginBottom: 8,
     gap: 8,
     zIndex: 1,
   },
   searchWrapper: {
-    paddingHorizontal: 16,
+    marginTop: 10,
     marginBottom: 8,
   },
   searchInput: {
@@ -639,6 +851,55 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     height: 40,
+  },
+  searchInputDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+    color: '#fff',
+  },
+  startDmBtn: {
+    height: 40,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  startDmBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderColor: '#2a2a33',
+  },
+  startDmBtnText: {
+    color: '#111',
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+  startDmBtnTextDark: {
+    color: '#fff',
+  },
+  cancelBtn: {
+    height: 40,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    backgroundColor: '#fff',
+  },
+  cancelBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderColor: '#2a2a33',
+  },
+  cancelBtnText: {
+    color: '#111',
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+  cancelBtnTextDark: {
+    color: '#fff',
   },
   unreadList: {
     paddingHorizontal: 4,
@@ -658,13 +919,15 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: '#d32f2f',
-    paddingHorizontal: 16,
     marginBottom: 8,
   },
   appContent: {
     flex: 1,
     alignSelf: 'stretch',
     position: 'relative',
+  },
+  appContentDark: {
+    backgroundColor: '#0b0b0f',
   },
   modalOverlay: {
     flex: 1,

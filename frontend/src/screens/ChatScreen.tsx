@@ -109,6 +109,8 @@ type ChatScreenProps = {
   peer?: string | null;
   displayName: string;
   onNewDmNotification?: (conversationId: string, user: string) => void;
+  headerTop?: React.ReactNode;
+  theme?: 'light' | 'dark';
 };
 
 type ChatMessage = {
@@ -235,7 +237,10 @@ export default function ChatScreen({
   peer,
   displayName,
   onNewDmNotification,
+  headerTop,
+  theme = 'light',
 }: ChatScreenProps): React.JSX.Element {
+  const isDark = theme === 'dark';
   const { user } = useAuthenticator();
   const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
@@ -1829,48 +1834,84 @@ export default function ChatScreen({
   }, [messages, activeConversationId, peer]);
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView
+      style={[styles.safe, isDark ? styles.safeDark : null]}
+      edges={['left', 'right', 'bottom']}
+    >
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.select({ ios: 'padding', android: undefined })}
       >
-        <View style={styles.header}>
-          <Text style={styles.title}>{peer ? `DM with ${peer}` : 'Global Chat'}</Text>
-          <Text style={styles.welcomeText}>{`Welcome ${displayName}!`}</Text>
+        <View style={[styles.header, isDark ? styles.headerDark : null]}>
+          {headerTop ? <View style={styles.headerTopSlot}>{headerTop}</View> : null}
+          <View style={styles.titleRow}>
+            <Text style={[styles.title, isDark ? styles.titleDark : null]} numberOfLines={1}>
+              {peer ? `DM with ${peer}` : 'Global Chat'}
+            </Text>
+            <Pressable
+              style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
+              onPress={summarize}
+            >
+              <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
+                Summarize Chat
+              </Text>
+            </Pressable>
+          </View>
+          <Text style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null]}>{`Welcome ${displayName}!`}</Text>
           {isDm ? (
             <View style={styles.decryptRow}>
-              <Text style={styles.decryptLabel}>Auto-decrypt</Text>
+              <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
+                Auto-decrypt
+              </Text>
               <Switch
                 value={autoDecrypt}
                 onValueChange={setAutoDecrypt}
                 disabled={!myPrivateKey}
+                  trackColor={{
+                    false: '#d1d1d6',
+                    true: '#d1d1d6',
+                  }}
+                thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                  ios_backgroundColor="#d1d1d6"
               />
             </View>
           ) : null}
           {isDm ? (
             <View style={styles.decryptRow}>
-              <Text style={styles.decryptLabel}>Disappearing messages</Text>
-              <Pressable style={styles.ttlChip} onPress={() => setTtlPickerOpen(true)}>
-                <Text style={styles.ttlChipText}>{TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}</Text>
+              <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
+                Self-Destructing Messages
+              </Text>
+              <Pressable
+                style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
+                onPress={() => setTtlPickerOpen(true)}
+              >
+                <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
+                  {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                </Text>
               </Pressable>
             </View>
           ) : null}
-          <View style={styles.toolsRow}>
-            <Pressable style={styles.toolBtn} onPress={summarize}>
-              <Text style={styles.toolBtnText}>Summarize</Text>
-            </Pressable>
-          </View>
           {isConnecting ? (
             <View style={styles.statusRow}>
               <ActivityIndicator size="small" />
-              <Text style={styles.statusText}>Connecting…</Text>
+              <Text style={[styles.statusText, isDark ? styles.statusTextDark : null]}>
+                Connecting…
+              </Text>
             </View>
           ) : (
-            <Text style={[styles.statusText, isConnected ? styles.ok : styles.err]}>
+            <Text
+              style={[
+                styles.statusText,
+                isDark ? styles.statusTextDark : null,
+                isConnected ? styles.ok : styles.err,
+              ]}
+            >
               {isConnected ? 'Connected' : 'Disconnected'}
             </Text>
           )}
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+          {error ? (
+            <Text style={[styles.error, isDark ? styles.errorDark : null]}>{error}</Text>
+          ) : null}
         </View>
         <FlatList
           data={messages}
@@ -2070,13 +2111,21 @@ export default function ChatScreen({
                     <View
                       style={[
                         styles.messageBubble,
-                        isOutgoing ? styles.messageBubbleOutgoing : styles.messageBubbleIncoming,
+                        isOutgoing
+                          ? styles.messageBubbleOutgoing
+                          : isDark
+                            ? styles.messageBubbleIncomingDark
+                            : styles.messageBubbleIncoming,
                       ]}
                     >
                       <Text
                         style={[
                           styles.messageMeta,
-                          isOutgoing ? styles.messageMetaOutgoing : styles.messageMetaIncoming,
+                          isOutgoing
+                            ? styles.messageMetaOutgoing
+                            : isDark
+                              ? styles.messageMetaIncomingDark
+                              : styles.messageMetaIncoming,
                         ]}
                       >
                         {metaLine}
@@ -2085,7 +2134,11 @@ export default function ChatScreen({
                         <Text
                           style={[
                             styles.messageText,
-                            isOutgoing ? styles.messageTextOutgoing : styles.messageTextIncoming,
+                            isOutgoing
+                              ? styles.messageTextOutgoing
+                              : isDark
+                                ? styles.messageTextIncomingDark
+                                : styles.messageTextIncoming,
                           ]}
                         >
                           {captionText}
@@ -2109,28 +2162,39 @@ export default function ChatScreen({
           }}
           contentContainerStyle={styles.listContent}
         />
-        <View style={styles.inputRow}>
+        <View style={[styles.inputRow, isDark ? styles.inputRowDark : null]}>
           <Pressable
-            style={[styles.pickBtn, isUploading ? styles.btnDisabled : null]}
+            style={[
+              styles.pickBtn,
+              isDark ? styles.pickBtnDark : null,
+              isUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+            ]}
             onPress={handlePickMedia}
             disabled={isUploading}
           >
-            <Text style={styles.pickTxt}>＋</Text>
+            <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
           </Pressable>
           <TextInput
-            style={styles.input}
+            style={[styles.input, isDark ? styles.inputDark : null]}
             placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
+            placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
             value={input}
             onChangeText={setInput}
             onSubmitEditing={sendMessage}
             returnKeyType="send"
           />
           <Pressable
-            style={[styles.sendBtn, isUploading ? styles.btnDisabled : null]}
+            style={[
+              styles.sendBtn,
+              isDark ? styles.sendBtnDark : null,
+              isUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+            ]}
             onPress={sendMessage}
             disabled={isUploading}
           >
-            <Text style={styles.sendTxt}>{isUploading ? 'Uploading…' : 'Send'}</Text>
+            <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>
+              {isUploading ? 'Uploading…' : 'Send'}
+            </Text>
           </Pressable>
         </View>
         {pendingMedia ? (
@@ -2147,29 +2211,33 @@ export default function ChatScreen({
       </KeyboardAvoidingView>
       <Modal visible={summaryOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <View style={styles.summaryModal}>
-            <Text style={styles.summaryTitle}>Summary</Text>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Summary</Text>
             {summaryLoading ? (
               <View style={styles.summaryLoadingRow}>
                 <ActivityIndicator />
-                <Text style={styles.summaryLoadingText}>Summarizing…</Text>
+                <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
+                  Summarizing…
+                </Text>
               </View>
             ) : (
               <ScrollView style={styles.summaryScroll}>
-                <Text style={styles.summaryText}>
+                <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
                   {summaryText.length ? summaryText : 'No summary returned.'}
                 </Text>
               </ScrollView>
             )}
             <View style={styles.summaryButtons}>
               <Pressable
-                style={styles.toolBtn}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
                 onPress={() => {
                   setSummaryOpen(false);
                   setSummaryText('');
                 }}
               >
-                <Text style={styles.toolBtnText}>Close</Text>
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -2184,8 +2252,13 @@ export default function ChatScreen({
               <Text style={styles.summaryText}>{cipherText || '(empty)'}</Text>
             </ScrollView>
             <View style={styles.summaryButtons}>
-              <Pressable style={styles.toolBtn} onPress={() => setCipherOpen(false)}>
-                <Text style={styles.toolBtnText}>Close</Text>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setCipherOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -2195,9 +2268,11 @@ export default function ChatScreen({
       <Modal visible={ttlPickerOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setTtlPickerOpen(false)} />
-          <View style={styles.summaryModal}>
-            <Text style={styles.summaryTitle}>Disappearing messages</Text>
-            <Text style={styles.summaryText}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              Self-Destructing Messages
+            </Text>
+            <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
               Messages will disappear after the selected time from when they are sent.
             </Text>
             <View style={{ height: 12 }} />
@@ -2211,17 +2286,23 @@ export default function ChatScreen({
                     setTtlIdx(idx);
                   }}
                 >
-                  <Text style={styles.ttlOptionLabel}>{opt.label}</Text>
-                  <Text style={styles.ttlOptionRadio}>{selected ? '◉' : '○'}</Text>
+                  <Text style={[styles.ttlOptionLabel, isDark ? styles.ttlOptionLabelDark : null]}>
+                    {opt.label}
+                  </Text>
+                  <Text style={[styles.ttlOptionRadio, isDark ? styles.ttlOptionLabelDark : null]}>
+                    {selected ? '◉' : '○'}
+                  </Text>
                 </Pressable>
               );
             })}
             <View style={styles.summaryButtons}>
               <Pressable
-                style={styles.toolBtn}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
                 onPress={() => setTtlPickerOpen(false)}
               >
-                <Text style={styles.toolBtnText}>Done</Text>
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Done
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -2274,6 +2355,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   safe: { flex: 1, backgroundColor: '#fff' },
+  safeDark: { backgroundColor: '#0b0b0f' },
   container: { flex: 1 },
   header: {
     paddingHorizontal: 16,
@@ -2282,12 +2364,29 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e3e3e3',
     backgroundColor: '#fafafa',
   },
+  headerDark: {
+    backgroundColor: '#121218',
+    borderBottomColor: '#2a2a33',
+  },
+  headerTopSlot: {
+    marginBottom: 10,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
   title: { fontSize: 20, fontWeight: '600', color: '#222' },
+  titleDark: { color: '#fff' },
   welcomeText: { fontSize: 14, color: '#555', marginTop: 4 },
+  welcomeTextDark: { color: '#b7b7c2' },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
+  statusTextDark: { color: '#a7a7b4' },
   decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   decryptLabel: { fontSize: 12, color: '#555', fontWeight: '600' },
+  decryptLabelDark: { color: '#b7b7c2' },
   ttlChip: {
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -2295,6 +2394,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#eee',
   },
   ttlChipText: { fontSize: 12, color: '#333', fontWeight: '700' },
+  ttlChipDark: {
+    backgroundColor: '#2a2a33',
+  },
+  ttlChipTextDark: {
+    color: '#fff',
+  },
   ttlOptionRow: {
     paddingVertical: 10,
     paddingHorizontal: 12,
@@ -2308,12 +2413,42 @@ const styles = StyleSheet.create({
   ttlOptionRowSelected: { backgroundColor: '#e8eefc' },
   ttlOptionLabel: { color: '#222', fontWeight: '600' },
   ttlOptionRadio: { color: '#222', fontSize: 18, fontWeight: '800' },
-  toolsRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
-  toolBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: '#222' },
-  toolBtnText: { color: '#fff', fontWeight: '600' },
+  ttlOptionLabelDark: { color: '#fff' },
+  summarizeBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  summarizeBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  summarizeBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
+  summarizeBtnTextDark: { color: '#fff' },
+  // kept for other modals using the same visual language
+  toolBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  toolBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  toolBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
+  toolBtnTextDark: { color: '#fff' },
   ok: { color: '#2e7d32' },
   err: { color: '#d32f2f' },
   error: { color: '#d32f2f', marginTop: 6 },
+  errorDark: { color: '#ff6b6b' },
   listContent: { padding: 12 },
   messageRow: {
     marginBottom: 8,
@@ -2331,12 +2466,15 @@ const styles = StyleSheet.create({
   // while keeping text-only bubbles tighter.
   // (legacy) media bubble styles removed in favor of mediaCard layout
   messageBubbleIncoming: { backgroundColor: '#f1f1f1' },
+  messageBubbleIncomingDark: { backgroundColor: '#1c1c22' },
   messageBubbleOutgoing: { backgroundColor: '#1976d2' },
   messageMeta: { fontSize: 12, marginBottom: 1, fontWeight: '400' },
   messageMetaIncoming: { color: '#555' },
+  messageMetaIncomingDark: { color: '#b7b7c2' },
   messageMetaOutgoing: { color: 'rgba(255,255,255,0.9)', textAlign: 'right' },
   messageText: { fontSize: 16, marginTop: 1, fontWeight: '400' },
   messageTextIncoming: { color: '#222' },
+  messageTextIncomingDark: { color: '#fff' },
   messageTextOutgoing: { color: '#fff' },
   attachmentLink: {
     marginTop: 6,
@@ -2458,7 +2596,11 @@ const styles = StyleSheet.create({
     padding: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#e3e3e3',
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
+  },
+  inputRowDark: {
+    backgroundColor: '#1c1c22',
+    borderTopColor: '#2a2a33',
   },
   attachmentPill: {
     marginHorizontal: 12,
@@ -2475,12 +2617,20 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 8,
-    backgroundColor: '#222',
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 8,
   },
-  pickTxt: { color: '#fff', fontWeight: '800', fontSize: 18, lineHeight: 18 },
+  pickBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  pickTxt: { color: '#111', fontWeight: '800', fontSize: 18, lineHeight: 18 },
+  pickTxtDark: { color: '#fff' },
   input: {
     flex: 1,
     height: 44,
@@ -2490,6 +2640,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#fff',
   },
+  inputDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+    color: '#fff',
+  },
   sendBtn: {
     marginLeft: 8,
     height: 44,
@@ -2497,12 +2652,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 8,
-    backgroundColor: '#1976d2',
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
   },
-  sendTxt: { color: '#fff', fontWeight: '600' },
+  sendBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  sendTxt: { color: '#111', fontWeight: '700' },
+  sendTxtDark: { color: '#fff' },
   btnDisabled: {
-    backgroundColor: '#7fb2e6',
-    opacity: 0.75,
+    backgroundColor: '#f2f2f7',
+    borderColor: '#ddd',
+    opacity: 0.8,
+  },
+  btnDisabledDark: {
+    backgroundColor: '#444',
+    borderWidth: 0,
+    borderColor: 'transparent',
+    opacity: 0.6,
   },
 
   summaryModal: {
@@ -2518,6 +2688,9 @@ const styles = StyleSheet.create({
   summaryScroll: { maxHeight: 420 },
   summaryText: { color: '#222', lineHeight: 20 },
   summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+  summaryModalDark: { backgroundColor: '#14141a' },
+  summaryTitleDark: { color: '#fff' },
+  summaryTextDark: { color: '#d7d7e0' },
 
   viewerOverlay: {
     flex: 1,
