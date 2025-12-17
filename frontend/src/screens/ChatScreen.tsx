@@ -109,6 +109,8 @@ type ChatScreenProps = {
   peer?: string | null;
   displayName: string;
   onNewDmNotification?: (conversationId: string, user: string) => void;
+  headerTop?: React.ReactNode;
+  theme?: 'light' | 'dark';
 };
 
 type ChatMessage = {
@@ -235,7 +237,10 @@ export default function ChatScreen({
   peer,
   displayName,
   onNewDmNotification,
+  headerTop,
+  theme = 'light',
 }: ChatScreenProps): React.JSX.Element {
+  const isDark = theme === 'dark';
   const { user } = useAuthenticator();
   const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
@@ -844,14 +849,12 @@ export default function ChatScreen({
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
     pendingReadCreatedAtRef.current = 0;
-    setPeerSeenAtByCreatedAt({});
   }, [activeConversationId]);
 
   // Fetch persisted read state so "Seen" works even if sender was offline when peer decrypted.
   React.useEffect(() => {
     (async () => {
       if (!API_URL || !isDm) {
-        setPeerSeenAtByCreatedAt({});
         return;
       }
       try {
@@ -874,14 +877,54 @@ export default function ChatScreen({
           const ra = Number(r.readAt);
           if (!Number.isFinite(mc) || !Number.isFinite(ra)) continue;
           const key = String(mc);
-          map[key] = Math.max(map[key] ?? 0, ra);
+          map[key] = map[key] ? Math.min(map[key], ra) : ra;
         }
-        setPeerSeenAtByCreatedAt(map);
+        setPeerSeenAtByCreatedAt((prev) => {
+          const next = { ...prev };
+          for (const [k, v] of Object.entries(map)) {
+            const existing = next[k];
+            next[k] = existing ? Math.min(existing, v) : v;
+          }
+          return next;
+        });
       } catch {
         // ignore
       }
     })();
   }, [API_URL, isDm, activeConversationId, displayName]);
+
+  // Persist peer "Seen" state locally so it survives switching conversations (until backend persistence catches up).
+  React.useEffect(() => {
+    setPeerSeenAtByCreatedAt({});
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(`chat:peerSeen:${activeConversationId}`);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          setPeerSeenAtByCreatedAt(parsed);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem(
+          `chat:peerSeen:${activeConversationId}`,
+          JSON.stringify(peerSeenAtByCreatedAt)
+        );
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId, peerSeenAtByCreatedAt]);
 
   React.useEffect(() => {
     setMySeenAtByCreatedAt({});
@@ -1155,13 +1198,17 @@ export default function ChatScreen({
   const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
     setMySeenAtByCreatedAt((prev) => ({
       ...prev,
-      [String(messageCreatedAt)]: Math.max(prev[String(messageCreatedAt)] ?? 0, readAt),
+      [String(messageCreatedAt)]: prev[String(messageCreatedAt)]
+        ? Math.min(prev[String(messageCreatedAt)], readAt)
+        : readAt,
     }));
   }, []);
 
   const sendReadReceipt = React.useCallback(
     (messageCreatedAt: number) => {
       if (!isDm) return;
+      // If we've already recorded seeing this message, don't re-send (avoids updating readAt on repeat taps).
+      if (mySeenAtByCreatedAt[String(messageCreatedAt)]) return;
       // If WS isn't ready yet (common right after login), queue and flush on connect.
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         pendingReadCreatedAtRef.current = Math.max(pendingReadCreatedAtRef.current, messageCreatedAt);
@@ -1181,7 +1228,7 @@ export default function ChatScreen({
         })
       );
     },
-    [isDm, activeConversationId, displayName]
+    [isDm, activeConversationId, displayName, mySeenAtByCreatedAt]
   );
 
   const flushPendingRead = React.useCallback(() => {
@@ -1461,7 +1508,9 @@ export default function ChatScreen({
             if (typeof messageCreatedAt === 'number') {
               setPeerSeenAtByCreatedAt((prev) => ({
                 ...prev,
-                [String(messageCreatedAt)]: Math.max(prev[String(messageCreatedAt)] ?? 0, readAt),
+                [String(messageCreatedAt)]: prev[String(messageCreatedAt)]
+                  ? Math.min(prev[String(messageCreatedAt)], readAt)
+                  : readAt,
               }));
 
               // TTL-from-read for outgoing messages: start countdown for that specific message (if it has ttlSeconds).
@@ -1750,7 +1799,7 @@ export default function ChatScreen({
         Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
       }
     },
-    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm]
+    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm, markMySeen]
   );
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
@@ -1829,48 +1878,84 @@ export default function ChatScreen({
   }, [messages, activeConversationId, peer]);
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView
+      style={[styles.safe, isDark ? styles.safeDark : null]}
+      edges={['left', 'right', 'bottom']}
+    >
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.select({ ios: 'padding', android: undefined })}
       >
-        <View style={styles.header}>
-          <Text style={styles.title}>{peer ? `DM with ${peer}` : 'Global Chat'}</Text>
-          <Text style={styles.welcomeText}>{`Welcome ${displayName}!`}</Text>
+        <View style={[styles.header, isDark ? styles.headerDark : null]}>
+          {headerTop ? <View style={styles.headerTopSlot}>{headerTop}</View> : null}
+          <View style={styles.titleRow}>
+            <Text style={[styles.title, isDark ? styles.titleDark : null]} numberOfLines={1}>
+              {peer ? `DM with ${peer}` : 'Global Chat'}
+            </Text>
+            <Pressable
+              style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
+              onPress={summarize}
+            >
+              <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
+                Summarize Chat
+              </Text>
+            </Pressable>
+          </View>
+          <Text style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null]}>{`Welcome ${displayName}!`}</Text>
           {isDm ? (
             <View style={styles.decryptRow}>
-              <Text style={styles.decryptLabel}>Auto-decrypt</Text>
+              <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
+                Auto-Decrypt
+              </Text>
               <Switch
                 value={autoDecrypt}
                 onValueChange={setAutoDecrypt}
                 disabled={!myPrivateKey}
+                  trackColor={{
+                    false: '#d1d1d6',
+                    true: '#d1d1d6',
+                  }}
+                thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                  ios_backgroundColor="#d1d1d6"
               />
             </View>
           ) : null}
           {isDm ? (
             <View style={styles.decryptRow}>
-              <Text style={styles.decryptLabel}>Disappearing messages</Text>
-              <Pressable style={styles.ttlChip} onPress={() => setTtlPickerOpen(true)}>
-                <Text style={styles.ttlChipText}>{TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}</Text>
+              <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
+                Self-Destructing Messages
+              </Text>
+              <Pressable
+                style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
+                onPress={() => setTtlPickerOpen(true)}
+              >
+                <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
+                  {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                </Text>
               </Pressable>
             </View>
           ) : null}
-          <View style={styles.toolsRow}>
-            <Pressable style={styles.toolBtn} onPress={summarize}>
-              <Text style={styles.toolBtnText}>Summarize</Text>
-            </Pressable>
-          </View>
           {isConnecting ? (
             <View style={styles.statusRow}>
               <ActivityIndicator size="small" />
-              <Text style={styles.statusText}>Connecting…</Text>
+              <Text style={[styles.statusText, isDark ? styles.statusTextDark : null]}>
+                Connecting…
+              </Text>
             </View>
           ) : (
-            <Text style={[styles.statusText, isConnected ? styles.ok : styles.err]}>
+            <Text
+              style={[
+                styles.statusText,
+                isDark ? styles.statusTextDark : null,
+                isConnected ? styles.ok : styles.err,
+              ]}
+            >
               {isConnected ? 'Connected' : 'Disconnected'}
             </Text>
           )}
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+          {error ? (
+            <Text style={[styles.error, isDark ? styles.errorDark : null]}>{error}</Text>
+          ) : null}
         </View>
         <FlatList
           data={messages}
@@ -1957,14 +2042,22 @@ export default function ChatScreen({
                       <View
                         style={[
                           styles.mediaCard,
-                          isOutgoing ? styles.mediaCardOutgoing : styles.mediaCardIncoming,
+                          isOutgoing
+                            ? styles.mediaCardOutgoing
+                            : isDark
+                              ? styles.mediaCardIncomingDark
+                              : styles.mediaCardIncoming,
                           { width: capped.w },
                         ]}
                       >
                         <View
                           style={[
                             styles.mediaHeader,
-                            isOutgoing ? styles.mediaHeaderOutgoing : styles.mediaHeaderIncoming,
+                            isOutgoing
+                              ? styles.mediaHeaderOutgoing
+                              : isDark
+                                ? styles.mediaHeaderIncomingDark
+                                : styles.mediaHeaderIncoming,
                           ]}
                         >
                           <Text
@@ -1972,7 +2065,9 @@ export default function ChatScreen({
                               styles.mediaHeaderMeta,
                               isOutgoing
                                 ? styles.mediaHeaderMetaOutgoing
-                                : styles.mediaHeaderMetaIncoming,
+                                : isDark
+                                  ? styles.mediaHeaderMetaIncomingDark
+                                  : styles.mediaHeaderMetaIncoming,
                             ]}
                           >
                             {metaLine}
@@ -1983,7 +2078,9 @@ export default function ChatScreen({
                                 styles.mediaHeaderCaption,
                                 isOutgoing
                                   ? styles.mediaHeaderCaptionOutgoing
-                                  : styles.mediaHeaderCaptionIncoming,
+                                  : isDark
+                                    ? styles.mediaHeaderCaptionIncomingDark
+                                    : styles.mediaHeaderCaptionIncoming,
                               ]}
                             >
                               {captionText}
@@ -2059,7 +2156,10 @@ export default function ChatScreen({
                         <Text
                           style={[
                             styles.seenText,
-                            isOutgoing ? styles.seenTextOutgoing : styles.seenTextIncoming,
+                            isOutgoing
+                              ? (isDark ? styles.seenTextOutgoing : styles.seenTextOutgoingOnLightSurface)
+                              : styles.seenTextIncoming,
+                            isOutgoing ? styles.seenTextAlignOutgoing : styles.seenTextAlignIncoming,
                           ]}
                         >
                           {seenLabel}
@@ -2070,13 +2170,21 @@ export default function ChatScreen({
                     <View
                       style={[
                         styles.messageBubble,
-                        isOutgoing ? styles.messageBubbleOutgoing : styles.messageBubbleIncoming,
+                        isOutgoing
+                          ? styles.messageBubbleOutgoing
+                          : isDark
+                            ? styles.messageBubbleIncomingDark
+                            : styles.messageBubbleIncoming,
                       ]}
                     >
                       <Text
                         style={[
                           styles.messageMeta,
-                          isOutgoing ? styles.messageMetaOutgoing : styles.messageMetaIncoming,
+                          isOutgoing
+                            ? styles.messageMetaOutgoing
+                            : isDark
+                              ? styles.messageMetaIncomingDark
+                              : styles.messageMetaIncoming,
                         ]}
                       >
                         {metaLine}
@@ -2085,7 +2193,11 @@ export default function ChatScreen({
                         <Text
                           style={[
                             styles.messageText,
-                            isOutgoing ? styles.messageTextOutgoing : styles.messageTextIncoming,
+                            isOutgoing
+                              ? styles.messageTextOutgoing
+                              : isDark
+                                ? styles.messageTextIncomingDark
+                                : styles.messageTextIncoming,
                           ]}
                         >
                           {captionText}
@@ -2096,6 +2208,7 @@ export default function ChatScreen({
                           style={[
                             styles.seenText,
                             isOutgoing ? styles.seenTextOutgoing : styles.seenTextIncoming,
+                            isOutgoing ? styles.seenTextAlignOutgoing : styles.seenTextAlignIncoming,
                           ]}
                         >
                           {seenLabel}
@@ -2109,67 +2222,82 @@ export default function ChatScreen({
           }}
           contentContainerStyle={styles.listContent}
         />
-        <View style={styles.inputRow}>
+        {pendingMedia ? (
           <Pressable
-            style={[styles.pickBtn, isUploading ? styles.btnDisabled : null]}
+            style={[styles.attachmentPill, isDark ? styles.attachmentPillDark : null]}
+            onPress={() => setPendingMedia(null)}
+            disabled={isUploading}
+          >
+            <Text style={[styles.attachmentPillText, isDark ? styles.attachmentPillTextDark : null]}>
+              {`Attached: ${pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
+            </Text>
+          </Pressable>
+        ) : null}
+        <View style={[styles.inputRow, isDark ? styles.inputRowDark : null]}>
+          <Pressable
+            style={[
+              styles.pickBtn,
+              isDark ? styles.pickBtnDark : null,
+              isUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+            ]}
             onPress={handlePickMedia}
             disabled={isUploading}
           >
-            <Text style={styles.pickTxt}>＋</Text>
+            <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
           </Pressable>
           <TextInput
-            style={styles.input}
+            style={[styles.input, isDark ? styles.inputDark : null]}
             placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
+            placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
             value={input}
             onChangeText={setInput}
             onSubmitEditing={sendMessage}
             returnKeyType="send"
           />
           <Pressable
-            style={[styles.sendBtn, isUploading ? styles.btnDisabled : null]}
+            style={[
+              styles.sendBtn,
+              isDark ? styles.sendBtnDark : null,
+              isUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+            ]}
             onPress={sendMessage}
             disabled={isUploading}
           >
-            <Text style={styles.sendTxt}>{isUploading ? 'Uploading…' : 'Send'}</Text>
-          </Pressable>
-        </View>
-        {pendingMedia ? (
-          <Pressable
-            style={styles.attachmentPill}
-            onPress={() => setPendingMedia(null)}
-            disabled={isUploading}
-          >
-            <Text style={styles.attachmentPillText}>
-              {`Attached: ${pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
+            <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>
+              {isUploading ? 'Uploading…' : 'Send'}
             </Text>
           </Pressable>
-        ) : null}
+        </View>
       </KeyboardAvoidingView>
       <Modal visible={summaryOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <View style={styles.summaryModal}>
-            <Text style={styles.summaryTitle}>Summary</Text>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Summary</Text>
             {summaryLoading ? (
               <View style={styles.summaryLoadingRow}>
                 <ActivityIndicator />
-                <Text style={styles.summaryLoadingText}>Summarizing…</Text>
+                <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
+                  Summarizing…
+                </Text>
               </View>
             ) : (
               <ScrollView style={styles.summaryScroll}>
-                <Text style={styles.summaryText}>
+                <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
                   {summaryText.length ? summaryText : 'No summary returned.'}
                 </Text>
               </ScrollView>
             )}
             <View style={styles.summaryButtons}>
               <Pressable
-                style={styles.toolBtn}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
                 onPress={() => {
                   setSummaryOpen(false);
                   setSummaryText('');
                 }}
               >
-                <Text style={styles.toolBtnText}>Close</Text>
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -2184,8 +2312,13 @@ export default function ChatScreen({
               <Text style={styles.summaryText}>{cipherText || '(empty)'}</Text>
             </ScrollView>
             <View style={styles.summaryButtons}>
-              <Pressable style={styles.toolBtn} onPress={() => setCipherOpen(false)}>
-                <Text style={styles.toolBtnText}>Close</Text>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setCipherOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -2195,9 +2328,11 @@ export default function ChatScreen({
       <Modal visible={ttlPickerOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setTtlPickerOpen(false)} />
-          <View style={styles.summaryModal}>
-            <Text style={styles.summaryTitle}>Disappearing messages</Text>
-            <Text style={styles.summaryText}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              Self-Destructing Messages
+            </Text>
+            <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
               Messages will disappear after the selected time from when they are sent.
             </Text>
             <View style={{ height: 12 }} />
@@ -2206,22 +2341,34 @@ export default function ChatScreen({
               return (
                 <Pressable
                   key={opt.label}
-                  style={[styles.ttlOptionRow, selected ? styles.ttlOptionRowSelected : null]}
+                  style={[
+                    styles.ttlOptionRow,
+                    isDark ? styles.ttlOptionRowDark : null,
+                    selected
+                      ? (isDark ? styles.ttlOptionRowSelectedDark : styles.ttlOptionRowSelected)
+                      : null,
+                  ]}
                   onPress={() => {
                     setTtlIdx(idx);
                   }}
                 >
-                  <Text style={styles.ttlOptionLabel}>{opt.label}</Text>
-                  <Text style={styles.ttlOptionRadio}>{selected ? '◉' : '○'}</Text>
+                  <Text style={[styles.ttlOptionLabel, isDark ? styles.ttlOptionLabelDark : null]}>
+                    {opt.label}
+                  </Text>
+                  <Text style={[styles.ttlOptionRadio, isDark ? styles.ttlOptionLabelDark : null]}>
+                    {selected ? '◉' : '○'}
+                  </Text>
                 </Pressable>
               );
             })}
             <View style={styles.summaryButtons}>
               <Pressable
-                style={styles.toolBtn}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
                 onPress={() => setTtlPickerOpen(false)}
               >
-                <Text style={styles.toolBtnText}>Done</Text>
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Done
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -2274,6 +2421,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   safe: { flex: 1, backgroundColor: '#fff' },
+  safeDark: { backgroundColor: '#0b0b0f' },
   container: { flex: 1 },
   header: {
     paddingHorizontal: 16,
@@ -2282,12 +2430,29 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e3e3e3',
     backgroundColor: '#fafafa',
   },
+  headerDark: {
+    backgroundColor: '#121218',
+    borderBottomColor: '#2a2a33',
+  },
+  headerTopSlot: {
+    marginBottom: 10,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
   title: { fontSize: 20, fontWeight: '600', color: '#222' },
+  titleDark: { color: '#fff' },
   welcomeText: { fontSize: 14, color: '#555', marginTop: 4 },
+  welcomeTextDark: { color: '#b7b7c2' },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
+  statusTextDark: { color: '#a7a7b4' },
   decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   decryptLabel: { fontSize: 12, color: '#555', fontWeight: '600' },
+  decryptLabelDark: { color: '#b7b7c2' },
   ttlChip: {
     paddingHorizontal: 10,
     paddingVertical: 6,
@@ -2295,6 +2460,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#eee',
   },
   ttlChipText: { fontSize: 12, color: '#333', fontWeight: '700' },
+  ttlChipDark: {
+    backgroundColor: '#2a2a33',
+  },
+  ttlChipTextDark: {
+    color: '#fff',
+  },
   ttlOptionRow: {
     paddingVertical: 10,
     paddingHorizontal: 12,
@@ -2306,14 +2477,54 @@ const styles = StyleSheet.create({
     backgroundColor: '#f4f4f4',
   },
   ttlOptionRowSelected: { backgroundColor: '#e8eefc' },
+  ttlOptionRowDark: {
+    backgroundColor: '#1c1c22',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#2a2a33',
+  },
+  ttlOptionRowSelectedDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#3a3a46',
+  },
   ttlOptionLabel: { color: '#222', fontWeight: '600' },
   ttlOptionRadio: { color: '#222', fontSize: 18, fontWeight: '800' },
-  toolsRow: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
-  toolBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: '#222' },
-  toolBtnText: { color: '#fff', fontWeight: '600' },
+  ttlOptionLabelDark: { color: '#fff' },
+  summarizeBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  summarizeBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  summarizeBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
+  summarizeBtnTextDark: { color: '#fff' },
+  // kept for other modals using the same visual language
+  toolBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  toolBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  toolBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
+  toolBtnTextDark: { color: '#fff' },
   ok: { color: '#2e7d32' },
   err: { color: '#d32f2f' },
   error: { color: '#d32f2f', marginTop: 6 },
+  errorDark: { color: '#ff6b6b' },
   listContent: { padding: 12 },
   messageRow: {
     marginBottom: 8,
@@ -2331,12 +2542,15 @@ const styles = StyleSheet.create({
   // while keeping text-only bubbles tighter.
   // (legacy) media bubble styles removed in favor of mediaCard layout
   messageBubbleIncoming: { backgroundColor: '#f1f1f1' },
+  messageBubbleIncomingDark: { backgroundColor: '#1c1c22' },
   messageBubbleOutgoing: { backgroundColor: '#1976d2' },
   messageMeta: { fontSize: 12, marginBottom: 1, fontWeight: '400' },
   messageMetaIncoming: { color: '#555' },
+  messageMetaIncomingDark: { color: '#b7b7c2' },
   messageMetaOutgoing: { color: 'rgba(255,255,255,0.9)', textAlign: 'right' },
   messageText: { fontSize: 16, marginTop: 1, fontWeight: '400' },
   messageTextIncoming: { color: '#222' },
+  messageTextIncomingDark: { color: '#fff' },
   messageTextOutgoing: { color: '#fff' },
   attachmentLink: {
     marginTop: 6,
@@ -2361,16 +2575,17 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
     overflow: 'hidden',
-    backgroundColor: 'transparent',
+    // For resizeMode="contain", this is the letterbox background (avoid theme-colored "borders").
+    backgroundColor: '#000',
   },
   mediaAutoImage: {
     width: '100%',
-    backgroundColor: 'transparent',
+    backgroundColor: '#000',
   },
   mediaCappedImage: {
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
-    backgroundColor: 'transparent',
+    backgroundColor: '#000',
   },
   mediaFrame: {
     marginTop: 8,
@@ -2378,11 +2593,12 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     // Match the message bubble background so "contain" letterboxing doesn't show as white.
-    backgroundColor: '#f1f1f1',
+    backgroundColor: '#000',
   },
   mediaFill: {
     width: '100%',
     height: '100%',
+    backgroundColor: '#000',
   },
   mediaThumb: {
     width: '100%',
@@ -2413,19 +2629,24 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   mediaCardIncoming: { backgroundColor: '#f1f1f1' },
-  mediaCardOutgoing: { backgroundColor: '#1976d2' },
+  mediaCardIncomingDark: { backgroundColor: '#1c1c22' },
+  // Outgoing media uses "contain" sometimes → avoid blue letterbox edges by using neutral bg.
+  mediaCardOutgoing: { backgroundColor: '#000' },
   mediaHeader: {
     paddingHorizontal: 12,
     paddingTop: 6,
     paddingBottom: 4,
   },
   mediaHeaderIncoming: { backgroundColor: '#f1f1f1' },
+  mediaHeaderIncomingDark: { backgroundColor: '#1c1c22' },
   mediaHeaderOutgoing: { backgroundColor: '#1976d2' },
   mediaHeaderMeta: { fontSize: 12, fontWeight: '400' },
   mediaHeaderMetaIncoming: { color: '#555' },
+  mediaHeaderMetaIncomingDark: { color: '#b7b7c2' },
   mediaHeaderMetaOutgoing: { color: 'rgba(255,255,255,0.9)', textAlign: 'right' },
   mediaHeaderCaption: { marginTop: 4, fontSize: 16, fontWeight: '400' },
   mediaHeaderCaptionIncoming: { color: '#222' },
+  mediaHeaderCaptionIncomingDark: { color: '#fff' },
   mediaHeaderCaptionOutgoing: { color: '#fff' },
   videoPlayOverlay: {
     position: 'absolute',
@@ -2449,16 +2670,24 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontStyle: 'italic',
     fontWeight: '600',
-    alignSelf: 'flex-end',
   },
+  seenTextAlignIncoming: { alignSelf: 'flex-start', textAlign: 'left' },
+  seenTextAlignOutgoing: { alignSelf: 'flex-end', textAlign: 'right' },
   seenTextIncoming: { color: '#1976d2' },
   seenTextOutgoing: { color: 'rgba(255,255,255,0.9)' },
+  // For outgoing MEDIA messages the seen label is rendered on the screen background (not inside the blue bubble),
+  // so use a readable light-mode color.
+  seenTextOutgoingOnLightSurface: { color: '#1976d2' },
   inputRow: {
     flexDirection: 'row',
     padding: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#e3e3e3',
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
+  },
+  inputRowDark: {
+    backgroundColor: '#1c1c22',
+    borderTopColor: '#2a2a33',
   },
   attachmentPill: {
     marginHorizontal: 12,
@@ -2471,16 +2700,29 @@ const styles = StyleSheet.create({
     borderColor: '#c7d6ff',
   },
   attachmentPillText: { color: '#1b3a7a', fontWeight: '700' },
+  attachmentPillDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  attachmentPillTextDark: { color: '#fff' },
   pickBtn: {
     width: 44,
     height: 44,
     borderRadius: 8,
-    backgroundColor: '#222',
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 8,
   },
-  pickTxt: { color: '#fff', fontWeight: '800', fontSize: 18, lineHeight: 18 },
+  pickBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  pickTxt: { color: '#111', fontWeight: '800', fontSize: 18, lineHeight: 18 },
+  pickTxtDark: { color: '#fff' },
   input: {
     flex: 1,
     height: 44,
@@ -2490,6 +2732,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#fff',
   },
+  inputDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+    color: '#fff',
+  },
   sendBtn: {
     marginLeft: 8,
     height: 44,
@@ -2497,12 +2744,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 8,
-    backgroundColor: '#1976d2',
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
   },
-  sendTxt: { color: '#fff', fontWeight: '600' },
+  sendBtnDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  sendTxt: { color: '#111', fontWeight: '700' },
+  sendTxtDark: { color: '#fff' },
   btnDisabled: {
-    backgroundColor: '#7fb2e6',
-    opacity: 0.75,
+    backgroundColor: '#f2f2f7',
+    borderColor: '#ddd',
+    opacity: 0.8,
+  },
+  btnDisabledDark: {
+    backgroundColor: '#444',
+    borderWidth: 0,
+    borderColor: 'transparent',
+    opacity: 0.6,
   },
 
   summaryModal: {
@@ -2518,6 +2780,9 @@ const styles = StyleSheet.create({
   summaryScroll: { maxHeight: 420 },
   summaryText: { color: '#222', lineHeight: 20 },
   summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+  summaryModalDark: { backgroundColor: '#14141a' },
+  summaryTitleDark: { color: '#fff' },
+  summaryTextDark: { color: '#d7d7e0' },
 
   viewerOverlay: {
     flex: 1,
