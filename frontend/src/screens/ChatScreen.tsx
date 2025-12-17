@@ -849,14 +849,12 @@ export default function ChatScreen({
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
     pendingReadCreatedAtRef.current = 0;
-    setPeerSeenAtByCreatedAt({});
   }, [activeConversationId]);
 
   // Fetch persisted read state so "Seen" works even if sender was offline when peer decrypted.
   React.useEffect(() => {
     (async () => {
       if (!API_URL || !isDm) {
-        setPeerSeenAtByCreatedAt({});
         return;
       }
       try {
@@ -879,14 +877,54 @@ export default function ChatScreen({
           const ra = Number(r.readAt);
           if (!Number.isFinite(mc) || !Number.isFinite(ra)) continue;
           const key = String(mc);
-          map[key] = Math.max(map[key] ?? 0, ra);
+          map[key] = map[key] ? Math.min(map[key], ra) : ra;
         }
-        setPeerSeenAtByCreatedAt(map);
+        setPeerSeenAtByCreatedAt((prev) => {
+          const next = { ...prev };
+          for (const [k, v] of Object.entries(map)) {
+            const existing = next[k];
+            next[k] = existing ? Math.min(existing, v) : v;
+          }
+          return next;
+        });
       } catch {
         // ignore
       }
     })();
   }, [API_URL, isDm, activeConversationId, displayName]);
+
+  // Persist peer "Seen" state locally so it survives switching conversations (until backend persistence catches up).
+  React.useEffect(() => {
+    setPeerSeenAtByCreatedAt({});
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(`chat:peerSeen:${activeConversationId}`);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          setPeerSeenAtByCreatedAt(parsed);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem(
+          `chat:peerSeen:${activeConversationId}`,
+          JSON.stringify(peerSeenAtByCreatedAt)
+        );
+      } catch {
+        // ignore
+      }
+    })();
+  }, [activeConversationId, peerSeenAtByCreatedAt]);
 
   React.useEffect(() => {
     setMySeenAtByCreatedAt({});
@@ -1160,13 +1198,17 @@ export default function ChatScreen({
   const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
     setMySeenAtByCreatedAt((prev) => ({
       ...prev,
-      [String(messageCreatedAt)]: Math.max(prev[String(messageCreatedAt)] ?? 0, readAt),
+      [String(messageCreatedAt)]: prev[String(messageCreatedAt)]
+        ? Math.min(prev[String(messageCreatedAt)], readAt)
+        : readAt,
     }));
   }, []);
 
   const sendReadReceipt = React.useCallback(
     (messageCreatedAt: number) => {
       if (!isDm) return;
+      // If we've already recorded seeing this message, don't re-send (avoids updating readAt on repeat taps).
+      if (mySeenAtByCreatedAt[String(messageCreatedAt)]) return;
       // If WS isn't ready yet (common right after login), queue and flush on connect.
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         pendingReadCreatedAtRef.current = Math.max(pendingReadCreatedAtRef.current, messageCreatedAt);
@@ -1186,7 +1228,7 @@ export default function ChatScreen({
         })
       );
     },
-    [isDm, activeConversationId, displayName]
+    [isDm, activeConversationId, displayName, mySeenAtByCreatedAt]
   );
 
   const flushPendingRead = React.useCallback(() => {
@@ -1466,7 +1508,9 @@ export default function ChatScreen({
             if (typeof messageCreatedAt === 'number') {
               setPeerSeenAtByCreatedAt((prev) => ({
                 ...prev,
-                [String(messageCreatedAt)]: Math.max(prev[String(messageCreatedAt)] ?? 0, readAt),
+                [String(messageCreatedAt)]: prev[String(messageCreatedAt)]
+                  ? Math.min(prev[String(messageCreatedAt)], readAt)
+                  : readAt,
               }));
 
               // TTL-from-read for outgoing messages: start countdown for that specific message (if it has ttlSeconds).
@@ -1755,7 +1799,7 @@ export default function ChatScreen({
         Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
       }
     },
-    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm]
+    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm, markMySeen]
   );
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
@@ -1861,7 +1905,7 @@ export default function ChatScreen({
           {isDm ? (
             <View style={styles.decryptRow}>
               <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
-                Auto-decrypt
+                Auto-Decrypt
               </Text>
               <Switch
                 value={autoDecrypt}
@@ -1998,14 +2042,22 @@ export default function ChatScreen({
                       <View
                         style={[
                           styles.mediaCard,
-                          isOutgoing ? styles.mediaCardOutgoing : styles.mediaCardIncoming,
+                          isOutgoing
+                            ? styles.mediaCardOutgoing
+                            : isDark
+                              ? styles.mediaCardIncomingDark
+                              : styles.mediaCardIncoming,
                           { width: capped.w },
                         ]}
                       >
                         <View
                           style={[
                             styles.mediaHeader,
-                            isOutgoing ? styles.mediaHeaderOutgoing : styles.mediaHeaderIncoming,
+                            isOutgoing
+                              ? styles.mediaHeaderOutgoing
+                              : isDark
+                                ? styles.mediaHeaderIncomingDark
+                                : styles.mediaHeaderIncoming,
                           ]}
                         >
                           <Text
@@ -2013,7 +2065,9 @@ export default function ChatScreen({
                               styles.mediaHeaderMeta,
                               isOutgoing
                                 ? styles.mediaHeaderMetaOutgoing
-                                : styles.mediaHeaderMetaIncoming,
+                                : isDark
+                                  ? styles.mediaHeaderMetaIncomingDark
+                                  : styles.mediaHeaderMetaIncoming,
                             ]}
                           >
                             {metaLine}
@@ -2024,7 +2078,9 @@ export default function ChatScreen({
                                 styles.mediaHeaderCaption,
                                 isOutgoing
                                   ? styles.mediaHeaderCaptionOutgoing
-                                  : styles.mediaHeaderCaptionIncoming,
+                                  : isDark
+                                    ? styles.mediaHeaderCaptionIncomingDark
+                                    : styles.mediaHeaderCaptionIncoming,
                               ]}
                             >
                               {captionText}
@@ -2100,7 +2156,10 @@ export default function ChatScreen({
                         <Text
                           style={[
                             styles.seenText,
-                            isOutgoing ? styles.seenTextOutgoing : styles.seenTextIncoming,
+                            isOutgoing
+                              ? (isDark ? styles.seenTextOutgoing : styles.seenTextOutgoingOnLightSurface)
+                              : styles.seenTextIncoming,
+                            isOutgoing ? styles.seenTextAlignOutgoing : styles.seenTextAlignIncoming,
                           ]}
                         >
                           {seenLabel}
@@ -2149,6 +2208,7 @@ export default function ChatScreen({
                           style={[
                             styles.seenText,
                             isOutgoing ? styles.seenTextOutgoing : styles.seenTextIncoming,
+                            isOutgoing ? styles.seenTextAlignOutgoing : styles.seenTextAlignIncoming,
                           ]}
                         >
                           {seenLabel}
@@ -2162,6 +2222,17 @@ export default function ChatScreen({
           }}
           contentContainerStyle={styles.listContent}
         />
+        {pendingMedia ? (
+          <Pressable
+            style={[styles.attachmentPill, isDark ? styles.attachmentPillDark : null]}
+            onPress={() => setPendingMedia(null)}
+            disabled={isUploading}
+          >
+            <Text style={[styles.attachmentPillText, isDark ? styles.attachmentPillTextDark : null]}>
+              {`Attached: ${pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
+            </Text>
+          </Pressable>
+        ) : null}
         <View style={[styles.inputRow, isDark ? styles.inputRowDark : null]}>
           <Pressable
             style={[
@@ -2197,17 +2268,6 @@ export default function ChatScreen({
             </Text>
           </Pressable>
         </View>
-        {pendingMedia ? (
-          <Pressable
-            style={styles.attachmentPill}
-            onPress={() => setPendingMedia(null)}
-            disabled={isUploading}
-          >
-            <Text style={styles.attachmentPillText}>
-              {`Attached: ${pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
-            </Text>
-          </Pressable>
-        ) : null}
       </KeyboardAvoidingView>
       <Modal visible={summaryOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -2281,7 +2341,13 @@ export default function ChatScreen({
               return (
                 <Pressable
                   key={opt.label}
-                  style={[styles.ttlOptionRow, selected ? styles.ttlOptionRowSelected : null]}
+                  style={[
+                    styles.ttlOptionRow,
+                    isDark ? styles.ttlOptionRowDark : null,
+                    selected
+                      ? (isDark ? styles.ttlOptionRowSelectedDark : styles.ttlOptionRowSelected)
+                      : null,
+                  ]}
                   onPress={() => {
                     setTtlIdx(idx);
                   }}
@@ -2411,6 +2477,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#f4f4f4',
   },
   ttlOptionRowSelected: { backgroundColor: '#e8eefc' },
+  ttlOptionRowDark: {
+    backgroundColor: '#1c1c22',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#2a2a33',
+  },
+  ttlOptionRowSelectedDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#3a3a46',
+  },
   ttlOptionLabel: { color: '#222', fontWeight: '600' },
   ttlOptionRadio: { color: '#222', fontSize: 18, fontWeight: '800' },
   ttlOptionLabelDark: { color: '#fff' },
@@ -2499,16 +2575,17 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
     overflow: 'hidden',
-    backgroundColor: 'transparent',
+    // For resizeMode="contain", this is the letterbox background (avoid theme-colored "borders").
+    backgroundColor: '#000',
   },
   mediaAutoImage: {
     width: '100%',
-    backgroundColor: 'transparent',
+    backgroundColor: '#000',
   },
   mediaCappedImage: {
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
-    backgroundColor: 'transparent',
+    backgroundColor: '#000',
   },
   mediaFrame: {
     marginTop: 8,
@@ -2516,11 +2593,12 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     // Match the message bubble background so "contain" letterboxing doesn't show as white.
-    backgroundColor: '#f1f1f1',
+    backgroundColor: '#000',
   },
   mediaFill: {
     width: '100%',
     height: '100%',
+    backgroundColor: '#000',
   },
   mediaThumb: {
     width: '100%',
@@ -2551,19 +2629,24 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   mediaCardIncoming: { backgroundColor: '#f1f1f1' },
-  mediaCardOutgoing: { backgroundColor: '#1976d2' },
+  mediaCardIncomingDark: { backgroundColor: '#1c1c22' },
+  // Outgoing media uses "contain" sometimes → avoid blue letterbox edges by using neutral bg.
+  mediaCardOutgoing: { backgroundColor: '#000' },
   mediaHeader: {
     paddingHorizontal: 12,
     paddingTop: 6,
     paddingBottom: 4,
   },
   mediaHeaderIncoming: { backgroundColor: '#f1f1f1' },
+  mediaHeaderIncomingDark: { backgroundColor: '#1c1c22' },
   mediaHeaderOutgoing: { backgroundColor: '#1976d2' },
   mediaHeaderMeta: { fontSize: 12, fontWeight: '400' },
   mediaHeaderMetaIncoming: { color: '#555' },
+  mediaHeaderMetaIncomingDark: { color: '#b7b7c2' },
   mediaHeaderMetaOutgoing: { color: 'rgba(255,255,255,0.9)', textAlign: 'right' },
   mediaHeaderCaption: { marginTop: 4, fontSize: 16, fontWeight: '400' },
   mediaHeaderCaptionIncoming: { color: '#222' },
+  mediaHeaderCaptionIncomingDark: { color: '#fff' },
   mediaHeaderCaptionOutgoing: { color: '#fff' },
   videoPlayOverlay: {
     position: 'absolute',
@@ -2587,10 +2670,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontStyle: 'italic',
     fontWeight: '600',
-    alignSelf: 'flex-end',
   },
+  seenTextAlignIncoming: { alignSelf: 'flex-start', textAlign: 'left' },
+  seenTextAlignOutgoing: { alignSelf: 'flex-end', textAlign: 'right' },
   seenTextIncoming: { color: '#1976d2' },
   seenTextOutgoing: { color: 'rgba(255,255,255,0.9)' },
+  // For outgoing MEDIA messages the seen label is rendered on the screen background (not inside the blue bubble),
+  // so use a readable light-mode color.
+  seenTextOutgoingOnLightSurface: { color: '#1976d2' },
   inputRow: {
     flexDirection: 'row',
     padding: 12,
@@ -2613,6 +2700,11 @@ const styles = StyleSheet.create({
     borderColor: '#c7d6ff',
   },
   attachmentPillText: { color: '#1b3a7a', fontWeight: '700' },
+  attachmentPillDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  attachmentPillTextDark: { color: '#fff' },
   pickBtn: {
     width: 44,
     height: 44,

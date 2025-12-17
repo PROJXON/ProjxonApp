@@ -616,9 +616,11 @@ const MainAppContent = () => {
                   style={styles.unreadHintWrapper}
                   onPress={() => goToConversation(convId)}
                 >
-                  <Text style={styles.unreadHint}>
+                  <Text style={[styles.unreadHint, isDark && styles.unreadHintDark]}>
                     {info.count} unread {info.count === 1 ? 'message' : 'messages'} from{' '}
-                    <Text style={styles.unreadHintBold}>{info.user}</Text>
+                    <Text style={[styles.unreadHintBold, isDark && styles.unreadHintBoldDark]}>
+                      {info.user}
+                    </Text>
                   </Text>
                 </Pressable>
               ))}
@@ -913,9 +915,15 @@ const styles = StyleSheet.create({
     marginTop: 4,
     paddingHorizontal: 4,
   },
+  unreadHintDark: {
+    color: '#b7b7c2',
+  },
   unreadHintBold: {
     fontWeight: '700',
     color: '#1976d2',
+  },
+  unreadHintBoldDark: {
+    color: '#fff',
   },
   errorText: {
     color: '#d32f2f',
