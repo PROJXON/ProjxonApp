@@ -183,6 +183,8 @@ type ChatScreenProps = {
 type ChatMessage = {
   id: string;
   user?: string;
+  // Stable identity key for comparisons (lowercased username). Prefer this over `user` for logic.
+  userLower?: string;
   text: string;
   rawText?: string;
   encrypted?: EncryptedChatPayloadV1;
@@ -1655,13 +1657,20 @@ export default function ChatScreen({
           const payload = JSON.parse(event.data);
           const activeConv = activeConversationIdRef.current;
           const dn = displayNameRef.current;
+          const myUserLower = normalizeUser(dn);
+          const payloadUserLower =
+            typeof payload?.userLower === 'string'
+              ? normalizeUser(payload.userLower)
+              : typeof payload?.user === 'string'
+                ? normalizeUser(payload.user)
+                : '';
 
         const isPayloadDm =
           typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
         const isDifferentConversation = payload?.conversationId !== activeConv;
         const fromOtherUser =
           typeof payload?.user === 'string' &&
-          normalizeUser(payload.user) !== normalizeUser(dn);
+          payloadUserLower !== myUserLower;
         const hasText = typeof payload?.text === 'string';
         if (
           isPayloadDm &&
@@ -1670,12 +1679,17 @@ export default function ChatScreen({
           hasText &&
           typeof payload.conversationId === 'string'
         ) {
-          onNewDmNotificationRef.current?.(payload.conversationId, payload.user || 'someone');
+          // Prefer display string when available; fall back to userLower for older deployments.
+          const senderLabel =
+            (typeof payload.user === 'string' && payload.user) ||
+            (typeof payload.userLower === 'string' && payload.userLower) ||
+            'someone';
+          onNewDmNotificationRef.current?.(payload.conversationId, senderLabel);
         }
 
         // Read receipt events (broadcast by backend)
         if (payload && payload.type === 'read' && payload.conversationId === activeConv) {
-          if (payload.user && normalizeUser(payload.user) !== normalizeUser(dn)) {
+          if (payload.user && payloadUserLower !== myUserLower) {
             const readAt =
               typeof payload.readAt === 'number' ? payload.readAt : Math.floor(Date.now() / 1000);
             // New: per-message receipt (messageCreatedAt). Backward compat: treat readUpTo as a messageCreatedAt.
@@ -1701,7 +1715,9 @@ export default function ChatScreen({
                     !!m.encrypted &&
                     !!myPublicKeyRef.current &&
                     m.encrypted.senderPublicKey === myPublicKeyRef.current;
-                  const isPlainOutgoing = !m.encrypted && (m.user ?? 'anon') === dn;
+                  const isPlainOutgoing =
+                    !m.encrypted &&
+                    normalizeUser(m.userLower ?? m.user ?? 'anon') === myUserLower;
                   const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
                   if (!isOutgoing) return m;
                   if (m.createdAt !== messageCreatedAt) return m;
@@ -1725,7 +1741,7 @@ export default function ChatScreen({
               : 'global';
           if (incomingConv !== activeConv) return;
           const u = typeof payload.user === 'string' ? payload.user : 'someone';
-          if (normalizeUser(u) === normalizeUser(dn)) return;
+          if (payloadUserLower && payloadUserLower === myUserLower) return;
           const isTyping = payload.isTyping === true;
           if (!isTyping) {
             setTypingByUserExpiresAt((prev) => {
@@ -1760,6 +1776,12 @@ export default function ChatScreen({
           const msg: ChatMessage = {
             id: stableId,
             user: payload.user,
+            userLower:
+              typeof payload.userLower === 'string'
+                ? normalizeUser(payload.userLower)
+                : typeof payload.user === 'string'
+                  ? normalizeUser(payload.user)
+                  : undefined,
             rawText,
             encrypted: encrypted ?? undefined,
             text: encrypted
@@ -2317,7 +2339,8 @@ export default function ChatScreen({
           const isEncryptedOutgoing =
             !!item.encrypted && !!myPublicKey && item.encrypted.senderPublicKey === myPublicKey;
           const isPlainOutgoing =
-            !item.encrypted && normalizeUser(item.user ?? 'anon') === normalizeUser(displayName);
+            !item.encrypted &&
+            normalizeUser(item.userLower ?? item.user ?? 'anon') === normalizeUser(displayName);
           const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
           const outgoingSeenLabel = isDm
             ? getSeenLabelFor(peerSeenAtByCreatedAt, item.createdAt)
@@ -2357,10 +2380,14 @@ export default function ChatScreen({
           const thumbAspect =
             thumbKeyPath && imageAspectByPath[thumbKeyPath] ? imageAspectByPath[thumbKeyPath] : undefined;
           const capped = getCappedMediaSize(thumbAspect);
-          const metaPrefix = isOutgoing ? '' : `${item.user ?? 'anon'} · `;
-          const metaLine = `${metaPrefix}${formatted}${
-            expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''
-          }`;
+          const hideMetaUntilDecrypted = !!item.encrypted && !item.decryptedText;
+          const metaPrefix =
+            hideMetaUntilDecrypted || isOutgoing ? '' : `${item.user ?? 'anon'} · `;
+          const metaLine = hideMetaUntilDecrypted
+            ? ''
+            : `${metaPrefix}${formatted}${
+                expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''
+              }`;
 
             return (           
               <Pressable
@@ -2405,18 +2432,20 @@ export default function ChatScreen({
                                 : styles.mediaHeaderIncoming,
                           ]}
                         >
-                          <Text
-                            style={[
-                              styles.mediaHeaderMeta,
-                              isOutgoing
-                                ? styles.mediaHeaderMetaOutgoing
-                                : isDark
-                                  ? styles.mediaHeaderMetaIncomingDark
-                                  : styles.mediaHeaderMetaIncoming,
-                            ]}
-                          >
-                            {metaLine}
-                          </Text>
+                          {metaLine ? (
+                            <Text
+                              style={[
+                                styles.mediaHeaderMeta,
+                                isOutgoing
+                                  ? styles.mediaHeaderMetaOutgoing
+                                  : isDark
+                                    ? styles.mediaHeaderMetaIncomingDark
+                                    : styles.mediaHeaderMetaIncoming,
+                              ]}
+                            >
+                              {metaLine}
+                            </Text>
+                          ) : null}
                           {captionText?.length ? (
                             <Text
                               style={[
@@ -2522,18 +2551,20 @@ export default function ChatScreen({
                             : styles.messageBubbleIncoming,
                       ]}
                     >
-                      <Text
-                        style={[
-                          styles.messageMeta,
-                          isOutgoing
-                            ? styles.messageMetaOutgoing
-                            : isDark
-                              ? styles.messageMetaIncomingDark
-                              : styles.messageMetaIncoming,
-                        ]}
-                      >
-                        {metaLine}
-                      </Text>
+                      {metaLine ? (
+                        <Text
+                          style={[
+                            styles.messageMeta,
+                            isOutgoing
+                              ? styles.messageMetaOutgoing
+                              : isDark
+                                ? styles.messageMetaIncomingDark
+                                : styles.messageMetaIncoming,
+                          ]}
+                        >
+                          {metaLine}
+                        </Text>
+                      ) : null}
                       {captionText?.length ? (
                         <Text
                           style={[
@@ -2801,7 +2832,7 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 20, fontWeight: '600', color: '#222' },
   titleDark: { color: '#fff' },
-  welcomeText: { fontSize: 14, color: '#555', marginTop: 4 },
+  welcomeText: { fontSize: 14, color: '#555', marginTop: 4, fontWeight: '700' },
   welcomeTextDark: { color: '#b7b7c2' },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
