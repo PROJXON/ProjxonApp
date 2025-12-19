@@ -262,6 +262,7 @@ export default function ChatScreen({
   const isTypingRef = React.useRef<boolean>(false);
   const lastTypingSentAtRef = React.useRef<number>(0);
   const typingCleanupTimerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingJoinConversationIdRef = React.useRef<string | null>(null);
   const [myUserId, setMyUserId] = React.useState<string | null>(null);
   const [myPrivateKey, setMyPrivateKey] = React.useState<string | null>(null);
   const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
@@ -274,7 +275,8 @@ export default function ChatScreen({
     {}
   ); // createdAt(ms) -> readAt(sec)
   const [mySeenAtByCreatedAt, setMySeenAtByCreatedAt] = React.useState<Record<string, number>>({});
-  const pendingReadCreatedAtRef = React.useRef<number>(0);
+  const pendingReadCreatedAtSetRef = React.useRef<Set<number>>(new Set());
+  const sentReadCreatedAtSetRef = React.useRef<Set<number>>(new Set());
   const [nowSec, setNowSec] = React.useState<number>(() => Math.floor(Date.now() / 1000));
   const TTL_OPTIONS = React.useMemo(
     () => [
@@ -333,6 +335,18 @@ export default function ChatScreen({
 
   const normalizeUser = React.useCallback((v: unknown): string => {
     return String(v ?? '').trim().toLowerCase();
+  }, []);
+
+  const appendQueryParam = React.useCallback((url: string, key: string, value: string): string => {
+    const hasQuery = url.includes('?');
+    const sep = hasQuery ? '&' : '?';
+    return `${url}${sep}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }, []);
+
+  const redactWsUrl = React.useCallback((url: string): string => {
+    // Avoid leaking JWTs into device logs/crash reports.
+    // Replace token=<anything> with token=REDACTED (handles ?token= and &token=).
+    return String(url || '').replace(/([?&]token=)[^&]*/i, '$1REDACTED');
   }, []);
 
   const getCappedMediaSize = React.useCallback(
@@ -854,7 +868,8 @@ export default function ChatScreen({
 
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
-    pendingReadCreatedAtRef.current = 0;
+    pendingReadCreatedAtSetRef.current = new Set();
+    sentReadCreatedAtSetRef.current = new Set();
   }, [activeConversationId]);
 
   // Fetch persisted read state so "Seen" works even if sender was offline when peer decrypted.
@@ -878,7 +893,8 @@ export default function ChatScreen({
         const reads = Array.isArray(data.reads) ? data.reads : [];
         const map: Record<string, number> = {};
         for (const r of reads) {
-          if (!r || typeof r.user !== 'string' || r.user === displayName) continue;
+          if (!r || typeof r.user !== 'string') continue;
+          if (normalizeUser(r.user) === normalizeUser(displayName)) continue;
           const mc = Number(r.messageCreatedAt ?? r.readUpTo);
           const ra = Number(r.readAt);
           if (!Number.isFinite(mc) || !Number.isFinite(ra)) continue;
@@ -911,7 +927,17 @@ export default function ChatScreen({
         if (!raw) return;
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
-          setPeerSeenAtByCreatedAt(parsed);
+          // Merge (don't overwrite) so server-hydrated /reads can't get clobbered by a slow local read.
+          setPeerSeenAtByCreatedAt((prev) => {
+            const next = { ...prev };
+            for (const [k, v] of Object.entries(parsed)) {
+              const n = Number(v);
+              if (!Number.isFinite(n) || n <= 0) continue;
+              const existing = next[k];
+              next[k] = existing ? Math.min(existing, n) : n;
+            }
+            return next;
+          });
         }
       } catch {
         // ignore
@@ -943,7 +969,16 @@ export default function ChatScreen({
         if (!raw) return;
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
-          setMySeenAtByCreatedAt(parsed);
+          setMySeenAtByCreatedAt((prev) => {
+            const next = { ...prev };
+            for (const [k, v] of Object.entries(parsed)) {
+              const n = Number(v);
+              if (!Number.isFinite(n) || n <= 0) continue;
+              const existing = next[k];
+              next[k] = existing ? Math.min(existing, n) : n;
+            }
+            return next;
+          });
         }
       } catch {
         // ignore
@@ -1213,13 +1248,16 @@ export default function ChatScreen({
   const sendReadReceipt = React.useCallback(
     (messageCreatedAt: number) => {
       if (!isDm) return;
-      // If we've already recorded seeing this message, don't re-send (avoids updating readAt on repeat taps).
-      if (mySeenAtByCreatedAt[String(messageCreatedAt)]) return;
+      if (!Number.isFinite(messageCreatedAt) || messageCreatedAt <= 0) return;
+      // Avoid duplicate sends/queues per conversation.
+      if (sentReadCreatedAtSetRef.current.has(messageCreatedAt)) return;
+      if (pendingReadCreatedAtSetRef.current.has(messageCreatedAt)) return;
       // If WS isn't ready yet (common right after login), queue and flush on connect.
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        pendingReadCreatedAtRef.current = Math.max(pendingReadCreatedAtRef.current, messageCreatedAt);
+        pendingReadCreatedAtSetRef.current.add(messageCreatedAt);
         return;
       }
+      sentReadCreatedAtSetRef.current.add(messageCreatedAt);
       wsRef.current.send(
         JSON.stringify({
           action: 'read',
@@ -1234,16 +1272,38 @@ export default function ChatScreen({
         })
       );
     },
-    [isDm, activeConversationId, displayName, mySeenAtByCreatedAt]
+    [isDm, activeConversationId, displayName]
   );
 
   const flushPendingRead = React.useCallback(() => {
     if (!isDm) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const pending = pendingReadCreatedAtRef.current;
-    if (!pending) return;
-    pendingReadCreatedAtRef.current = 0;
-    sendReadReceipt(pending);
+    const pending = Array.from(pendingReadCreatedAtSetRef.current);
+    if (!pending.length) return;
+    pendingReadCreatedAtSetRef.current = new Set();
+    // send oldest-first (nice-to-have)
+    pending.sort((a, b) => a - b);
+    for (const mc of pending) {
+      if (sentReadCreatedAtSetRef.current.has(mc)) continue;
+      sentReadCreatedAtSetRef.current.add(mc);
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            action: 'read',
+            conversationId: activeConversationId,
+            user: displayName,
+            messageCreatedAt: mc,
+            readUpTo: mc,
+            readAt: Math.floor(Date.now() / 1000),
+            createdAt: Date.now(),
+          })
+        );
+      } catch {
+        // If send fails, re-queue and bail; connectWs will retry.
+        pendingReadCreatedAtSetRef.current.add(mc);
+        break;
+      }
+    }
   }, [isDm, sendReadReceipt]);
 
   const refreshMyKeys = React.useCallback(async (sub: string) => {
@@ -1304,7 +1364,7 @@ export default function ChatScreen({
     );
     if (!needsDecrypt) return;
 
-    let maxReadUpTo = 0;
+    const decryptedIncomingCreatedAts: number[] = [];
     const readAt = Math.floor(Date.now() / 1000);
     let changed = false;
 
@@ -1317,7 +1377,7 @@ export default function ChatScreen({
         changed = true;
         const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
         if (!isFromMe) {
-          maxReadUpTo = Math.max(maxReadUpTo, m.createdAt);
+          decryptedIncomingCreatedAts.push(m.createdAt);
           const expiresAt =
             m.ttlSeconds && m.ttlSeconds > 0 ? readAt + m.ttlSeconds : m.expiresAt;
           markMySeen(m.createdAt, readAt);
@@ -1364,7 +1424,11 @@ export default function ChatScreen({
 
     if (changed) {
       setMessages(nextMessages);
-      if (maxReadUpTo) sendReadReceipt(maxReadUpTo);
+      // Send per-message read receipts for messages we actually decrypted.
+      decryptedIncomingCreatedAts.sort((a, b) => a - b);
+      for (const mc of decryptedIncomingCreatedAts) {
+        sendReadReceipt(mc);
+      }
     }
   }, [
     autoDecrypt,
@@ -1465,21 +1529,65 @@ export default function ChatScreen({
     setError(null);
     setIsConnecting(true);
 
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      wsReconnectAttemptRef.current = 0;
-      setIsConnecting(false);
-      setIsConnected(true);
-      flushPendingRead();
-    };
-
-    ws.onmessage = (event) => {
+    (async () => {
+      // If WS auth is enabled, include Cognito token in the WS URL query string.
+      // (React Native WebSocket headers are unreliable cross-platform, query string is the common pattern.)
+      let wsUrlWithAuth = WS_URL;
       try {
-        const payload = JSON.parse(event.data);
-        const activeConv = activeConversationIdRef.current;
-        const dn = displayNameRef.current;
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) {
+          setIsConnecting(false);
+          setIsConnected(false);
+          setError('Not authenticated (missing idToken).');
+          scheduleReconnect();
+          return;
+        }
+        wsUrlWithAuth = appendQueryParam(WS_URL, 'token', idToken);
+      } catch {
+        setIsConnecting(false);
+        setIsConnected(false);
+        setError('Unable to authenticate WebSocket connection.');
+        scheduleReconnect();
+        return;
+      }
+
+      const ws = new WebSocket(wsUrlWithAuth);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        // Ignore events from stale sockets.
+        if (wsRef.current !== ws) return;
+        wsReconnectAttemptRef.current = 0;
+        setIsConnecting(false);
+        setIsConnected(true);
+        setError(null);
+        flushPendingRead();
+        // Best-effort "join" so backend can route/broadcast efficiently.
+        const pendingJoin = pendingJoinConversationIdRef.current || activeConversationIdRef.current;
+        if (pendingJoin) {
+          try {
+            ws.send(
+              JSON.stringify({
+                action: 'join',
+                conversationId: pendingJoin,
+                createdAt: Date.now(),
+              })
+            );
+            pendingJoinConversationIdRef.current = null;
+          } catch {
+            // ignore
+          }
+        }
+      };
+
+      ws.onmessage = (event) => {
+        // Ignore events from stale sockets.
+        if (wsRef.current !== ws) return;
+        try {
+          const payload = JSON.parse(event.data);
+          const activeConv = activeConversationIdRef.current;
+          const dn = displayNameRef.current;
 
         const isPayloadDm =
           typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
@@ -1500,7 +1608,7 @@ export default function ChatScreen({
 
         // Read receipt events (broadcast by backend)
         if (payload && payload.type === 'read' && payload.conversationId === activeConv) {
-          if (payload.user && payload.user !== dn) {
+          if (payload.user && normalizeUser(payload.user) !== normalizeUser(dn)) {
             const readAt =
               typeof payload.readAt === 'number' ? payload.readAt : Math.floor(Date.now() / 1000);
             // New: per-message receipt (messageCreatedAt). Backward compat: treat readUpTo as a messageCreatedAt.
@@ -1596,31 +1704,36 @@ export default function ChatScreen({
           };
           setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
         }
-      } catch {
-        const msg: ChatMessage = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          text: String(event.data),
-          createdAt: Date.now(),
-        };
-        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
-      }
-    };
+        } catch {
+          const msg: ChatMessage = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            text: String(event.data),
+            createdAt: Date.now(),
+          };
+          setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
+        }
+      };
 
-    ws.onerror = (e: any) => {
-      // RN WebSocket doesn't expose much, but log what we can
-      // eslint-disable-next-line no-console
-      console.log('WS error:', e?.message ?? e);
-      setIsConnecting(false);
-      setIsConnected(false);
-      setError(e?.message ? `WebSocket error: ${e.message}` : 'WebSocket error');
-      scheduleReconnect();
-    };
-    ws.onclose = (e) => {
-      // eslint-disable-next-line no-console
-      console.log('WS close:', (e as any)?.code, (e as any)?.reason);
-      setIsConnected(false);
-      scheduleReconnect();
-    };
+      ws.onerror = (e: any) => {
+        // Ignore events from stale sockets.
+        if (wsRef.current !== ws) return;
+        // RN WebSocket doesn't expose much, but log what we can
+        // eslint-disable-next-line no-console
+        console.log('WS error:', e?.message ?? 'WebSocket error', 'url:', redactWsUrl(ws.url));
+        setIsConnecting(false);
+        setIsConnected(false);
+        setError(e?.message ? `WebSocket error: ${e.message}` : 'WebSocket error');
+        scheduleReconnect();
+      };
+      ws.onclose = (e) => {
+        // Ignore events from stale sockets.
+        if (wsRef.current !== ws) return;
+        // eslint-disable-next-line no-console
+        console.log('WS close:', (e as any)?.code, (e as any)?.reason, 'url:', redactWsUrl(ws.url));
+        setIsConnected(false);
+        scheduleReconnect();
+      };
+    })();
   }, [user, normalizeUser, flushPendingRead, scheduleReconnect]);
 
   // Keep WS alive across "open picker -> app background -> return" transitions.
@@ -1750,7 +1863,13 @@ export default function ChatScreen({
       }
       isTypingRef.current = false;
     }
-    let outgoingText = input.trim();
+
+    // Snapshot current input/media and clear UI optimistically so the textbox feels instant.
+    // If sending fails, we restore.
+    const originalInput = input;
+    const originalPendingMedia = pendingMedia;
+
+    let outgoingText = originalInput.trim();
     if (isDm) {
       if (!myPrivateKey) {
         Alert.alert('Encryption not ready', 'Missing your private key on this device.');
@@ -1761,12 +1880,15 @@ export default function ChatScreen({
         return;
       }
 
+      setInput('');
+      setPendingMedia(null);
+
       // DM media: encrypt + upload ciphertext, then encrypt the envelope as a normal DM message.
-      if (pendingMedia) {
+      if (originalPendingMedia) {
         try {
           setIsUploading(true);
           const dmEnv = await uploadPendingMediaDmEncrypted(
-            pendingMedia,
+            originalPendingMedia,
             activeConversationId,
             myPrivateKey,
             peerPublicKey
@@ -1776,6 +1898,8 @@ export default function ChatScreen({
           outgoingText = JSON.stringify(enc);
         } catch (e: any) {
           Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
+          setInput(originalInput);
+          setPendingMedia(originalPendingMedia);
           return;
         } finally {
           setIsUploading(false);
@@ -1784,10 +1908,12 @@ export default function ChatScreen({
         const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
         outgoingText = JSON.stringify(enc);
       }
-    } else if (pendingMedia) {
+    } else if (originalPendingMedia) {
+      setInput('');
+      setPendingMedia(null);
       try {
         setIsUploading(true);
-        const uploaded = await uploadPendingMedia(pendingMedia);
+        const uploaded = await uploadPendingMedia(originalPendingMedia);
         const envelope: ChatEnvelope = {
           type: 'chat',
           text: outgoingText,
@@ -1796,10 +1922,15 @@ export default function ChatScreen({
         outgoingText = JSON.stringify(envelope);
       } catch (e: any) {
         Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
+        setInput(originalInput);
+        setPendingMedia(originalPendingMedia);
         return;
       } finally {
         setIsUploading(false);
       }
+    } else {
+      // Plain text global message: clear immediately.
+      setInput('');
     }
     const outgoing = {
       action: 'message',
@@ -1811,8 +1942,6 @@ export default function ChatScreen({
       ttlSeconds: isDm && TTL_OPTIONS[ttlIdx]?.seconds ? TTL_OPTIONS[ttlIdx].seconds : undefined,
     };
     wsRef.current.send(JSON.stringify(outgoing));
-    setInput('');
-    setPendingMedia(null);
   }, [
     input,
     pendingMedia,
@@ -1855,6 +1984,31 @@ export default function ChatScreen({
     },
     [activeConversationId, displayName]
   );
+
+  const sendJoin = React.useCallback((conversationIdToJoin: string) => {
+    if (!conversationIdToJoin) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      pendingJoinConversationIdRef.current = conversationIdToJoin;
+      return;
+    }
+    try {
+      wsRef.current.send(
+        JSON.stringify({
+          action: 'join',
+          conversationId: conversationIdToJoin,
+          createdAt: Date.now(),
+        })
+      );
+      pendingJoinConversationIdRef.current = null;
+    } catch {
+      pendingJoinConversationIdRef.current = conversationIdToJoin;
+    }
+  }, []);
+
+  // Notify backend whenever user switches conversations (enables Query-by-conversation routing).
+  React.useEffect(() => {
+    sendJoin(activeConversationId);
+  }, [activeConversationId, sendJoin]);
 
   const onChangeInput = React.useCallback(
     (next: string) => {
@@ -1935,9 +2089,9 @@ export default function ChatScreen({
 
   const getSeenLabelFor = React.useCallback(
     (map: Record<string, number>, messageCreatedAtMs: number): string | null => {
-      const readAtSec = map[String(messageCreatedAtMs)];
-      if (!readAtSec) return null;
-      return formatSeenLabel(readAtSec);
+      const direct = map[String(messageCreatedAtMs)];
+      if (direct) return formatSeenLabel(direct);
+      return null;
     },
     [formatSeenLabel]
   );
@@ -2095,7 +2249,8 @@ export default function ChatScreen({
 
           const isEncryptedOutgoing =
             !!item.encrypted && !!myPublicKey && item.encrypted.senderPublicKey === myPublicKey;
-          const isPlainOutgoing = !item.encrypted && (item.user ?? 'anon') === displayName;
+          const isPlainOutgoing =
+            !item.encrypted && normalizeUser(item.user ?? 'anon') === normalizeUser(displayName);
           const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
           const outgoingSeenLabel = isDm
             ? getSeenLabelFor(peerSeenAtByCreatedAt, item.createdAt)

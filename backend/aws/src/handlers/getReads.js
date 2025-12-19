@@ -32,8 +32,10 @@ exports.handler = async (event) => {
         TableName: table,
         KeyConditionExpression: 'conversationId = :c',
         ExpressionAttributeValues: { ':c': conversationId },
-        ScanIndexForward: true,
-        Limit: 50,
+        // Return the newest receipts first so clients who reconnect can quickly learn
+        // the latest "Seen" state even if the table has many entries.
+        ScanIndexForward: false,
+        Limit: 200,
       })
     );
 
