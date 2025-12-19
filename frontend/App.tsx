@@ -466,7 +466,8 @@ const MainAppContent = () => {
         for (const it of unread) {
           const convId = String(it.conversationId || '');
           if (!convId) continue;
-          const sender = String(it.sender || it.user || 'someone');
+          // Prefer display name if backend provides it; fall back to legacy `sender`/`user`.
+          const sender = String(it.senderDisplayName || it.sender || it.user || 'someone');
           const count = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
           next[convId] = { user: sender, count: Math.max(1, Math.floor(count)) };
         }
