@@ -2,8 +2,10 @@ import React from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   AppState,
   AppStateStatus,
+  Easing,
   useWindowDimensions,
   FlatList,
   Image,
@@ -49,6 +51,71 @@ import * as FileSystem from 'expo-file-system';
 import { fromByteArray, toByteArray } from 'base64-js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
+
+function TypingIndicator({
+  text,
+  color,
+}: {
+  text: string;
+  color: string;
+}): React.JSX.Element {
+  const dot1 = React.useRef(new Animated.Value(0)).current;
+  const dot2 = React.useRef(new Animated.Value(0)).current;
+  const dot3 = React.useRef(new Animated.Value(0)).current;
+
+  React.useEffect(() => {
+    const makeDotAnim = (v: Animated.Value) =>
+      Animated.sequence([
+        Animated.timing(v, {
+          toValue: 1,
+          duration: 260,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(v, {
+          toValue: 0,
+          duration: 260,
+          easing: Easing.in(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]);
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.stagger(130, [makeDotAnim(dot1), makeDotAnim(dot2), makeDotAnim(dot3)]),
+        Animated.delay(450),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [dot1, dot2, dot3]);
+
+  const dotStyle = (v: Animated.Value) => ({
+    transform: [
+      {
+        translateY: v.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0, -5],
+        }),
+      },
+    ],
+    opacity: v.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0.4, 1],
+    }),
+  });
+
+  return (
+    <View style={styles.typingIndicatorRow}>
+      <Text style={[styles.typingText, { color }]}>{text}</Text>
+      <View style={styles.typingDotsRow} accessibilityLabel={`${text}...`}>
+        <Animated.Text style={[styles.typingDot, { color }, dotStyle(dot1)]}>.</Animated.Text>
+        <Animated.Text style={[styles.typingDot, { color }, dotStyle(dot2)]}>.</Animated.Text>
+        <Animated.Text style={[styles.typingDot, { color }, dotStyle(dot3)]}>.</Animated.Text>
+      </View>
+    </View>
+  );
+}
 
 function InlineVideoThumb({
   url,
@@ -2026,10 +2093,10 @@ export default function ChatScreen({
       .filter(([, exp]) => typeof exp === 'number' && exp > now)
       .map(([u]) => u);
     if (users.length === 0) return '';
-    if (users.length >= 5) return 'Someone is typing…';
-    if (users.length === 1) return `${users[0]} is typing…`;
-    if (users.length === 2) return `${users[0]} and ${users[1]} are typing…`;
-    return `${users.slice(0, -1).join(', ')}, and ${users[users.length - 1]} are typing…`;
+    if (users.length >= 5) return 'Someone is typing';
+    if (users.length === 1) return `${users[0]} is typing`;
+    if (users.length === 2) return `${users[0]} and ${users[1]} are typing`;
+    return `${users.slice(0, -1).join(', ')}, and ${users[users.length - 1]} are typing`;
   }, [typingByUserExpiresAt]);
 
   const onPressMessage = React.useCallback(
@@ -2513,9 +2580,10 @@ export default function ChatScreen({
         ) : null}
         {typingIndicatorText ? (
           <View style={styles.typingRow}>
-            <Text style={[styles.typingText, isDark ? styles.typingTextDark : null]}>
-              {typingIndicatorText}
-            </Text>
+            <TypingIndicator
+              text={typingIndicatorText}
+              color={isDark ? styles.typingTextDark.color : styles.typingText.color}
+            />
           </View>
         ) : null}
         <View style={[styles.inputRow, isDark ? styles.inputRowDark : null]}>
@@ -3029,13 +3097,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: 6,
   },
+  typingIndicatorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  typingDotsRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    paddingLeft: 2,
+  },
   typingText: {
-    fontSize: 12,
+    fontSize: 14,
     color: '#666',
+    fontWeight: '600',
     fontStyle: 'italic',
   },
   typingTextDark: {
     color: '#a7a7b4',
+  },
+  typingDot: {
+    fontSize: 18,
+    fontWeight: '900',
+    lineHeight: 18,
   },
   sendBtn: {
     marginLeft: 8,
