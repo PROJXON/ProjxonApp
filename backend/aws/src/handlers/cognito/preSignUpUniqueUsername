@@ -1,0 +1,45 @@
+// Node.js 20/22 — uses AWS SDK v3 (available in Lambda)
+const {
+    CognitoIdentityProviderClient,
+    ListUsersCommand,
+  } = require("@aws-sdk/client-cognito-identity-provider");
+  
+  const client = new CognitoIdentityProviderClient({});
+  
+  exports.handler = async (event) => {
+    const poolId = event.userPoolId;
+    const attrs = event.request.userAttributes || {};
+    const preferred = attrs.preferred_username;
+  
+    if (!preferred) {
+      throw new Error("Username (preferred_username) is required.");
+    }
+
+    // Reject ANY whitespace (so "Name ", "Name  ", "Hot Dog" all fail)
+    if (/\s/.test(preferred)) {
+      throw new Error("Username cannot contain spaces.");
+    }
+
+    // Reject commas, backslash, forward slash, apostrophe, #, and double-quote
+    if (/[,\\/"'#]/.test(preferred)) {
+      throw new Error(`Username cannot contain commas, /, \\, ', #, or ".`);
+    }
+
+    const resp = await client.send(
+      new ListUsersCommand({
+        UserPoolId: poolId,
+        Filter: `preferred_username = "${preferred}"`,
+        Limit: 1,
+      })
+    );
+  
+    if (resp.Users && resp.Users.length > 0) {
+      throw new Error("Username is already taken.");
+    }
+  
+    // Optional: auto-confirm and auto-verify email if provided
+    event.response.autoConfirmUser = true;
+    if (attrs.email) event.response.autoVerifyEmail = true;
+  
+    return event;
+  };
