@@ -33,6 +33,7 @@ exports.handler = async (event) => {
         text: String(it.text ?? ''),
         user: it.user ? String(it.user) : 'anon',
         userLower: it.userLower ? String(it.userLower) : undefined,
+        userSub: it.userSub ? String(it.userSub) : undefined,
         ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
         expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
       }));

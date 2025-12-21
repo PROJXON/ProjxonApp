@@ -1,44 +1,76 @@
-const {
-  CognitoIdentityProviderClient,
-  ListUsersCommand,
-} = require('@aws-sdk/client-cognito-identity-provider');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, QueryCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 
-const client = new CognitoIdentityProviderClient({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 exports.handler = async (event) => {
   try {
-    const raw = String(event.queryStringParameters?.username || '').trim();
-    const username = raw.toLowerCase();
-    if (!username) {
-      return { statusCode: 400, body: JSON.stringify({ message: 'username is required' }) };
+    const qs = event.queryStringParameters || {};
+    const raw = typeof qs.username === 'string' ? String(qs.username).trim() : '';
+    const subParam = typeof qs.sub === 'string' ? String(qs.sub).trim() : '';
+    const usernameLower = raw.toLowerCase();
+    if (!usernameLower && !subParam) {
+      return { statusCode: 400, body: JSON.stringify({ message: 'username or sub is required' }) };
     }
 
-    const resp = await client.send(
-      new ListUsersCommand({
-        UserPoolId: process.env.USER_POOL_ID, // set this in your function env
-        Filter: `preferred_username = "${username}"`,
+    // Preferred path: query Users table (true case-insensitive lookup).
+    // Expected Users table schema:
+    // - PK: userSub (String)
+    // - GSI: byUsernameLower (PK usernameLower String)
+    // - Attributes: displayName, currentPublicKey
+    const usersTable = process.env.USERS_TABLE;
+    if (!usersTable) {
+      // We intentionally avoid pulling keys from Cognito.
+      // `Users.currentPublicKey` is the source of truth for encryption.
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ message: 'Server misconfigured: USERS_TABLE is not set' }),
+      };
+    }
+
+    // Fast path: lookup by sub (PK)
+    if (subParam) {
+      const resp = await ddb.send(
+        new GetCommand({
+          TableName: usersTable,
+          Key: { userSub: subParam },
+        })
+      );
+      const it = resp.Item;
+      if (!it) {
+        return { statusCode: 404, body: JSON.stringify({ message: 'User does not exist' }) };
+      }
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          sub: String(it.userSub),
+          displayName: String(it.displayName || it.usernameLower || 'anon'),
+          usernameLower: String(it.usernameLower || '').trim() || undefined,
+          public_key: it.currentPublicKey ? String(it.currentPublicKey) : undefined,
+        }),
+      };
+    }
+
+    const resp = await ddb.send(
+      new QueryCommand({
+        TableName: usersTable,
+        IndexName: 'byUsernameLower',
+        KeyConditionExpression: 'usernameLower = :u',
+        ExpressionAttributeValues: { ':u': usernameLower },
         Limit: 1,
       })
     );
-
-    const user = resp.Users?.[0];
-    if (!user) {
+    const it = resp.Items?.[0];
+    if (!it) {
       return { statusCode: 404, body: JSON.stringify({ message: 'User does not exist' }) };
     }
-
-    const attrs = (user.Attributes || []).reduce((acc, attr) => {
-      acc[attr.Name] = attr.Value;
-      return acc;
-    }, {});
-    const canonical = attrs.preferred_username || attrs.email || user.Username;
-
     return {
       statusCode: 200,
       body: JSON.stringify({
-        username: canonical,
-        email: attrs.email,
-        preferred_username: attrs.preferred_username,
-        public_key: attrs['custom:public_key'],
+        sub: String(it.userSub),
+        displayName: String(it.displayName || it.usernameLower || 'anon'),
+        usernameLower: String(it.usernameLower || usernameLower),
+        public_key: it.currentPublicKey ? String(it.currentPublicKey) : undefined,
       }),
     };
   } catch (err) {

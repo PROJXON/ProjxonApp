@@ -1,9 +1,7 @@
-const {
-  CognitoIdentityProviderClient,
-  AdminUpdateUserAttributesCommand,
-} = require('@aws-sdk/client-cognito-identity-provider');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 
-const client = new CognitoIdentityProviderClient({});
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 exports.handler = async (event) => {
   try {
@@ -13,21 +11,45 @@ exports.handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ message: 'publicKey is required' }) };
     }
 
-    const sub = event.requestContext?.authorizer?.jwt?.claims?.sub;
+    const claims = event.requestContext?.authorizer?.jwt?.claims || {};
+    const sub = claims?.sub;
     if (!sub) {
       return { statusCode: 401, body: JSON.stringify({ message: 'Unauthorized' }) };
     }
 
-    await client.send(
-      new AdminUpdateUserAttributesCommand({
-        UserPoolId: process.env.USER_POOL_ID,
-        Username: sub,
-        UserAttributes: [
-          {
-            Name: 'custom:public_key',
-            Value: publicKey,
-          },
-        ],
+    // Store in Users table (source of truth).
+    // Schema expectation:
+    // - PK: userSub (String)
+    // - Attributes: currentPublicKey (String), updatedAt (Number)
+    const usersTable = process.env.USERS_TABLE;
+    if (!usersTable) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ message: 'Server misconfigured: USERS_TABLE is not set' }),
+      };
+    }
+
+    const nowMs = Date.now();
+    const preferred = typeof claims.preferred_username === 'string' ? claims.preferred_username : '';
+    const email = typeof claims.email === 'string' ? claims.email : '';
+    const displayName = String(preferred || email || sub).trim();
+    const usernameLower = displayName.toLowerCase();
+    const emailLower = email ? email.trim().toLowerCase() : '';
+
+    await ddb.send(
+      new UpdateCommand({
+        TableName: usersTable,
+        Key: { userSub: String(sub) },
+        UpdateExpression:
+          'SET currentPublicKey = :k, displayName = :d, usernameLower = :ul, updatedAt = :u' +
+          (emailLower ? ', emailLower = :el' : ''),
+        ExpressionAttributeValues: {
+          ':k': publicKey,
+          ':d': displayName,
+          ':ul': usernameLower,
+          ':u': nowMs,
+          ...(emailLower ? { ':el': emailLower } : {}),
+        },
       })
     );
 

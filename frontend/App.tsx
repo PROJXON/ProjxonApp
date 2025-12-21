@@ -171,6 +171,25 @@ const MainAppContent = () => {
     }
   };
 
+  const uploadPublicKey = async (token: string | undefined, publicKey: string) => {
+    if (!token) {
+      console.warn('uploadPublicKey: missing idToken');
+      return;
+    }
+    const resp = await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ publicKey }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      console.warn('uploadPublicKey non-2xx', resp.status, text);
+    }
+  };
+
   React.useEffect(() => {
     let mounted = true;
 
@@ -199,16 +218,7 @@ const MainAppContent = () => {
             keyPair = { ...keyPair, publicKey: derivedPublicKey };
             await storeKeyPair(userId, keyPair);
             const token = (await fetchAuthSession()).tokens?.idToken?.toString();
-            if (token) {
-              await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
-                method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ publicKey: derivedPublicKey }),
-              });
-            }
+            await uploadPublicKey(token, derivedPublicKey);
           }
         }
         if (!keyPair) {
@@ -248,16 +258,7 @@ const MainAppContent = () => {
                   };
                   await storeKeyPair(userId, keyPair);
                   // Ensure Cognito has the matching public key so other devices encrypt to the right key.
-                  if (token) {
-                    await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
-                      method: 'POST',
-                      headers: {
-                        Authorization: `Bearer ${token}`,
-                        'Content-Type': 'application/json',
-                      },
-                      body: JSON.stringify({ publicKey: derivedPublicKey }),
-                    });
-                  }
+                  await uploadPublicKey(token, derivedPublicKey);
                   recovered = true;
                   closePrompt();
                 } catch (err) {
@@ -287,6 +288,9 @@ const MainAppContent = () => {
           const newKeyPair = await generateKeypair();
           await storeKeyPair(userId, newKeyPair);
           const token = (await fetchAuthSession()).tokens?.idToken?.toString();
+          // Publish the public key immediately so other users/devices can encrypt to us,
+          // even if the user cancels recovery setup.
+          await uploadPublicKey(token, newKeyPair.publicKey);
           try {
             const recoveryPassphrase = await promptPassphrase('setup');
             await uploadRecoveryBlob(token!, newKeyPair.privateKey, recoveryPassphrase);
@@ -298,14 +302,6 @@ const MainAppContent = () => {
             setProcessing(false);
             closePrompt();
           }
-          await fetch(`${API_URL.replace(/\/$/, '')}/users/public-key`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ publicKey: newKeyPair.publicKey }),
-          });
         }
       } catch {
         if (mounted) setDisplayName((user as any)?.username || 'anon');
@@ -327,7 +323,9 @@ const MainAppContent = () => {
   const [searchOpen, setSearchOpen] = useState<boolean>(false);
   const [peerInput, setPeerInput] = useState<string>('');
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [unreadDmMap, setUnreadDmMap] = useState<Record<string, { user: string; count: number }>>(
+  const [unreadDmMap, setUnreadDmMap] = useState<
+    Record<string, { user: string; count: number; senderSub?: string }>
+  >(
     () => ({})
   );
   const isDmMode = conversationId !== 'global';
@@ -381,15 +379,44 @@ const MainAppContent = () => {
         setSearchError('No such user!');
         return;
       }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.warn('getUser failed', res.status, text);
+        let msg = text;
+        try {
+          const parsed = text ? JSON.parse(text) : null;
+          if (parsed && typeof parsed.message === 'string') msg = parsed.message;
+        } catch {
+          // ignore
+        }
+        setSearchError(msg ? `User lookup failed (${res.status}): ${msg}` : `User lookup failed (${res.status})`);
+        return;
+      }
 
       const data = await res.json();
-      const canonical = (data.preferred_username ?? data.email ?? data.username ?? trimmed).trim();
+      const peerSub = String(data.sub || data.userSub || '').trim();
+      const canonical = String(data.displayName || data.preferred_username || data.username || trimmed).trim();
+      if (!peerSub) {
+        console.warn('getUser ok but missing sub', data);
+        setSearchError('User lookup missing sub (check getUser response JSON)');
+        return;
+      }
       const normalizedCanonical = canonical.toLowerCase();
       if (normalizedCanonical === normalizedCurrent) {
         setSearchError('Not you silly!');
         return;
       }
-      const id = [normalizedCurrent, normalizedCanonical].sort().join('#');
+      const mySub = (await fetchUserAttributes()).sub as string | undefined;
+      if (!mySub) {
+        setSearchError('Unable to authenticate');
+        return;
+      }
+      if (peerSub === mySub) {
+        setSearchError('Not you silly!');
+        return;
+      }
+      const [a, b] = [mySub, peerSub].sort();
+      const id = `dm#${a}#${b}`;
       setPeer(canonical);
       setConversationId(id);
       setSearchOpen(false);
@@ -406,22 +433,21 @@ const MainAppContent = () => {
   const goToConversation = React.useCallback(
     (targetConversationId: string) => {
       if (!targetConversationId) return;
-      const normalizedTarget = targetConversationId;
-      const names = normalizedTarget.split('#');
-      const normalizedCurrent = currentUsername.trim().toLowerCase();
-      const peerName =
-        names.length === 2 ? names.find((n) => n !== normalizedCurrent) ?? names[0] : names[0];
-      setConversationId(normalizedTarget);
-      setPeer(peerName);
+      setConversationId(targetConversationId);
+      // Best-effort: we can't derive displayName from dm#sub#sub, so use unread cache if available.
+      const cached = unreadDmMap[targetConversationId];
+      if (cached?.user) setPeer(cached.user);
+      else if (targetConversationId === 'global') setPeer(null);
+      else setPeer('Direct Message');
       setSearchOpen(false);
       setPeerInput('');
       setSearchError(null);
     },
-    [currentUsername]
+    [unreadDmMap]
   );
 
   const handleNewDmNotification = React.useCallback(
-    (newConversationId: string, sender: string) => {
+    (newConversationId: string, sender: string, senderSub?: string) => {
       setUnreadDmMap((prev) => {
         if (!newConversationId || newConversationId === 'global') return prev;
         if (newConversationId === conversationId) return prev;
@@ -429,6 +455,7 @@ const MainAppContent = () => {
         const next = { ...prev };
         next[newConversationId] = {
           user: sender || existing?.user || 'someone',
+          senderSub: senderSub || existing?.senderSub,
           count: (existing?.count ?? 0) + 1,
         };
         return next;
@@ -462,14 +489,15 @@ const MainAppContent = () => {
         if (!res.ok) return;
         const data = await res.json();
         const unread = Array.isArray(data.unread) ? data.unread : [];
-        const next: Record<string, { user: string; count: number }> = {};
+        const next: Record<string, { user: string; count: number; senderSub?: string }> = {};
         for (const it of unread) {
           const convId = String(it.conversationId || '');
           if (!convId) continue;
           // Prefer display name if backend provides it; fall back to legacy `sender`/`user`.
           const sender = String(it.senderDisplayName || it.sender || it.user || 'someone');
+          const senderSub = it.senderSub ? String(it.senderSub) : undefined;
           const count = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
-          next[convId] = { user: sender, count: Math.max(1, Math.floor(count)) };
+          next[convId] = { user: sender, senderSub, count: Math.max(1, Math.floor(count)) };
         }
         setUnreadDmMap((prev) => ({ ...next, ...prev }));
       } catch {
@@ -642,7 +670,7 @@ const MainAppContent = () => {
               <Text style={styles.modalTitle}>{promptLabel}</Text>
               {passphrasePrompt?.mode === 'setup' ? (
                 <Text style={styles.modalHelperText}>
-                  Make sure you remember your passphrase for future device recovery — we do not
+                  Make sure you remember your passphrase for future device recovery - we do not
                   store it.
                 </Text>
               ) : null}

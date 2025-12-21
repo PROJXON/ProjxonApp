@@ -52,43 +52,49 @@ const queryConnIdsByConversation = async (conversationId) => {
   return (resp.Items || []).map((it) => it.connectionId).filter(Boolean);
 };
 
-const queryConnIdsByUsernameLower = async (usernameLower) => {
+const queryConnIdsByUserSub = async (userSub) => {
   const resp = await ddb.send(
     new QueryCommand({
       TableName: process.env.CONNECTIONS_TABLE,
-      IndexName: 'byUsername',
-      KeyConditionExpression: 'usernameLower = :u',
-      ExpressionAttributeValues: { ':u': usernameLower },
+      IndexName: 'byUserSub',
+      KeyConditionExpression: 'userSub = :u',
+      ExpressionAttributeValues: { ':u': userSub },
       ProjectionExpression: 'connectionId',
     })
   );
   return (resp.Items || []).map((it) => it.connectionId).filter(Boolean);
 };
 
-// conversationId is "alice#bob" (sorted, lowercase). Returns the other usernameLower.
-const parseRecipientUsernameLower = (conversationId, senderUsernameLower) => {
+// DM conversationId format: "dm#<minSub>#<maxSub>"
+const parseDmRecipientSub = (conversationId, senderSub) => {
   if (!conversationId || conversationId === 'global') return null;
-  const parts = String(conversationId)
-    .split('#')
-    .map((p) => String(p).trim().toLowerCase())
-    .filter(Boolean);
-  const me = String(senderUsernameLower || '').trim().toLowerCase();
-  return parts.find((p) => p !== me) || null;
+  const raw = String(conversationId).trim();
+  if (!raw.startsWith('dm#')) return null;
+  const parts = raw.split('#').map((p) => String(p).trim()).filter(Boolean);
+  if (parts.length !== 3) return null;
+  const a = parts[1];
+  const b = parts[2];
+  const me = String(senderSub || '').trim();
+  if (!me) return null;
+  if (a === me) return b;
+  if (b === me) return a;
+  return null;
 };
 
-const markUnread = async (recipientUsernameLower, conversationId, senderUsernameLower, nowMs) => {
+const markUnread = async (recipientSub, conversationId, sender) => {
   if (!process.env.UNREADS_TABLE) return;
-  if (!recipientUsernameLower) return;
+  if (!recipientSub) return;
 
   await ddb.send(
     new UpdateCommand({
       TableName: process.env.UNREADS_TABLE,
-      Key: { user: recipientUsernameLower, conversationId },
+      Key: { userSub: recipientSub, conversationId },
       UpdateExpression:
-        'SET sender = :sender, lastMessageCreatedAt = :createdAt, messageCount = if_not_exists(messageCount, :zero) + :inc',
+        'SET senderSub = :ss, senderDisplayName = :sd, lastMessageCreatedAt = :createdAt, messageCount = if_not_exists(messageCount, :zero) + :inc',
       ExpressionAttributeValues: {
-        ':sender': senderUsernameLower,
-        ':createdAt': nowMs,
+        ':ss': sender.userSub,
+        ':sd': sender.displayName,
+        ':createdAt': sender.createdAtMs,
         ':inc': 1,
         ':zero': 0,
       },
@@ -96,15 +102,15 @@ const markUnread = async (recipientUsernameLower, conversationId, senderUsername
   );
 };
 
-const clearUnread = async (readerUsernameLower, conversationId) => {
+const clearUnread = async (readerSub, conversationId) => {
   if (!process.env.UNREADS_TABLE) return;
-  if (!readerUsernameLower) return;
+  if (!readerSub) return;
   if (!conversationId || conversationId === 'global') return;
 
   await ddb.send(
     new DeleteCommand({
       TableName: process.env.UNREADS_TABLE,
-      Key: { user: readerUsernameLower, conversationId },
+      Key: { userSub: readerSub, conversationId },
     })
   );
 };
@@ -136,13 +142,13 @@ exports.handler = async (event) => {
       })
     );
 
-    const senderUsernameLower = conn?.Item?.usernameLower ? String(conn.Item.usernameLower) : '';
-    if (!senderUsernameLower) {
+    const senderSub = conn?.Item?.userSub ? String(conn.Item.userSub) : '';
+    if (!senderSub) {
       return { statusCode: 401, body: 'Unauthorized (missing connection identity).' };
     }
 
-    const senderDisplayName =
-      conn?.Item?.displayName ? String(conn.Item.displayName) : senderUsernameLower;
+    const senderUsernameLower = conn?.Item?.usernameLower ? String(conn.Item.usernameLower) : '';
+    const senderDisplayName = conn?.Item?.displayName ? String(conn.Item.displayName) : 'anon';
 
     // Refresh connection TTL on any activity
     const expiresAt = nowSec + CONN_TTL_SECONDS;
@@ -174,17 +180,18 @@ exports.handler = async (event) => {
 
     // Recipients (NO scans)
     let recipientConnIds = [];
-    let dmRecipientUsernameLower = null;
+    let dmRecipientSub = null;
 
     if (conversationId === 'global') {
       // Only broadcast to people who are currently "joined" to global
       recipientConnIds = await queryConnIdsByConversation('global');
     } else {
-      dmRecipientUsernameLower = parseRecipientUsernameLower(conversationId, senderUsernameLower);
-      const a = await queryConnIdsByUsernameLower(senderUsernameLower);
-      const b = dmRecipientUsernameLower
-        ? await queryConnIdsByUsernameLower(dmRecipientUsernameLower)
-        : [];
+      dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
+      if (!dmRecipientSub) {
+        return { statusCode: 400, body: 'Invalid DM conversationId (expected dm#minSub#maxSub).' };
+      }
+      const a = await queryConnIdsByUserSub(senderSub);
+      const b = await queryConnIdsByUserSub(dmRecipientSub);
       recipientConnIds = Array.from(new Set([...a, ...b]));
     }
 
@@ -205,6 +212,7 @@ exports.handler = async (event) => {
         conversationId,
         user: senderDisplayName,
         userLower: senderUsernameLower,
+        userSub: senderSub,
         messageCreatedAt,
         readAt,
       });
@@ -216,8 +224,9 @@ exports.handler = async (event) => {
             TableName: process.env.READS_TABLE,
             Item: {
               conversationId,
-              key: `${senderUsernameLower}#${messageCreatedAt}`,
-              user: senderUsernameLower,
+              key: `${senderSub}#${messageCreatedAt}`,
+              userSub: senderSub,
+              user: senderDisplayName,
               messageCreatedAt,
               readAt,
               updatedAt: nowMs,
@@ -227,7 +236,7 @@ exports.handler = async (event) => {
       }
 
       // Clear unread for the reader (best-effort)
-      await clearUnread(senderUsernameLower, conversationId).catch(() => {});
+      await clearUnread(senderSub, conversationId).catch(() => {});
 
       // TTL-from-read: if this message has ttlSeconds and reader is not sender, set expiresAt on the message
       if (process.env.MESSAGES_TABLE) {
@@ -285,6 +294,7 @@ exports.handler = async (event) => {
         conversationId,
         user: senderDisplayName,
         userLower: senderUsernameLower,
+        userSub: senderSub,
         isTyping,
         createdAt: nowMs,
       });
@@ -304,7 +314,12 @@ exports.handler = async (event) => {
       if (v > 0 && v <= 365 * 24 * 60 * 60) ttlSeconds = v;
     }
 
-    const messageId = `${nowMs}-${Math.random().toString(36).slice(2)}`;
+    const clientMessageId =
+      typeof body.clientMessageId === 'string' ? String(body.clientMessageId).trim() : '';
+    const messageId =
+      clientMessageId && clientMessageId.length <= 120
+        ? clientMessageId
+        : `${nowMs}-${Math.random().toString(36).slice(2)}`;
 
     // Persist (store display + stable key)
     await ddb.send(
@@ -317,6 +332,7 @@ exports.handler = async (event) => {
           text,
           user: senderDisplayName,
           userLower: senderUsernameLower,
+          userSub: senderSub,
           ...(ttlSeconds ? { ttlSeconds } : {}),
         },
       })
@@ -327,6 +343,7 @@ exports.handler = async (event) => {
       messageId,
       user: senderDisplayName,
       userLower: senderUsernameLower,
+      userSub: senderSub,
       text,
       createdAt: nowMs,
       conversationId,
@@ -336,10 +353,14 @@ exports.handler = async (event) => {
     // Persist unread (DM only) so offline users see it on next login via GET /unreads
     if (conversationId !== 'global') {
       try {
-        if (!dmRecipientUsernameLower) {
-          dmRecipientUsernameLower = parseRecipientUsernameLower(conversationId, senderUsernameLower);
+        if (!dmRecipientSub) {
+          dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
         }
-        await markUnread(dmRecipientUsernameLower, conversationId, senderUsernameLower, nowMs);
+        await markUnread(dmRecipientSub, conversationId, {
+          userSub: senderSub,
+          displayName: senderDisplayName,
+          createdAtMs: nowMs,
+        });
       } catch {
         // ignore
       }
