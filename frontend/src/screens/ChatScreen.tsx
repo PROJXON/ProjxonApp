@@ -11,6 +11,7 @@ import {
   Image,
   KeyboardAvoidingView,
   Linking,
+  Dimensions,
   Modal,
   Platform,
   Pressable,
@@ -194,6 +195,9 @@ type ChatMessage = {
   decryptFailed?: boolean;
   expiresAt?: number; // epoch seconds
   ttlSeconds?: number; // duration, seconds (TTL-from-read)
+  editedAt?: number; // epoch ms
+  deletedAt?: number; // epoch ms
+  deletedBySub?: string;
   media?: {
     path: string;
     thumbPath?: string;
@@ -222,7 +226,7 @@ type ChatEnvelope = {
   };
 };
 
-const ENCRYPTED_PLACEHOLDER = 'Encrypted message (tap to decrypt; long-hold to view ciphertext)';
+const ENCRYPTED_PLACEHOLDER = 'Encrypted message (tap to decrypt)';
 
 type DmMediaEnvelopeV1 = {
   type: 'dm_media_v1';
@@ -347,6 +351,16 @@ export default function ChatScreen({
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
   const [cipherOpen, setCipherOpen] = React.useState(false);
   const [cipherText, setCipherText] = React.useState<string>('');
+  const [messageActionOpen, setMessageActionOpen] = React.useState(false);
+  const [messageActionTarget, setMessageActionTarget] = React.useState<ChatMessage | null>(null);
+  const [messageActionAnchor, setMessageActionAnchor] = React.useState<{ x: number; y: number } | null>(null);
+  const actionMenuAnim = React.useRef(new Animated.Value(0)).current;
+  const [inlineEditTargetId, setInlineEditTargetId] = React.useState<string | null>(null);
+  const [inlineEditDraft, setInlineEditDraft] = React.useState<string>('');
+  const [hiddenMessageIds, setHiddenMessageIds] = React.useState<Record<string, true>>({});
+  const [infoOpen, setInfoOpen] = React.useState(false);
+  const [infoTitle, setInfoTitle] = React.useState<string>('');
+  const [infoBody, setInfoBody] = React.useState<string>('');
   // Per-message "Seen" state for outgoing messages (keyed by message createdAt ms)
   const [peerSeenAtByCreatedAt, setPeerSeenAtByCreatedAt] = React.useState<Record<string, number>>(
     {}
@@ -1816,6 +1830,58 @@ export default function ChatScreen({
           return;
         }
 
+        // Edit/delete events (broadcast by backend)
+        if (payload && payload.type === 'edit') {
+          const messageCreatedAt = Number(payload.createdAt);
+          const editedAt = typeof payload.editedAt === 'number' ? payload.editedAt : Date.now();
+          const newRaw = typeof payload.text === 'string' ? payload.text : '';
+          if (Number.isFinite(messageCreatedAt) && newRaw) {
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.createdAt !== messageCreatedAt) return m;
+                if (m.deletedAt) return m;
+                const encrypted = parseEncrypted(newRaw);
+                const isEncrypted = !!encrypted;
+                return {
+                  ...m,
+                  rawText: newRaw,
+                  encrypted: encrypted ?? undefined,
+                  text: isEncrypted ? ENCRYPTED_PLACEHOLDER : newRaw,
+                  decryptedText: undefined,
+                  decryptFailed: false,
+                  editedAt,
+                };
+              })
+            );
+          }
+          return;
+        }
+
+        if (payload && payload.type === 'delete') {
+          const messageCreatedAt = Number(payload.createdAt);
+          const deletedAt = typeof payload.deletedAt === 'number' ? payload.deletedAt : Date.now();
+          const deletedBySub = typeof payload.deletedBySub === 'string' ? payload.deletedBySub : undefined;
+          if (Number.isFinite(messageCreatedAt)) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.createdAt === messageCreatedAt
+                  ? {
+                      ...m,
+                      deletedAt,
+                      deletedBySub,
+                      rawText: '',
+                      text: '',
+                      encrypted: undefined,
+                      decryptedText: undefined,
+                      decryptFailed: false,
+                    }
+                  : m
+              )
+            );
+          }
+          return;
+        }
+
         if (payload && payload.text) {
           // Only render messages for the currently open conversation.
           // (We still emit DM notifications above for other conversations.)
@@ -1844,32 +1910,28 @@ export default function ChatScreen({
                   : undefined,
             rawText,
             encrypted: encrypted ?? undefined,
-            text: encrypted
-              ? ENCRYPTED_PLACEHOLDER
-              : rawText,
+            text: encrypted ? ENCRYPTED_PLACEHOLDER : rawText,
             createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
             ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
             localStatus: 'sent',
+            editedAt: typeof payload.editedAt === 'number' ? payload.editedAt : undefined,
+            deletedAt: typeof payload.deletedAt === 'number' ? payload.deletedAt : undefined,
+            deletedBySub: typeof payload.deletedBySub === 'string' ? payload.deletedBySub : undefined,
           };
+          if (hiddenMessageIds[msg.id]) return;
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === msg.id);
             if (idx === -1) return [msg, ...prev];
-            // Merge into existing optimistic message so we preserve decryptedText (sender view)
-            // and flip localStatus to sent.
             const existing = prev[idx];
             const shouldPreservePlaintext =
-              !!existing.decryptedText ||
-              (!!existing.text && existing.text !== ENCRYPTED_PLACEHOLDER);
+              !!existing.decryptedText || (!!existing.text && existing.text !== ENCRYPTED_PLACEHOLDER);
             const merged: ChatMessage = {
               ...msg,
               decryptedText: existing.decryptedText ?? msg.decryptedText,
-              // If the sender optimistically displayed plaintext for their own encrypted message,
-              // don't overwrite it back to the encrypted placeholder when the server echo arrives.
               text: shouldPreservePlaintext ? existing.text : msg.text,
               localStatus: 'sent',
             };
-            // Clear any pending "mark failed" timer for this id.
             if (sendTimeoutRef.current[msg.id]) {
               clearTimeout(sendTimeoutRef.current[msg.id]);
               delete sendTimeoutRef.current[msg.id];
@@ -1985,11 +2047,17 @@ export default function ChatScreen({
                 typeof it.userLower === 'string'
                   ? normalizeUser(it.userLower)
                   : normalizeUser(String(it.user ?? 'anon')),
-              rawText: String(it.text ?? ''),
-              encrypted: parseEncrypted(String(it.text ?? '')) ?? undefined,
-              text: parseEncrypted(String(it.text ?? ''))
-                ? ENCRYPTED_PLACEHOLDER
-                : String(it.text ?? ''),
+              editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
+              deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
+              deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
+              rawText: typeof it.text === 'string' ? String(it.text) : '',
+              encrypted: parseEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
+              text:
+                typeof it.deletedAt === 'number'
+                  ? ''
+                  : parseEncrypted(typeof it.text === 'string' ? String(it.text) : '')
+                    ? ENCRYPTED_PLACEHOLDER
+                    : (typeof it.text === 'string' ? String(it.text) : ''),
               createdAt: Number(it.createdAt ?? Date.now()),
               expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
               ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
@@ -1998,7 +2066,9 @@ export default function ChatScreen({
             .sort((a, b) => b.createdAt - a.createdAt);
           // Deduplicate by id (history may overlap with WS delivery)
           const seen = new Set<string>();
-          const deduped = normalized.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+          const deduped = normalized
+            .filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
+            .filter((m) => !hiddenMessageIds[m.id]);
           setMessages(deduped);
         }
       } catch {
@@ -2006,7 +2076,7 @@ export default function ChatScreen({
       }
     };
     fetchHistory();
-  }, [API_URL, activeConversationId]);
+  }, [API_URL, activeConversationId, hiddenMessageIds]);
 
   // Client-side hiding of expired DM messages (server-side TTL still required for real deletion).
   React.useEffect(() => {
@@ -2079,6 +2149,7 @@ export default function ChatScreen({
     };
 
     // Clear immediately (and yield a tick) so the input visually resets before CPU-heavy work (encryption/upload).
+    // (We also clear even when editing, like Signal does.)
     clearDraftImmediately();
     await new Promise((r) => setTimeout(r, 0));
     if (isDm) {
@@ -2137,6 +2208,7 @@ export default function ChatScreen({
     } else {
       // Plain text global message already cleared above.
     }
+
     const clientMessageId = `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // Optimistic UI: show the outgoing message immediately, then let the WS echo dedupe by id.
@@ -2332,6 +2404,7 @@ export default function ChatScreen({
 
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
+      if (msg.deletedAt) return;
       if (!msg.encrypted) return;
       try {
         const readAt = Math.floor(Date.now() / 1000);
@@ -2376,6 +2449,214 @@ export default function ChatScreen({
     },
     [decryptForDisplay, myPublicKey, sendReadReceipt, isDm, markMySeen]
   );
+
+  const openMessageActions = React.useCallback(
+    (msg: ChatMessage, anchor?: { x: number; y: number }) => {
+      if (!msg) return;
+      setMessageActionTarget(msg);
+      if (anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)) setMessageActionAnchor(anchor);
+      else setMessageActionAnchor(null);
+      setMessageActionOpen(true);
+      actionMenuAnim.setValue(0);
+      Animated.spring(actionMenuAnim, {
+        toValue: 1,
+        useNativeDriver: true,
+        friction: 9,
+        tension: 90,
+      }).start();
+    },
+    [myPublicKey, myUserId, displayName, normalizeUser, actionMenuAnim]
+  );
+
+  const closeMessageActions = React.useCallback(() => {
+    setMessageActionOpen(false);
+    setMessageActionTarget(null);
+    setMessageActionAnchor(null);
+  }, []);
+
+  const openInfo = React.useCallback((title: string, body: string) => {
+    setInfoTitle(title);
+    setInfoBody(body);
+    setInfoOpen(true);
+  }, []);
+
+  const beginInlineEdit = React.useCallback(
+    (target: ChatMessage) => {
+      if (!target) return;
+      if (target.deletedAt) return;
+      if (target.encrypted && !target.decryptedText) {
+        openInfo('Decrypt first', 'Decrypt this message before editing it');
+        return;
+      }
+      const seed = target.encrypted
+        ? String(target.decryptedText || '')
+        : String(target.rawText ?? target.text ?? '');
+      setInlineEditTargetId(target.id);
+      setInlineEditDraft(seed);
+      closeMessageActions();
+    },
+    [closeMessageActions, openInfo]
+  );
+
+  const cancelInlineEdit = React.useCallback(() => {
+    setInlineEditTargetId(null);
+    setInlineEditDraft('');
+  }, []);
+
+  const hiddenKey = React.useMemo(() => {
+    const who = myUserId || normalizeUser(displayName || 'anon');
+    return `chat:hidden:${who}:${activeConversationId || 'global'}`;
+  }, [myUserId, displayName, activeConversationId, normalizeUser]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(hiddenKey);
+        if (cancelled) return;
+        if (!raw) {
+          setHiddenMessageIds({});
+          return;
+        }
+        const arr = JSON.parse(raw);
+        const map: Record<string, true> = {};
+        if (Array.isArray(arr)) {
+          for (const id of arr) {
+            if (typeof id === 'string') map[id] = true;
+          }
+        }
+        setHiddenMessageIds(map);
+      } catch {
+        if (!cancelled) setHiddenMessageIds({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hiddenKey]);
+
+  const deleteForMe = React.useCallback(
+    async (msg: ChatMessage) => {
+      if (!msg?.id) return;
+      setHiddenMessageIds((prev) => ({ ...prev, [msg.id]: true }));
+      try {
+        const nextIds = Object.keys({ ...hiddenMessageIds, [msg.id]: true }).slice(0, 500);
+        await AsyncStorage.setItem(hiddenKey, JSON.stringify(nextIds));
+      } catch {
+        // ignore
+      }
+    },
+    [hiddenKey, hiddenMessageIds]
+  );
+
+
+  const commitInlineEdit = React.useCallback(async () => {
+    const targetId = inlineEditTargetId;
+    if (!targetId) return;
+    const target = messages.find((m) => m.id === targetId);
+    if (!target) {
+      cancelInlineEdit();
+      return;
+    }
+    if (target.deletedAt) {
+      cancelInlineEdit();
+      return;
+    }
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    const nextText = inlineEditDraft.trim();
+    if (!nextText) return;
+
+    let outgoingText = nextText;
+    const needsEncryption = isDm && !!target.encrypted;
+    if (needsEncryption) {
+      if (!myPrivateKey || !peerPublicKey) {
+        Alert.alert('Encryption not ready', 'Missing keys for editing.');
+        return;
+      }
+      const enc = encryptChatMessageV1(nextText, myPrivateKey, peerPublicKey);
+      outgoingText = JSON.stringify(enc);
+    }
+
+    try {
+      wsRef.current.send(
+        JSON.stringify({
+          action: 'edit',
+          conversationId: activeConversationId,
+          messageCreatedAt: target.createdAt,
+          text: outgoingText,
+          createdAt: Date.now(),
+        })
+      );
+      const now = Date.now();
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === targetId
+            ? {
+                ...m,
+                rawText: outgoingText,
+                encrypted: parseEncrypted(outgoingText) ?? undefined,
+                decryptedText: needsEncryption ? nextText : m.decryptedText,
+                text: needsEncryption ? nextText : nextText,
+                editedAt: now,
+              }
+            : m
+        )
+      );
+      cancelInlineEdit();
+    } catch (e: any) {
+      Alert.alert('Edit failed', e?.message ?? 'Failed to edit message');
+    }
+  }, [
+    inlineEditTargetId,
+    inlineEditDraft,
+    messages,
+    cancelInlineEdit,
+    activeConversationId,
+    isDm,
+    myPrivateKey,
+    peerPublicKey,
+  ]);
+
+  const sendDelete = React.useCallback(async () => {
+    const target = messageActionTarget;
+    if (!target) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected');
+      return;
+    }
+    try {
+      wsRef.current.send(
+        JSON.stringify({
+          action: 'delete',
+          conversationId: activeConversationId,
+          messageCreatedAt: target.createdAt,
+          createdAt: Date.now(),
+        })
+      );
+      // Optimistic local update
+      const now = Date.now();
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === target.id
+            ? {
+                ...m,
+                deletedAt: now,
+                rawText: '',
+                text: '',
+                encrypted: undefined,
+                decryptedText: undefined,
+              }
+            : m
+        )
+      );
+      closeMessageActions();
+    } catch (e: any) {
+      Alert.alert('Delete failed', e?.message ?? 'Failed to delete message');
+    }
+  }, [messageActionTarget, activeConversationId, closeMessageActions]);
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
     const dt = new Date(readAtSec * 1000);
@@ -2565,6 +2846,9 @@ export default function ChatScreen({
             !item.encrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;
           const captionText =
             envelope && typeof envelope.text === 'string' ? envelope.text : item.text;
+          const isDeleted = typeof item.deletedAt === 'number' && Number.isFinite(item.deletedAt);
+          const displayText = isDeleted ? 'This message has been deleted' : captionText;
+          const isEdited = !isDeleted && typeof item.editedAt === 'number' && Number.isFinite(item.editedAt);
           const media = envelope?.media ?? item.media;
           const mediaUrl = media?.path ? mediaUrlByPath[media.path] : null;
           const mediaThumbUrl = media?.thumbPath ? mediaUrlByPath[media.thumbPath] : null;
@@ -2602,11 +2886,16 @@ export default function ChatScreen({
 
             return (           
               <Pressable
-                onPress={() => onPressMessage(item)}
-                onLongPress={() => {
-                  if (!item.encrypted) return;
-                  setCipherText(item.rawText ?? '');
-                  setCipherOpen(true);
+                onPress={() => {
+                  if (inlineEditTargetId && item.id === inlineEditTargetId) return;
+                  onPressMessage(item);
+                }}
+                onLongPress={(e) => {
+                  if (isDeleted) return;
+                  openMessageActions(item, {
+                    x: (e?.nativeEvent as any)?.pageX ?? 0,
+                    y: (e?.nativeEvent as any)?.pageY ?? 0,
+                  });
                 }}
               >
                 <View
@@ -2615,7 +2904,7 @@ export default function ChatScreen({
                     isOutgoing ? styles.messageRowOutgoing : styles.messageRowIncoming,
                   ]}
                 >
-                  {hasMedia ? (
+                  {hasMedia && !isDeleted ? (
                     <View
                       style={[
                         styles.mediaMsg,
@@ -2760,6 +3049,7 @@ export default function ChatScreen({
                           : isDark
                             ? styles.messageBubbleIncomingDark
                             : styles.messageBubbleIncoming,
+                        inlineEditTargetId && item.id === inlineEditTargetId ? styles.messageBubbleEditing : null,
                       ]}
                     >
                       {metaLine ? (
@@ -2776,26 +3066,95 @@ export default function ChatScreen({
                         {metaLine}
                       </Text>
                       ) : null}
-                      {captionText?.length ? (
+                      {displayText?.length ? (
                         <View
                           style={[
                             styles.messageTextRow,
                             isOutgoing ? styles.messageTextRowOutgoing : null,
                           ]}
                         >
-                          <Text
-                            style={[
-                              styles.messageText,
-                              isOutgoing
-                                ? styles.messageTextOutgoing
-                                : isDark
-                                  ? styles.messageTextIncomingDark
-                                  : styles.messageTextIncoming,
-                              styles.messageTextFlex,
-                            ]}
-                          >
-                            {captionText}
-                          </Text>
+                          {inlineEditTargetId && item.id === inlineEditTargetId && !isDeleted ? (
+                            <View style={styles.inlineEditWrap}>
+                              <TextInput
+                                style={[
+                                  styles.inlineEditInput,
+                                  isOutgoing ? styles.inlineEditInputOutgoing : styles.inlineEditInputIncoming,
+                                ]}
+                                value={inlineEditDraft}
+                                onChangeText={setInlineEditDraft}
+                                multiline
+                                autoFocus
+                                selectionColor={
+                                  isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'
+                                }
+                                cursorColor={
+                                  isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'
+                                }
+                              />
+                              <View style={styles.inlineEditActions}>
+                                <Pressable
+                                  onPress={() => void commitInlineEdit()}
+                                  style={({ pressed }) => [
+                                    styles.inlineEditBtn,
+                                    pressed ? styles.inlineEditBtnPressed : null,
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.inlineEditBtnText,
+                                      isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                    ]}
+                                  >
+                                    Save
+                                  </Text>
+                                </Pressable>
+                                <Pressable
+                                  onPress={cancelInlineEdit}
+                                  style={({ pressed }) => [
+                                    styles.inlineEditBtn,
+                                    pressed ? styles.inlineEditBtnPressed : null,
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.inlineEditBtnText,
+                                      isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                    ]}
+                                  >
+                                    Cancel
+                                  </Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                          ) : (
+                            <Text
+                              style={[
+                                styles.messageText,
+                                isOutgoing
+                                  ? styles.messageTextOutgoing
+                                  : isDark
+                                    ? styles.messageTextIncomingDark
+                                    : styles.messageTextIncoming,
+                                styles.messageTextFlex,
+                                isDeleted ? styles.deletedText : null,
+                              ]}
+                            >
+                              {displayText}
+                            </Text>
+                          )}
+                          {isEdited ? (
+                            <Text
+                              style={[
+                                styles.editedLabel,
+                                isOutgoing
+                                  ? (isDark ? styles.editedLabelOutgoingDark : styles.editedLabelOutgoing)
+                                  : (isDark ? styles.editedLabelIncomingDark : styles.editedLabelIncoming),
+                              ]}
+                            >
+                              {' '}
+                              Edited
+                            </Text>
+                          ) : null}
                           {isOutgoing &&
                           !seenLabel &&
                           item.localStatus !== 'failed' &&
@@ -2803,7 +3162,9 @@ export default function ChatScreen({
                             <Text
                               style={[
                                 styles.sendStatusInline,
-                                isDark ? styles.sendStatusInlineDark : null,
+                                isOutgoing
+                                  ? (isDark ? styles.sendStatusInlineOutgoingDark : styles.sendStatusInlineOutgoing)
+                                  : (isDark ? styles.sendStatusInlineIncomingDark : styles.sendStatusInlineIncoming),
                               ]}
                             >
                               {item.localStatus === 'sending' ? '…' : '✓'}
@@ -2866,6 +3227,7 @@ export default function ChatScreen({
             />
           </View>
         ) : null}
+        {/* Inline edit happens inside the bubble (Signal-style). */}
         <View style={[styles.inputRow, isDark ? styles.inputRowDark : null]}>
           <Pressable
             style={[
@@ -2886,6 +3248,8 @@ export default function ChatScreen({
             style={[styles.input, isDark ? styles.inputDark : null]}
             placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
             placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+            selectionColor={isDark ? '#ffffff' : '#111'}
+            cursorColor={isDark ? '#ffffff' : '#111'}
             value={input}
             onChangeText={onChangeInput}
             onBlur={() => {
@@ -2944,12 +3308,157 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={messageActionOpen} transparent animationType="fade">
+        <View style={styles.actionMenuOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeMessageActions} />
+          <Animated.View
+            style={[
+              styles.actionMenuCard,
+              isDark ? styles.actionMenuCardDark : null,
+              (() => {
+                const w = Dimensions.get('window').width;
+                const h = Dimensions.get('window').height;
+                const cardW = Math.min(w - 36, 360);
+                const left = Math.max(18, (w - cardW) / 2);
+                const anchorY = messageActionAnchor?.y ?? h / 2;
+                const desiredTop = anchorY - 160;
+                const top = Math.max(22, Math.min(h - 360, desiredTop));
+                return { position: 'absolute', width: cardW, left, top };
+              })(),
+              {
+                opacity: actionMenuAnim,
+                transform: [
+                  {
+                    scale: actionMenuAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.98, 1],
+                    }),
+                  },
+                  {
+                    translateY: actionMenuAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [
+                        (messageActionAnchor?.y ?? 0) > Dimensions.get('window').height / 2 ? 10 : -10,
+                        0,
+                      ],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            {/* Message preview (Signal-style) */}
+            {messageActionTarget ? (
+              <View style={styles.actionMenuPreviewRow}>
+                <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
+                  <Text style={[styles.messageText, styles.messageTextOutgoing]}>
+                    {messageActionTarget.deletedAt
+                      ? 'This message has been deleted'
+                      : messageActionTarget.encrypted
+                        ? (messageActionTarget.decryptedText || ENCRYPTED_PLACEHOLDER)
+                        : (messageActionTarget.rawText ?? messageActionTarget.text)}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
+            <View style={styles.actionMenuOptions}>
+              {messageActionTarget?.encrypted ? (
+                <Pressable
+                  onPress={() => {
+                    setCipherText(messageActionTarget?.rawText ?? '');
+                    setCipherOpen(true);
+                    closeMessageActions();
+                  }}
+                  style={({ pressed }) => [
+                    styles.actionMenuRow,
+                    pressed ? styles.actionMenuRowPressed : null,
+                  ]}
+                >
+                  <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                    View Ciphertext
+                  </Text>
+                </Pressable>
+              ) : null}
+
+              {(() => {
+                const t = messageActionTarget;
+                if (!t) return null;
+                const isEncryptedOutgoing =
+                  !!t.encrypted && !!myPublicKey && t.encrypted.senderPublicKey === myPublicKey;
+                const isPlainOutgoing =
+                  !t.encrypted &&
+                  (t.userSub && myUserId
+                    ? t.userSub === myUserId
+                    : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
+                const canEdit = isEncryptedOutgoing || isPlainOutgoing;
+                if (!canEdit) return null;
+                return (
+                  <Pressable
+                    onPress={() => {
+                      beginInlineEdit(t);
+                    }}
+                    style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                  >
+                    <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Edit</Text>
+                  </Pressable>
+                );
+              })()}
+
+              <Pressable
+                onPress={() => {
+                  if (!messageActionTarget) return;
+                  void deleteForMe(messageActionTarget);
+                  closeMessageActions();
+                }}
+                style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+              >
+                <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                  Delete for me
+                </Text>
+              </Pressable>
+
+              {(() => {
+                const t = messageActionTarget;
+                if (!t) return null;
+                const isEncryptedOutgoing =
+                  !!t.encrypted && !!myPublicKey && t.encrypted.senderPublicKey === myPublicKey;
+                const isPlainOutgoing =
+                  !t.encrypted &&
+                  (t.userSub && myUserId
+                    ? t.userSub === myUserId
+                    : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
+                const canDeleteForEveryone = isEncryptedOutgoing || isPlainOutgoing;
+                if (!canDeleteForEveryone) return null;
+                return (
+                  <Pressable
+                    onPress={() => {
+                      void sendDelete();
+                      closeMessageActions();
+                    }}
+                    style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                  >
+                    <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                      Delete for everyone
+                    </Text>
+                  </Pressable>
+                );
+              })()}
+            </View>
+          </Animated.View>
+        </View>
+      </Modal>
+
       <Modal visible={cipherOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <View style={styles.summaryModal}>
-            <Text style={styles.summaryTitle}>Encrypted payload</Text>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              Encrypted payload
+            </Text>
             <ScrollView style={styles.summaryScroll}>
-              <Text style={styles.summaryText}>{cipherText || '(empty)'}</Text>
+              <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
+                {cipherText || '(empty)'}
+              </Text>
             </ScrollView>
             <View style={styles.summaryButtons}>
               <Pressable
@@ -2964,6 +3473,24 @@ export default function ChatScreen({
           </View>
         </View>
       </Modal>
+
+      <Modal visible={infoOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>{infoTitle}</Text>
+            <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>{infoBody}</Text>
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setInfoOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>OK</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
 
       <Modal visible={ttlPickerOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -3184,14 +3711,48 @@ const styles = StyleSheet.create({
   messageBubbleIncoming: { backgroundColor: '#f1f1f1' },
   messageBubbleIncomingDark: { backgroundColor: '#1c1c22' },
   messageBubbleOutgoing: { backgroundColor: '#1976d2' },
+  messageBubbleEditing: { maxWidth: '96%', width: '96%' },
   sendFailedText: { marginTop: 6, fontSize: 12, color: '#b00020', fontStyle: 'italic' },
   sendFailedTextDark: { color: '#ff6b6b' },
   sendFailedTextAlignOutgoing: { textAlign: 'right' },
   messageTextRow: { flexDirection: 'row', alignItems: 'flex-end' },
   messageTextRowOutgoing: { justifyContent: 'flex-end' },
   messageTextFlex: { flexGrow: 1, flexShrink: 1 },
-  sendStatusInline: { marginLeft: 6, fontSize: 12, color: '#777' },
-  sendStatusInlineDark: { color: '#a7a7b4' },
+  sendStatusInline: { marginLeft: 6, fontSize: 12 },
+  sendStatusInlineOutgoing: { color: 'rgba(255,255,255,0.9)' }, // readable on blue bubble (light mode)
+  sendStatusInlineOutgoingDark: { color: 'rgba(255,255,255,0.85)' }, // readable on blue bubble (dark mode)
+  sendStatusInlineIncoming: { color: '#555' }, // readable on light bubble
+  sendStatusInlineIncomingDark: { color: '#a7a7b4' }, // readable on dark bubble
+
+  editedLabel: { marginLeft: 6, fontSize: 12, fontStyle: 'italic' },
+  editedLabelOutgoing: { color: 'rgba(255,255,255,0.9)' },
+  editedLabelOutgoingDark: { color: 'rgba(255,255,255,0.85)' },
+  editedLabelIncoming: { color: '#555' },
+  editedLabelIncomingDark: { color: '#a7a7b4' },
+  deletedText: { fontStyle: 'italic', opacity: 0.9 },
+  inlineEditWrap: { flex: 1, width: '100%' },
+  inlineEditInput: {
+    fontSize: 16,
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+    marginTop: 1,
+    fontWeight: '400',
+  },
+  inlineEditInputIncoming: { color: '#222' },
+  inlineEditInputOutgoing: { color: '#fff' },
+  inlineEditActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 8,
+    width: '100%',
+  },
+  inlineEditBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.08)' },
+  inlineEditBtnPressed: { opacity: 0.75 },
+  inlineEditBtnText: { fontWeight: '700' },
+  inlineEditBtnTextIncoming: { color: '#111' },
+  inlineEditBtnTextOutgoing: { color: '#fff' },
   messageMeta: { fontSize: 12, marginBottom: 1, fontWeight: '400' },
   messageMetaIncoming: { color: '#555' },
   messageMetaIncomingDark: { color: '#b7b7c2' },
@@ -3389,6 +3950,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: 6,
   },
+  editingBar: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f2f2f7',
+  },
+  editingBarDark: { backgroundColor: '#1c1c22' },
+  editingBarText: { color: '#444', fontWeight: '600' },
+  editingBarTextDark: { color: '#d7d7e0' },
+  editingBarCancelBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: '#e6e6ef',
+  },
+  editingBarCancelText: { color: '#111', fontWeight: '700' },
+  editingBarCancelTextDark: { color: '#fff' },
   typingIndicatorRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3458,6 +4038,24 @@ const styles = StyleSheet.create({
   summaryModalDark: { backgroundColor: '#14141a' },
   summaryTitleDark: { color: '#fff' },
   summaryTextDark: { color: '#d7d7e0' },
+  actionMenuOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
+  actionMenuCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  actionMenuCardDark: { backgroundColor: '#14141a' },
+  actionMenuPreviewRow: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  actionMenuOptions: { paddingVertical: 6 },
+  actionMenuRow: { paddingHorizontal: 16, paddingVertical: 12 },
+  actionMenuRowPressed: { opacity: 0.75 },
+  actionMenuText: { fontSize: 16, color: '#111', fontWeight: '600' },
+  actionMenuTextDark: { color: '#fff' },
 
   viewerOverlay: {
     flex: 1,

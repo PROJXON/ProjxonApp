@@ -302,6 +302,100 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: 'Typing event broadcasted.' };
     }
 
+    // ---- EDIT ----
+    if (action === 'edit') {
+      if (conversationId === 'global') {
+        // allow edits in global too, same rules (sender-only)
+      }
+
+      const messageCreatedAt = Number(body.messageCreatedAt ?? body.createdAt);
+      const newText = String(body.text || '').trim();
+      if (!Number.isFinite(messageCreatedAt) || messageCreatedAt <= 0) {
+        return { statusCode: 400, body: 'Invalid messageCreatedAt.' };
+      }
+      if (!newText) {
+        return { statusCode: 400, body: 'Empty edit text.' };
+      }
+      if (!process.env.MESSAGES_TABLE) return { statusCode: 500, body: 'Missing MESSAGES_TABLE env.' };
+
+      // Verify sender owns the message
+      const existing = await ddb.send(
+        new GetCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: { conversationId, createdAt: messageCreatedAt },
+        })
+      );
+      const msg = existing.Item;
+      if (!msg) return { statusCode: 404, body: 'Message not found.' };
+      if (String(msg.userSub || '') !== senderSub) return { statusCode: 403, body: 'Forbidden.' };
+      if (msg.deletedAt) return { statusCode: 409, body: 'Message already deleted.' };
+
+      await ddb.send(
+        new UpdateCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: { conversationId, createdAt: messageCreatedAt },
+          UpdateExpression: 'SET #t = :t, editedAt = :ea, updatedAt = :ua',
+          ExpressionAttributeNames: { '#t': 'text' },
+          ExpressionAttributeValues: { ':t': newText, ':ea': nowMs, ':ua': nowMs },
+        })
+      );
+
+      await broadcast(mgmt, recipientConnIds, {
+        type: 'edit',
+        conversationId,
+        messageId: msg.messageId ? String(msg.messageId) : undefined,
+        createdAt: messageCreatedAt,
+        text: newText,
+        editedAt: nowMs,
+        userSub: senderSub,
+      });
+
+      return { statusCode: 200, body: 'Edit processed.' };
+    }
+
+    // ---- DELETE ----
+    if (action === 'delete') {
+      const messageCreatedAt = Number(body.messageCreatedAt ?? body.createdAt);
+      if (!Number.isFinite(messageCreatedAt) || messageCreatedAt <= 0) {
+        return { statusCode: 400, body: 'Invalid messageCreatedAt.' };
+      }
+      if (!process.env.MESSAGES_TABLE) return { statusCode: 500, body: 'Missing MESSAGES_TABLE env.' };
+
+      // Verify sender owns the message
+      const existing = await ddb.send(
+        new GetCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: { conversationId, createdAt: messageCreatedAt },
+        })
+      );
+      const msg = existing.Item;
+      if (!msg) return { statusCode: 404, body: 'Message not found.' };
+      if (String(msg.userSub || '') !== senderSub) return { statusCode: 403, body: 'Forbidden.' };
+      if (msg.deletedAt) return { statusCode: 200, body: 'Already deleted.' };
+
+      // Preserve audit fields, but remove message contents
+      await ddb.send(
+        new UpdateCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: { conversationId, createdAt: messageCreatedAt },
+          UpdateExpression: 'SET deletedAt = :da, deletedBySub = :db, updatedAt = :ua REMOVE #t',
+          ExpressionAttributeNames: { '#t': 'text' },
+          ExpressionAttributeValues: { ':da': nowMs, ':db': senderSub, ':ua': nowMs },
+        })
+      );
+
+      await broadcast(mgmt, recipientConnIds, {
+        type: 'delete',
+        conversationId,
+        messageId: msg.messageId ? String(msg.messageId) : undefined,
+        createdAt: messageCreatedAt,
+        deletedAt: nowMs,
+        deletedBySub: senderSub,
+      });
+
+      return { statusCode: 200, body: 'Delete processed.' };
+    }
+
     // ---- MESSAGE ----
     const text = String(body.text || '').trim();
     if (!text) return { statusCode: 400, body: 'Empty message.' };
