@@ -175,7 +175,7 @@ type ChatScreenProps = {
   conversationId?: string | null;
   peer?: string | null;
   displayName: string;
-  onNewDmNotification?: (conversationId: string, user: string) => void;
+  onNewDmNotification?: (conversationId: string, user: string, userSub?: string) => void;
   headerTop?: React.ReactNode;
   theme?: 'light' | 'dark';
 };
@@ -185,6 +185,8 @@ type ChatMessage = {
   user?: string;
   // Stable identity key for comparisons (lowercased username). Prefer this over `user` for logic.
   userLower?: string;
+  // Stable identity key for comparisons (Cognito sub). Prefer this over display strings for logic.
+  userSub?: string;
   text: string;
   rawText?: string;
   encrypted?: EncryptedChatPayloadV1;
@@ -957,13 +959,17 @@ export default function ChatScreen({
         );
         if (!res.ok) return;
         const data = await res.json();
-        // Expected shape (new): { reads: [{ user: string, messageCreatedAt: number, readAt: number }] }
+        // Expected shape (new): { reads: [{ userSub?: string, user?: string, messageCreatedAt: number, readAt: number }] }
         // Backward compat: accept { readUpTo } as a messageCreatedAt.
         const reads = Array.isArray(data.reads) ? data.reads : [];
         const map: Record<string, number> = {};
         for (const r of reads) {
-          if (!r || typeof r.user !== 'string') continue;
-          if (normalizeUser(r.user) === normalizeUser(displayName)) continue;
+          if (!r || typeof r !== 'object') continue;
+          const readerSub = typeof (r as any).userSub === 'string' ? String((r as any).userSub) : '';
+          const readerName = typeof (r as any).user === 'string' ? String((r as any).user) : '';
+          // Ignore reads from myself
+          if (myUserId && readerSub && readerSub === myUserId) continue;
+          if (!readerSub && readerName && normalizeUser(readerName) === normalizeUser(displayName)) continue;
           const mc = Number(r.messageCreatedAt ?? r.readUpTo);
           const ra = Number(r.readAt);
           if (!Number.isFinite(mc) || !Number.isFinite(ra)) continue;
@@ -982,7 +988,7 @@ export default function ChatScreen({
         // ignore
       }
     })();
-  }, [API_URL, isDm, activeConversationId, displayName]);
+  }, [API_URL, isDm, activeConversationId, displayName, myUserId]);
 
   // Persist peer "Seen" state locally so it survives switching conversations (until backend persistence catches up).
   React.useEffect(() => {
@@ -1522,25 +1528,40 @@ export default function ChatScreen({
         const { tokens } = await fetchAuthSession();
         const idToken = tokens?.idToken?.toString();
         if (!idToken) return;
+        // Prefer fetching by sub from the dm#<minSub>#<maxSub> conversationId.
+        // This avoids relying on case/displayName matching.
+        const parseDmPeerSub = (convId: string, mySub: string | null): string | null => {
+          if (!mySub) return null;
+          if (!convId.startsWith('dm#')) return null;
+          const parts = convId.split('#').map((p) => p.trim()).filter(Boolean);
+          if (parts.length !== 3) return null;
+          const a = parts[1];
+          const b = parts[2];
+          if (a === mySub) return b;
+          if (b === mySub) return a;
+          return null;
+        };
+        const peerSub = parseDmPeerSub(activeConversationId, myUserId);
         const controller = new AbortController();
         const currentPeer = peer;
         const timeoutId = setTimeout(() => controller.abort(), 15000);
         const cleanup = () => clearTimeout(timeoutId);
-        const res = await fetch(
-          `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(peer)}`,
-          { headers: { Authorization: `Bearer ${idToken}` }, signal: controller.signal }
-        );
+        const url = peerSub
+          ? `${API_URL.replace(/\/$/, '')}/users?sub=${encodeURIComponent(peerSub)}`
+          : `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(peer)}`;
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${idToken}` },
+          signal: controller.signal,
+        });
         cleanup();
         if (!res.ok) {
           setPeerPublicKey(null);
           return;
         }
         const data = await res.json();
-        const pk =
-          (data.public_key as string | undefined) ||
-          (data.publicKey as string | undefined) ||
-          (data['custom:public_key'] as string | undefined) ||
-          (data.custom_public_key as string | undefined);
+        // Source of truth: DynamoDB Users.currentPublicKey (returned as `public_key`).
+        // (We intentionally do not fall back to Cognito custom attributes here.)
+        const pk = (data.public_key as string | undefined) || (data.publicKey as string | undefined);
         // Only apply if peer hasn't changed mid-request
         if (currentPeer === peer) {
           setPeerPublicKey(typeof pk === 'string' && pk.length > 0 ? pk : null);
@@ -1549,7 +1570,7 @@ export default function ChatScreen({
         setPeerPublicKey(null);
       }
     })();
-  }, [peer, isDm, API_URL, activeConversationId]);
+  }, [peer, isDm, API_URL, activeConversationId, myUserId]);
 
   const closeWs = React.useCallback(() => {
     if (wsReconnectTimerRef.current) {
@@ -1622,16 +1643,16 @@ export default function ChatScreen({
       }
 
       const ws = new WebSocket(wsUrlWithAuth);
-      wsRef.current = ws;
+    wsRef.current = ws;
 
-      ws.onopen = () => {
+    ws.onopen = () => {
         // Ignore events from stale sockets.
         if (wsRef.current !== ws) return;
-        wsReconnectAttemptRef.current = 0;
-        setIsConnecting(false);
-        setIsConnected(true);
+      wsReconnectAttemptRef.current = 0;
+      setIsConnecting(false);
+      setIsConnected(true);
         setError(null);
-        flushPendingRead();
+      flushPendingRead();
         // Best-effort "join" so backend can route/broadcast efficiently.
         const pendingJoin = pendingJoinConversationIdRef.current || activeConversationIdRef.current;
         if (pendingJoin) {
@@ -1648,15 +1669,15 @@ export default function ChatScreen({
             // ignore
           }
         }
-      };
+    };
 
-      ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
         // Ignore events from stale sockets.
         if (wsRef.current !== ws) return;
-        try {
-          const payload = JSON.parse(event.data);
-          const activeConv = activeConversationIdRef.current;
-          const dn = displayNameRef.current;
+      try {
+        const payload = JSON.parse(event.data);
+        const activeConv = activeConversationIdRef.current;
+        const dn = displayNameRef.current;
           const myUserLower = normalizeUser(dn);
           const payloadUserLower =
             typeof payload?.userLower === 'string'
@@ -1668,9 +1689,9 @@ export default function ChatScreen({
         const isPayloadDm =
           typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
         const isDifferentConversation = payload?.conversationId !== activeConv;
+        const payloadSub = typeof payload?.userSub === 'string' ? payload.userSub : '';
         const fromOtherUser =
-          typeof payload?.user === 'string' &&
-          payloadUserLower !== myUserLower;
+          (payloadSub && myUserId ? payloadSub !== myUserId : payloadUserLower !== myUserLower);
         const hasText = typeof payload?.text === 'string';
         if (
           isPayloadDm &&
@@ -1684,12 +1705,15 @@ export default function ChatScreen({
             (typeof payload.user === 'string' && payload.user) ||
             (typeof payload.userLower === 'string' && payload.userLower) ||
             'someone';
-          onNewDmNotificationRef.current?.(payload.conversationId, senderLabel);
+          const senderSub = typeof payload.userSub === 'string' ? payload.userSub : undefined;
+          onNewDmNotificationRef.current?.(payload.conversationId, senderLabel, senderSub);
         }
 
         // Read receipt events (broadcast by backend)
         if (payload && payload.type === 'read' && payload.conversationId === activeConv) {
-          if (payload.user && payloadUserLower !== myUserLower) {
+          const readerSub = typeof payload.userSub === 'string' ? payload.userSub : '';
+          const fromMe = myUserId && readerSub ? readerSub === myUserId : payloadUserLower === myUserLower;
+          if (payload.user && !fromMe) {
             const readAt =
               typeof payload.readAt === 'number' ? payload.readAt : Math.floor(Date.now() / 1000);
             // New: per-message receipt (messageCreatedAt). Backward compat: treat readUpTo as a messageCreatedAt.
@@ -1717,7 +1741,9 @@ export default function ChatScreen({
                     m.encrypted.senderPublicKey === myPublicKeyRef.current;
                   const isPlainOutgoing =
                     !m.encrypted &&
-                    normalizeUser(m.userLower ?? m.user ?? 'anon') === myUserLower;
+                    (m.userSub && myUserId
+                      ? m.userSub === myUserId
+                      : normalizeUser(m.userLower ?? m.user ?? 'anon') === myUserLower);
                   const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
                   if (!isOutgoing) return m;
                   if (m.createdAt !== messageCreatedAt) return m;
@@ -1741,7 +1767,9 @@ export default function ChatScreen({
               : 'global';
           if (incomingConv !== activeConv) return;
           const u = typeof payload.user === 'string' ? payload.user : 'someone';
-          if (payloadUserLower && payloadUserLower === myUserLower) return;
+          const payloadUserSub = typeof payload.userSub === 'string' ? payload.userSub : '';
+          if (myUserId && payloadUserSub && payloadUserSub === myUserId) return;
+          if (!payloadUserSub && payloadUserLower && payloadUserLower === myUserLower) return;
           const isTyping = payload.isTyping === true;
           if (!isTyping) {
             setTypingByUserExpiresAt((prev) => {
@@ -1776,6 +1804,7 @@ export default function ChatScreen({
           const msg: ChatMessage = {
             id: stableId,
             user: payload.user,
+            userSub: typeof payload.userSub === 'string' ? payload.userSub : undefined,
             userLower:
               typeof payload.userLower === 'string'
                 ? normalizeUser(payload.userLower)
@@ -1793,35 +1822,35 @@ export default function ChatScreen({
           };
           setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
         }
-        } catch {
-          const msg: ChatMessage = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            text: String(event.data),
-            createdAt: Date.now(),
-          };
-          setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
-        }
-      };
+      } catch {
+        const msg: ChatMessage = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          text: String(event.data),
+          createdAt: Date.now(),
+        };
+        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
+      }
+    };
 
-      ws.onerror = (e: any) => {
+    ws.onerror = (e: any) => {
         // Ignore events from stale sockets.
         if (wsRef.current !== ws) return;
-        // RN WebSocket doesn't expose much, but log what we can
-        // eslint-disable-next-line no-console
+      // RN WebSocket doesn't expose much, but log what we can
+      // eslint-disable-next-line no-console
         console.log('WS error:', e?.message ?? 'WebSocket error', 'url:', redactWsUrl(ws.url));
-        setIsConnecting(false);
-        setIsConnected(false);
-        setError(e?.message ? `WebSocket error: ${e.message}` : 'WebSocket error');
-        scheduleReconnect();
-      };
-      ws.onclose = (e) => {
+      setIsConnecting(false);
+      setIsConnected(false);
+      setError(e?.message ? `WebSocket error: ${e.message}` : 'WebSocket error');
+      scheduleReconnect();
+    };
+    ws.onclose = (e) => {
         // Ignore events from stale sockets.
         if (wsRef.current !== ws) return;
-        // eslint-disable-next-line no-console
+      // eslint-disable-next-line no-console
         console.log('WS close:', (e as any)?.code, (e as any)?.reason, 'url:', redactWsUrl(ws.url));
-        setIsConnected(false);
-        scheduleReconnect();
-      };
+      setIsConnected(false);
+      scheduleReconnect();
+    };
     })();
   }, [user, normalizeUser, flushPendingRead, scheduleReconnect]);
 
@@ -1894,6 +1923,11 @@ export default function ChatScreen({
             .map((it: any) => ({
               id: String(it.messageId ?? `${it.createdAt ?? Date.now()}-${Math.random().toString(36).slice(2)}`),
               user: it.user ?? 'anon',
+              userSub: typeof it.userSub === 'string' ? it.userSub : undefined,
+              userLower:
+                typeof it.userLower === 'string'
+                  ? normalizeUser(it.userLower)
+                  : normalizeUser(String(it.user ?? 'anon')),
               rawText: String(it.text ?? ''),
               encrypted: parseEncrypted(String(it.text ?? '')) ?? undefined,
               text: parseEncrypted(String(it.text ?? ''))
@@ -2340,7 +2374,9 @@ export default function ChatScreen({
             !!item.encrypted && !!myPublicKey && item.encrypted.senderPublicKey === myPublicKey;
           const isPlainOutgoing =
             !item.encrypted &&
-            normalizeUser(item.userLower ?? item.user ?? 'anon') === normalizeUser(displayName);
+            (item.userSub && myUserId
+              ? item.userSub === myUserId
+              : normalizeUser(item.userLower ?? item.user ?? 'anon') === normalizeUser(displayName));
           const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
           const outgoingSeenLabel = isDm
             ? getSeenLabelFor(peerSeenAtByCreatedAt, item.createdAt)
@@ -2386,8 +2422,8 @@ export default function ChatScreen({
           const metaLine = hideMetaUntilDecrypted
             ? ''
             : `${metaPrefix}${formatted}${
-                expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''
-              }`;
+            expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''
+          }`;
 
             return (           
               <Pressable
@@ -2433,18 +2469,18 @@ export default function ChatScreen({
                           ]}
                         >
                           {metaLine ? (
-                            <Text
-                              style={[
-                                styles.mediaHeaderMeta,
-                                isOutgoing
-                                  ? styles.mediaHeaderMetaOutgoing
-                                  : isDark
-                                    ? styles.mediaHeaderMetaIncomingDark
-                                    : styles.mediaHeaderMetaIncoming,
-                              ]}
-                            >
-                              {metaLine}
-                            </Text>
+                          <Text
+                            style={[
+                              styles.mediaHeaderMeta,
+                              isOutgoing
+                                ? styles.mediaHeaderMetaOutgoing
+                                : isDark
+                                  ? styles.mediaHeaderMetaIncomingDark
+                                  : styles.mediaHeaderMetaIncoming,
+                            ]}
+                          >
+                            {metaLine}
+                          </Text>
                           ) : null}
                           {captionText?.length ? (
                             <Text
@@ -2552,18 +2588,18 @@ export default function ChatScreen({
                       ]}
                     >
                       {metaLine ? (
-                        <Text
-                          style={[
-                            styles.messageMeta,
-                            isOutgoing
-                              ? styles.messageMetaOutgoing
-                              : isDark
-                                ? styles.messageMetaIncomingDark
-                                : styles.messageMetaIncoming,
-                          ]}
-                        >
-                          {metaLine}
-                        </Text>
+                      <Text
+                        style={[
+                          styles.messageMeta,
+                          isOutgoing
+                            ? styles.messageMetaOutgoing
+                            : isDark
+                              ? styles.messageMetaIncomingDark
+                              : styles.messageMetaIncoming,
+                        ]}
+                      >
+                        {metaLine}
+                      </Text>
                       ) : null}
                       {captionText?.length ? (
                         <Text

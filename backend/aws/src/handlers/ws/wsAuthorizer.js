@@ -69,7 +69,4 @@ exports.handler = async (event) => {
   }
 };
 
-// TODO: Paste deployed Lambda source for wsAuthorizer here.
-exports.handler = async () => ({ isAuthorized: false });
-
-
+// NOTE: Do not re-assign exports.handler below this line. This file is the deployed authorizer.

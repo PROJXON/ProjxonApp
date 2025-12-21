@@ -1,23 +1,27 @@
 // Cognito Trigger: Pre sign-up
-// Purpose: enforce username rules and (optionally) enforce case-insensitive uniqueness via USERS_TABLE.
 //
-// Env (optional but recommended):
-// - USERS_TABLE: DynamoDB table keyed by userSub, with GSI byUsernameLower (PK usernameLower)
-
-const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, QueryCommand } = require('@aws-sdk/lib-dynamodb');
+// Env:
+// - USERS_TABLE (optional but recommended): DynamoDB Users table
+// - USERS_BY_USERNAME_GSI (optional): GSI name (default: byUsernameLower)
+//
+// Users table expected schema:
+// - PK: userSub (String)
+// - GSI: byUsernameLower (PK usernameLower String)
+//
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-exports.handler = async (event) => {
-  const attrs = event.request.userAttributes || {};
+export const handler = async (event) => {
+  const attrs = event.request?.userAttributes || {};
   const preferred = attrs.preferred_username;
 
   if (!preferred) {
     throw new Error('Username (preferred_username) is required.');
   }
 
-  // Reject ANY whitespace (so "Name ", "Name  ", "Hot Dog" all fail)
+  // Reject ANY whitespace
   if (/\s/.test(preferred)) {
     throw new Error('Username cannot contain spaces.');
   }
@@ -27,15 +31,16 @@ exports.handler = async (event) => {
     throw new Error(`Username cannot contain commas, /, \\, ', #, or ".`);
   }
 
-  // Optional (recommended): enforce case-insensitive uniqueness via Users table.
-  // This is the only reliable way to prevent "John" and "john" as separate users.
   const usersTable = process.env.USERS_TABLE;
+  const gsi = process.env.USERS_BY_USERNAME_GSI || 'byUsernameLower';
+
+  // Enforce case-insensitive uniqueness via Users table (recommended).
   if (usersTable) {
     const usernameLower = String(preferred).trim().toLowerCase();
     const resp = await ddb.send(
       new QueryCommand({
         TableName: usersTable,
-        IndexName: 'byUsernameLower',
+        IndexName: gsi,
         KeyConditionExpression: 'usernameLower = :u',
         ExpressionAttributeValues: { ':u': usernameLower },
         Limit: 1,
@@ -45,10 +50,13 @@ exports.handler = async (event) => {
       throw new Error('Username is already taken.');
     }
   }
-  
-  // Optional: auto-confirm and auto-verify email if provided
+
+  // Auto-confirm user so no email code is required.
   event.response.autoConfirmUser = true;
+  // Also mark email verified when email is present.
   if (attrs.email) event.response.autoVerifyEmail = true;
 
   return event;
 };
+
+

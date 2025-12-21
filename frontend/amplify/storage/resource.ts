@@ -9,7 +9,10 @@ import { defineStorage } from '@aws-amplify/backend';
 export const storage = defineStorage({
   name: 'chatMedia',
   access: (allow) => ({
+    // Legacy/global plaintext attachments
     'global/*': [allow.authenticated.to(['read', 'write'])],
+    // Current upload paths used by the app (global + DM encrypted media)
+    'uploads/*': [allow.authenticated.to(['read', 'write'])],
   }),
 });
 

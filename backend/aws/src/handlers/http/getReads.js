@@ -39,7 +39,8 @@ exports.handler = async (event) => {
 
     const reads = (resp.Items || []).map((it) => ({
       conversationId: it.conversationId,
-      user: String(it.user || 'anon'),
+      userSub: it.userSub ? String(it.userSub) : undefined,
+      user: it.user ? String(it.user) : undefined,
       messageCreatedAt: Number(it.messageCreatedAt || it.readUpTo || 0),
       readAt: typeof it.readAt === 'number' ? it.readAt : undefined,
       updatedAt: typeof it.updatedAt === 'number' ? it.updatedAt : undefined,

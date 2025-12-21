@@ -10,13 +10,9 @@ exports.handler = async (event) => {
   }
 
   const claims = event.requestContext?.authorizer?.jwt?.claims || {};
-  const preferred = claims.preferred_username; // e.g. "John"
-  const email = claims.email;
-  const sub = claims.sub;
-
+  const sub = String(claims.sub || '').trim();
   // IMPORTANT: must match what wsMessage writes as the PK in UnreadDmConversations
-  const userKey = String(preferred || email || sub || '').trim().toLowerCase();
-  if (!userKey) return { statusCode: 401, body: 'Unauthorized' };
+  if (!sub) return { statusCode: 401, body: 'Unauthorized' };
 
   const table = process.env.UNREADS_TABLE;
   if (!table) return { statusCode: 500, body: 'UNREADS_TABLE not configured' };
@@ -25,9 +21,8 @@ exports.handler = async (event) => {
     const resp = await ddb.send(
       new QueryCommand({
         TableName: table,
-        KeyConditionExpression: '#u = :u',
-        ExpressionAttributeNames: { '#u': 'user' },
-        ExpressionAttributeValues: { ':u': userKey },
+        KeyConditionExpression: 'userSub = :u',
+        ExpressionAttributeValues: { ':u': sub },
         ScanIndexForward: false,
         Limit: 50,
       })
@@ -35,7 +30,8 @@ exports.handler = async (event) => {
 
     const unread = (resp.Items || []).map((item) => ({
       conversationId: String(item.conversationId || ''),
-      sender: String(item.sender || 'someone'),
+      senderSub: item.senderSub ? String(item.senderSub) : undefined,
+      senderDisplayName: item.senderDisplayName ? String(item.senderDisplayName) : undefined,
       messageCount: Number(item.messageCount ?? 0),
       lastMessageCreatedAt: Number(item.lastMessageCreatedAt ?? 0),
     }));
