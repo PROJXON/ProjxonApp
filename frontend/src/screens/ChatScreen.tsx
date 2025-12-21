@@ -204,6 +204,8 @@ type ChatMessage = {
     size?: number;
   };
   createdAt: number;
+  // Local-only UI state for optimistic sends.
+  localStatus?: 'sending' | 'sent' | 'failed';
 };
 
 type ChatEnvelope = {
@@ -316,6 +318,10 @@ export default function ChatScreen({
   const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState<string>('');
+  const inputRef = React.useRef<string>('');
+  const textInputRef = React.useRef<TextInput | null>(null);
+  const [inputEpoch, setInputEpoch] = React.useState<number>(0);
+  const sendTimeoutRef = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [typingByUserExpiresAt, setTypingByUserExpiresAt] = React.useState<Record<string, number>>(
     {}
   ); // user -> expiresAtMs
@@ -375,6 +381,7 @@ export default function ChatScreen({
     fileName?: string;
     size?: number;
   } | null>(null);
+  const pendingMediaRef = React.useRef<typeof pendingMedia>(null);
   const [mediaUrlByPath, setMediaUrlByPath] = React.useState<Record<string, string>>({});
   const inFlightMediaUrlRef = React.useRef<Set<string>>(new Set());
   const [imageAspectByPath, setImageAspectByPath] = React.useState<Record<string, number>>({});
@@ -397,6 +404,14 @@ export default function ChatScreen({
   React.useEffect(() => {
     displayNameRef.current = displayName;
   }, [displayName]);
+
+  React.useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
+
+  React.useEffect(() => {
+    pendingMediaRef.current = pendingMedia;
+  }, [pendingMedia]);
   React.useEffect(() => {
     myPublicKeyRef.current = myPublicKey;
   }, [myPublicKey]);
@@ -1819,8 +1834,34 @@ export default function ChatScreen({
             createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
             ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
+            localStatus: 'sent',
           };
-          setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
+          setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === msg.id);
+            if (idx === -1) return [msg, ...prev];
+            // Merge into existing optimistic message so we preserve decryptedText (sender view)
+            // and flip localStatus to sent.
+            const existing = prev[idx];
+            const shouldPreservePlaintext =
+              !!existing.decryptedText ||
+              (!!existing.text && existing.text !== ENCRYPTED_PLACEHOLDER);
+            const merged: ChatMessage = {
+              ...msg,
+              decryptedText: existing.decryptedText ?? msg.decryptedText,
+              // If the sender optimistically displayed plaintext for their own encrypted message,
+              // don't overwrite it back to the encrypted placeholder when the server echo arrives.
+              text: shouldPreservePlaintext ? existing.text : msg.text,
+              localStatus: 'sent',
+            };
+            // Clear any pending "mark failed" timer for this id.
+            if (sendTimeoutRef.current[msg.id]) {
+              clearTimeout(sendTimeoutRef.current[msg.id]);
+              delete sendTimeoutRef.current[msg.id];
+            }
+            const next = prev.slice();
+            next[idx] = merged;
+            return next;
+          });
         }
       } catch {
         const msg: ChatMessage = {
@@ -1963,7 +2004,9 @@ export default function ChatScreen({
 
   const sendMessage = React.useCallback(async () => {
     if (isUploading) return;
-    if (!input.trim() && !pendingMedia) return;
+    const currentInput = inputRef.current;
+    const currentPendingMedia = pendingMediaRef.current;
+    if (!currentInput.trim() && !currentPendingMedia) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
       return;
@@ -1987,24 +2030,52 @@ export default function ChatScreen({
       isTypingRef.current = false;
     }
 
-    // Snapshot current input/media and clear UI optimistically so the textbox feels instant.
-    // If sending fails, we restore.
-    const originalInput = input;
-    const originalPendingMedia = pendingMedia;
+    // Snapshot current input/media.
+    const originalInput = currentInput;
+    const originalPendingMedia = currentPendingMedia;
 
     let outgoingText = originalInput.trim();
+
+    const clearDraftImmediately = () => {
+      // Force-remount the TextInput to fully reset native state.
+      // This is the most reliable way to guarantee "instant clear" on Android
+      // even if the user keeps typing and spams Send.
+      setInputEpoch((v) => v + 1);
+      try {
+        textInputRef.current?.clear?.();
+      } catch {
+        // ignore
+      }
+      setInput('');
+      inputRef.current = '';
+      setPendingMedia(null);
+      pendingMediaRef.current = null;
+    };
+
+    const restoreDraftIfUnchanged = () => {
+      // Only restore if the user hasn't started typing a new message / attaching new media.
+      if ((inputRef.current || '').length === 0 && !pendingMediaRef.current) {
+        setInput(originalInput);
+        inputRef.current = originalInput;
+        setPendingMedia(originalPendingMedia);
+        pendingMediaRef.current = originalPendingMedia;
+      }
+    };
+
+    // Clear immediately (and yield a tick) so the input visually resets before CPU-heavy work (encryption/upload).
+    clearDraftImmediately();
+    await new Promise((r) => setTimeout(r, 0));
     if (isDm) {
       if (!myPrivateKey) {
         Alert.alert('Encryption not ready', 'Missing your private key on this device.');
+        restoreDraftIfUnchanged();
         return;
       }
       if (!peerPublicKey) {
         Alert.alert('Encryption not ready', "Can't find the recipient's public key.");
+        restoreDraftIfUnchanged();
         return;
       }
-
-      setInput('');
-      setPendingMedia(null);
 
       // DM media: encrypt + upload ciphertext, then encrypt the envelope as a normal DM message.
       if (originalPendingMedia) {
@@ -2021,8 +2092,7 @@ export default function ChatScreen({
           outgoingText = JSON.stringify(enc);
         } catch (e: any) {
           Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
-          setInput(originalInput);
-          setPendingMedia(originalPendingMedia);
+          restoreDraftIfUnchanged();
           return;
         } finally {
           setIsUploading(false);
@@ -2032,8 +2102,6 @@ export default function ChatScreen({
         outgoingText = JSON.stringify(enc);
       }
     } else if (originalPendingMedia) {
-      setInput('');
-      setPendingMedia(null);
       try {
         setIsUploading(true);
         const uploaded = await uploadPendingMedia(originalPendingMedia);
@@ -2045,29 +2113,77 @@ export default function ChatScreen({
         outgoingText = JSON.stringify(envelope);
       } catch (e: any) {
         Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
-        setInput(originalInput);
-        setPendingMedia(originalPendingMedia);
+        restoreDraftIfUnchanged();
         return;
       } finally {
         setIsUploading(false);
       }
     } else {
-      // Plain text global message: clear immediately.
-      setInput('');
+      // Plain text global message already cleared above.
     }
+    const clientMessageId = `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // Optimistic UI: show the outgoing message immediately, then let the WS echo dedupe by id.
+    // (Backend uses clientMessageId as messageId when provided.)
+    if (!originalPendingMedia) {
+      const optimisticRaw = outgoingText;
+      const optimisticEncrypted = parseEncrypted(optimisticRaw);
+      const optimisticPlaintext = originalInput.trim();
+      const optimisticMsg: ChatMessage = {
+        id: clientMessageId,
+        user: displayName,
+        userLower: normalizeUser(displayName),
+        userSub: myUserId ?? undefined,
+        rawText: optimisticRaw,
+        encrypted: optimisticEncrypted ?? undefined,
+        // If it's an encrypted DM, only show plaintext optimistically when autoDecrypt is enabled.
+        decryptedText: isDm && optimisticEncrypted && autoDecrypt ? optimisticPlaintext : undefined,
+        text:
+          isDm && optimisticEncrypted
+            ? (autoDecrypt ? optimisticPlaintext : ENCRYPTED_PLACEHOLDER)
+            : optimisticEncrypted
+              ? ENCRYPTED_PLACEHOLDER
+              : optimisticRaw,
+        createdAt: Date.now(),
+        ttlSeconds: isDm && TTL_OPTIONS[ttlIdx]?.seconds ? TTL_OPTIONS[ttlIdx].seconds : undefined,
+        localStatus: 'sending',
+      };
+      setMessages((prev) => (prev.some((m) => m.id === optimisticMsg.id) ? prev : [optimisticMsg, ...prev]));
+
+      // If we don't see our own echo within a short window, mark as failed.
+      // (We don't show "sending…" for text; we only show a failure state.)
+      if (sendTimeoutRef.current[clientMessageId]) {
+        clearTimeout(sendTimeoutRef.current[clientMessageId]);
+      }
+      sendTimeoutRef.current[clientMessageId] = setTimeout(() => {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === clientMessageId && m.localStatus === 'sending' ? { ...m, localStatus: 'failed' } : m))
+        );
+        delete sendTimeoutRef.current[clientMessageId];
+      }, 5000);
+    }
+
     const outgoing = {
       action: 'message',
       text: outgoingText,
       conversationId: activeConversationId,
       user: displayName,
+      clientMessageId,
       createdAt: Date.now(),
       // TTL-from-read: we send a duration, and the countdown starts when the recipient decrypts.
       ttlSeconds: isDm && TTL_OPTIONS[ttlIdx]?.seconds ? TTL_OPTIONS[ttlIdx].seconds : undefined,
     };
-    wsRef.current.send(JSON.stringify(outgoing));
+    try {
+      wsRef.current.send(JSON.stringify(outgoing));
+    } catch (e) {
+      // Mark optimistic message as failed if send throws (rare, but possible during reconnect).
+      setMessages((prev) =>
+        prev.map((m) => (m.id === clientMessageId ? { ...m, localStatus: 'failed' } : m))
+      );
+      setError('Not connected');
+      return;
+    }
   }, [
-    input,
-    pendingMedia,
     isUploading,
     uploadPendingMedia,
     uploadPendingMediaDmEncrypted,
@@ -2078,7 +2194,49 @@ export default function ChatScreen({
     peerPublicKey,
     ttlIdx,
     TTL_OPTIONS,
+    myUserId,
+    normalizeUser,
   ]);
+
+  const retryFailedMessage = React.useCallback(
+    (msg: ChatMessage) => {
+      if (!msg || msg.localStatus !== 'failed') return;
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        setError('Not connected');
+        return;
+      }
+      if (!msg.rawText || !msg.rawText.trim()) return;
+
+      // Flip back to sending immediately.
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localStatus: 'sending' } : m)));
+
+      // Re-arm timeout.
+      if (sendTimeoutRef.current[msg.id]) clearTimeout(sendTimeoutRef.current[msg.id]);
+      sendTimeoutRef.current[msg.id] = setTimeout(() => {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === msg.id && m.localStatus === 'sending' ? { ...m, localStatus: 'failed' } : m))
+        );
+        delete sendTimeoutRef.current[msg.id];
+      }, 5000);
+
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            action: 'message',
+            text: msg.rawText,
+            conversationId: activeConversationId,
+            user: displayName,
+            clientMessageId: msg.id, // keep same bubble id
+            createdAt: Date.now(),
+            ttlSeconds: isDm && msg.ttlSeconds ? msg.ttlSeconds : undefined,
+          })
+        );
+      } catch {
+        setMessages((prev) => prev.map((m) => (m.id === msg.id ? { ...m, localStatus: 'failed' } : m)));
+      }
+    },
+    [activeConversationId, displayName, isDm]
+  );
 
   const sendTyping = React.useCallback(
     (nextIsTyping: boolean) => {
@@ -2136,6 +2294,7 @@ export default function ChatScreen({
   const onChangeInput = React.useCallback(
     (next: string) => {
       setInput(next);
+      inputRef.current = next;
       const nextHasText = next.trim().length > 0;
       if (nextHasText) sendTyping(true);
       else if (isTypingRef.current) sendTyping(false);
@@ -2615,6 +2774,23 @@ export default function ChatScreen({
                           {captionText}
                         </Text>
                       ) : null}
+                      {isOutgoing && item.localStatus === 'failed' ? (
+                        <Pressable
+                          onPress={() => retryFailedMessage(item)}
+                          accessibilityRole="button"
+                          accessibilityLabel="Retry sending message"
+                        >
+                          <Text
+                            style={[
+                              styles.sendFailedText,
+                              isDark ? styles.sendFailedTextDark : null,
+                              isOutgoing ? styles.sendFailedTextAlignOutgoing : null,
+                            ]}
+                          >
+                            Failed · tap to retry
+                          </Text>
+                        </Pressable>
+                      ) : null}
                       {seenLabel ? (
                         <Text
                           style={[
@@ -2666,6 +2842,10 @@ export default function ChatScreen({
             <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
           </Pressable>
           <TextInput
+            ref={(r) => {
+              textInputRef.current = r;
+            }}
+            key={`chat-input-${inputEpoch}`}
             style={[styles.input, isDark ? styles.inputDark : null]}
             placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
             placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
@@ -2967,6 +3147,9 @@ const styles = StyleSheet.create({
   messageBubbleIncoming: { backgroundColor: '#f1f1f1' },
   messageBubbleIncomingDark: { backgroundColor: '#1c1c22' },
   messageBubbleOutgoing: { backgroundColor: '#1976d2' },
+  sendFailedText: { marginTop: 6, fontSize: 12, color: '#b00020', fontStyle: 'italic' },
+  sendFailedTextDark: { color: '#ff6b6b' },
+  sendFailedTextAlignOutgoing: { textAlign: 'right' },
   messageMeta: { fontSize: 12, marginBottom: 1, fontWeight: '400' },
   messageMetaIncoming: { color: '#555' },
   messageMetaIncomingDark: { color: '#b7b7c2' },

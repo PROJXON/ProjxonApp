@@ -314,7 +314,12 @@ exports.handler = async (event) => {
       if (v > 0 && v <= 365 * 24 * 60 * 60) ttlSeconds = v;
     }
 
-    const messageId = `${nowMs}-${Math.random().toString(36).slice(2)}`;
+    const clientMessageId =
+      typeof body.clientMessageId === 'string' ? String(body.clientMessageId).trim() : '';
+    const messageId =
+      clientMessageId && clientMessageId.length <= 120
+        ? clientMessageId
+        : `${nowMs}-${Math.random().toString(36).slice(2)}`;
 
     // Persist (store display + stable key)
     await ddb.send(
