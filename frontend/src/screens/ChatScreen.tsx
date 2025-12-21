@@ -423,6 +423,22 @@ export default function ChatScreen({
     return String(v ?? '').trim().toLowerCase();
   }, []);
 
+  // Signal-style: show a tiny send-status indicator only on the most recent outgoing message.
+  const latestOutgoingMessageId = React.useMemo(() => {
+    const myLower = normalizeUser(displayName);
+    for (const m of messages) {
+      const isEncryptedOutgoing =
+        !!m.encrypted && !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
+      const isPlainOutgoing =
+        !m.encrypted &&
+        (m.userSub && myUserId
+          ? m.userSub === myUserId
+          : normalizeUser(m.userLower ?? m.user ?? 'anon') === myLower);
+      if (isEncryptedOutgoing || isPlainOutgoing) return m.id;
+    }
+    return null;
+  }, [messages, myPublicKey, myUserId, displayName, normalizeUser]);
+
   const appendQueryParam = React.useCallback((url: string, key: string, value: string): string => {
     const hasQuery = url.includes('?');
     const sep = hasQuery ? '&' : '?';
@@ -2761,18 +2777,39 @@ export default function ChatScreen({
                       </Text>
                       ) : null}
                       {captionText?.length ? (
-                        <Text
+                        <View
                           style={[
-                            styles.messageText,
-                            isOutgoing
-                              ? styles.messageTextOutgoing
-                              : isDark
-                                ? styles.messageTextIncomingDark
-                                : styles.messageTextIncoming,
+                            styles.messageTextRow,
+                            isOutgoing ? styles.messageTextRowOutgoing : null,
                           ]}
                         >
-                          {captionText}
-                        </Text>
+                          <Text
+                            style={[
+                              styles.messageText,
+                              isOutgoing
+                                ? styles.messageTextOutgoing
+                                : isDark
+                                  ? styles.messageTextIncomingDark
+                                  : styles.messageTextIncoming,
+                              styles.messageTextFlex,
+                            ]}
+                          >
+                            {captionText}
+                          </Text>
+                          {isOutgoing &&
+                          !seenLabel &&
+                          item.localStatus !== 'failed' &&
+                          item.id === latestOutgoingMessageId ? (
+                            <Text
+                              style={[
+                                styles.sendStatusInline,
+                                isDark ? styles.sendStatusInlineDark : null,
+                              ]}
+                            >
+                              {item.localStatus === 'sending' ? '…' : '✓'}
+                            </Text>
+                          ) : null}
+                        </View>
                       ) : null}
                       {isOutgoing && item.localStatus === 'failed' ? (
                         <Pressable
@@ -3150,6 +3187,11 @@ const styles = StyleSheet.create({
   sendFailedText: { marginTop: 6, fontSize: 12, color: '#b00020', fontStyle: 'italic' },
   sendFailedTextDark: { color: '#ff6b6b' },
   sendFailedTextAlignOutgoing: { textAlign: 'right' },
+  messageTextRow: { flexDirection: 'row', alignItems: 'flex-end' },
+  messageTextRowOutgoing: { justifyContent: 'flex-end' },
+  messageTextFlex: { flexGrow: 1, flexShrink: 1 },
+  sendStatusInline: { marginLeft: 6, fontSize: 12, color: '#777' },
+  sendStatusInlineDark: { color: '#a7a7b4' },
   messageMeta: { fontSize: 12, marginBottom: 1, fontWeight: '400' },
   messageMetaIncoming: { color: '#555' },
   messageMetaIncomingDark: { color: '#b7b7c2' },
