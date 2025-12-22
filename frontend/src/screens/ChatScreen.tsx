@@ -2056,7 +2056,7 @@ export default function ChatScreen({
                 typeof it.deletedAt === 'number'
                   ? ''
                   : parseEncrypted(typeof it.text === 'string' ? String(it.text) : '')
-                    ? ENCRYPTED_PLACEHOLDER
+                ? ENCRYPTED_PLACEHOLDER
                     : (typeof it.text === 'string' ? String(it.text) : ''),
               createdAt: Number(it.createdAt ?? Date.now()),
               expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
@@ -2262,7 +2262,7 @@ export default function ChatScreen({
       ttlSeconds: isDm && TTL_OPTIONS[ttlIdx]?.seconds ? TTL_OPTIONS[ttlIdx].seconds : undefined,
     };
     try {
-      wsRef.current.send(JSON.stringify(outgoing));
+    wsRef.current.send(JSON.stringify(outgoing));
     } catch (e) {
       // Mark optimistic message as failed if send throws (rare, but possible during reconnect).
       setMessages((prev) =>
@@ -3127,18 +3127,18 @@ export default function ChatScreen({
                               </View>
                             </View>
                           ) : (
-                            <Text
-                              style={[
-                                styles.messageText,
-                                isOutgoing
-                                  ? styles.messageTextOutgoing
-                                  : isDark
-                                    ? styles.messageTextIncomingDark
-                                    : styles.messageTextIncoming,
+                        <Text
+                          style={[
+                            styles.messageText,
+                            isOutgoing
+                              ? styles.messageTextOutgoing
+                              : isDark
+                                ? styles.messageTextIncomingDark
+                                : styles.messageTextIncoming,
                                 styles.messageTextFlex,
                                 isDeleted ? styles.deletedText : null,
-                              ]}
-                            >
+                          ]}
+                        >
                               {displayText}
                             </Text>
                           )}
@@ -3153,7 +3153,7 @@ export default function ChatScreen({
                             >
                               {' '}
                               Edited
-                            </Text>
+                        </Text>
                           ) : null}
                           {isOutgoing &&
                           !seenLabel &&
@@ -3689,8 +3689,8 @@ const styles = StyleSheet.create({
   toolBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
   toolBtnTextDark: { color: '#fff' },
   ok: { color: '#2e7d32' },
-  err: { color: '#d32f2f' },
-  error: { color: '#d32f2f', marginTop: 6 },
+  err: { color: '#b00020' },
+  error: { color: '#b00020', marginTop: 6 },
   errorDark: { color: '#ff6b6b' },
   listContent: { padding: 12 },
   messageRow: {
