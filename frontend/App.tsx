@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
+  ActivityIndicator,
   StyleSheet,
   Text,
   View,
@@ -13,6 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import ChatScreen from './src/screens/ChatScreen';
+import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { Amplify } from "aws-amplify";
@@ -45,16 +47,24 @@ try {
 const SignOutButton = ({
   style,
   theme,
+  onSignedOut,
 }: {
   style?: any;
   theme: 'light' | 'dark';
+  onSignedOut?: () => void;
 }) => {
   const { signOut } = useAuthenticator();
   const isDark = theme === 'dark';
 
   return (
     <Pressable
-      onPress={signOut}
+      onPress={async () => {
+        try {
+          await signOut();
+        } finally {
+          onSignedOut?.();
+        }
+      }}
       style={({ pressed }) => [
         styles.signOutPill,
         isDark && styles.signOutPillDark,
@@ -69,7 +79,7 @@ const SignOutButton = ({
   );
 };
 
-const MainAppContent = () => {
+const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const { user } = useAuthenticator();
   const [displayName, setDisplayName] = useState<string>('anon');
   const [passphrasePrompt, setPassphrasePrompt] = useState<{
@@ -587,7 +597,7 @@ const MainAppContent = () => {
               thumbColor={isDark ? '#2a2a33' : '#ffffff'}
             />
           </View>
-          <SignOutButton theme={theme} />
+          <SignOutButton theme={theme} onSignedOut={onSignedOut} />
         </View>
       </View>
 
@@ -733,16 +743,43 @@ const MainAppContent = () => {
 };
 
 export default function App(): React.JSX.Element {
+  const [booting, setBooting] = React.useState<boolean>(true);
+  const [rootMode, setRootMode] = React.useState<'guest' | 'auth'>('guest');
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const sess = await fetchAuthSession().catch(() => ({ tokens: undefined }));
+        const hasToken = !!sess?.tokens?.idToken?.toString();
+        if (mounted) setRootMode(hasToken ? 'auth' : 'guest');
+      } finally {
+        if (mounted) setBooting(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={[styles.container, styles.appSafe]}>
         <Authenticator.Provider>
-          <Authenticator
-            loginMechanisms={['email']}
-            signUpAttributes={['preferred_username']}
-          >
-            <MainAppContent />
-          </Authenticator>
+          {booting ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+              <ActivityIndicator />
+            </View>
+          ) : rootMode === 'guest' ? (
+            <GuestGlobalScreen onSignIn={() => setRootMode('auth')} />
+          ) : (
+            <Authenticator
+              loginMechanisms={['email']}
+              signUpAttributes={['preferred_username']}
+            >
+              <MainAppContent onSignedOut={() => setRootMode('guest')} />
+            </Authenticator>
+          )}
         </Authenticator.Provider>
 
         <StatusBar style="auto" />
