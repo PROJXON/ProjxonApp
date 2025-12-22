@@ -4,22 +4,72 @@ import {
   AppState,
   AppStateStatus,
   FlatList,
+  Image,
+  Linking,
   RefreshControl,
   Pressable,
   StyleSheet,
   Switch,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_URL } from '../config/env';
+import { getUrl } from 'aws-amplify/storage';
 
 type GuestMessage = {
   id: string;
   user: string;
   text: string;
   createdAt: number;
+  reactions?: Record<string, { count: number; userSubs: string[] }>;
+  media?: {
+    path: string;
+    thumbPath?: string;
+    kind: 'image' | 'video' | 'file';
+    contentType?: string;
+    thumbContentType?: string;
+    fileName?: string;
+    size?: number;
+  };
 };
+
+type ChatEnvelope = {
+  type: 'chat';
+  text?: string;
+  media?: GuestMessage['media'];
+};
+
+function normalizeGuestReactions(raw: any): Record<string, { count: number; userSubs: string[] }> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, { count: number; userSubs: string[] }> = {};
+  for (const [emoji, info] of Object.entries(raw)) {
+    const count = Number((info as any)?.count);
+    const subs = Array.isArray((info as any)?.userSubs) ? (info as any).userSubs.map(String).filter(Boolean) : [];
+    const safeCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : subs.length;
+    if (safeCount <= 0 && subs.length === 0) continue;
+    out[String(emoji)] = { count: safeCount, userSubs: subs };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function tryParseChatEnvelope(rawText: string): { text: string; media?: GuestMessage['media'] } | null {
+  const t = (rawText || '').trim();
+  if (!t || !t.startsWith('{') || !t.endsWith('}')) return null;
+  try {
+    const obj = JSON.parse(t) as any;
+    if (!obj || typeof obj !== 'object') return null;
+    if (obj.type !== 'chat') return null;
+    const env = obj as ChatEnvelope;
+    const text = typeof env.text === 'string' ? env.text : '';
+    const media = env.media && typeof env.media === 'object' ? (env.media as GuestMessage['media']) : undefined;
+    if (!text && !media) return null;
+    return { text, media };
+  } catch {
+    return null;
+  }
+}
 
 function normalizeGuestMessages(items: any[]): GuestMessage[] {
   const out: GuestMessage[] = [];
@@ -32,9 +82,19 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
     const user = typeof it?.user === 'string' ? it.user : 'anon';
     const deletedAt = typeof it?.deletedAt === 'number' ? it.deletedAt : undefined;
     if (deletedAt) continue;
-    const text = typeof it?.text === 'string' ? it.text : '';
-    if (!text.trim()) continue;
-    out.push({ id: messageId, user, text, createdAt });
+    const rawText = typeof it?.text === 'string' ? it.text : '';
+    const parsed = tryParseChatEnvelope(rawText);
+    const text = parsed ? parsed.text : rawText;
+    const media = parsed?.media;
+    if (!text.trim() && !media) continue;
+    out.push({
+      id: messageId,
+      user,
+      text,
+      createdAt,
+      reactions: normalizeGuestReactions((it as any)?.reactions),
+      media,
+    });
   }
 
   // Ensure newest-first for inverted list behavior.
@@ -106,6 +166,24 @@ export default function GuestGlobalScreen({
   const [loading, setLoading] = React.useState<boolean>(true);
   const [refreshing, setRefreshing] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [urlByPath, setUrlByPath] = React.useState<Record<string, string>>({});
+
+  const resolvePathUrl = React.useCallback(
+    async (path: string): Promise<string | null> => {
+      if (!path) return null;
+      const cached = urlByPath[path];
+      if (cached) return cached;
+      try {
+        const { url } = await getUrl({ path });
+        const s = url.toString();
+        setUrlByPath((prev) => (prev[path] ? prev : { ...prev, [path]: s }));
+        return s;
+      } catch {
+        return null;
+      }
+    },
+    [urlByPath]
+  );
 
   const fetchNow = React.useCallback(async (opts?: { isManual?: boolean }) => {
     const isManual = !!opts?.isManual;
@@ -220,12 +298,11 @@ export default function GuestGlobalScreen({
           />
         }
         renderItem={({ item }) => (
-          <View style={[styles.msgRow]}>
-            <View style={[styles.bubble, isDark && styles.bubbleDark]}>
-              <Text style={[styles.userText, isDark && styles.userTextDark]}>{item.user}</Text>
-              <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
-            </View>
-          </View>
+          <GuestMessageRow
+            item={item}
+            isDark={isDark}
+            resolvePathUrl={resolvePathUrl}
+          />
         )}
       />
 
@@ -243,6 +320,173 @@ export default function GuestGlobalScreen({
           Sign in to post
         </Text>
       </Pressable>
+    </View>
+  );
+}
+
+function GuestMessageRow({
+  item,
+  isDark,
+  resolvePathUrl,
+}: {
+  item: GuestMessage;
+  isDark: boolean;
+  resolvePathUrl: (path: string) => Promise<string | null>;
+}) {
+  const { width: windowWidth } = useWindowDimensions();
+  const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
+  const [usedFullUrl, setUsedFullUrl] = React.useState<boolean>(false);
+  const [thumbAspect, setThumbAspect] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const preferredPath = item.media?.thumbPath || item.media?.path;
+      if (!preferredPath) return;
+      const u = await resolvePathUrl(preferredPath);
+      if (!cancelled) setThumbUrl(u);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [item.media?.path, item.media?.thumbPath, resolvePathUrl]);
+
+  React.useEffect(() => {
+    if (!thumbUrl) return;
+    let cancelled = false;
+    Image.getSize(
+      thumbUrl,
+      (w, h) => {
+        if (cancelled) return;
+        const aspect = w > 0 && h > 0 ? w / h : 1;
+        setThumbAspect(Number.isFinite(aspect) ? aspect : 1);
+      },
+      () => {
+        if (!cancelled) setThumbAspect(null);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [thumbUrl]);
+
+  const openMedia = React.useCallback(async () => {
+    const p = item.media?.path;
+    if (!p) return;
+    const u = await resolvePathUrl(p);
+    if (u) await Linking.openURL(u);
+  }, [item.media?.path, resolvePathUrl]);
+
+  const hasMedia = !!item.media?.path;
+
+  const onThumbError = React.useCallback(async () => {
+    // Common cases:
+    // - thumb object doesn't exist
+    // - S3 returns 403 because guest read policy isn't deployed yet
+    // Try the full object as a fallback (especially useful if only the thumb is missing).
+    if (usedFullUrl) return;
+    const fullPath = item.media?.path;
+    if (!fullPath) return;
+    const u = await resolvePathUrl(fullPath);
+    if (u) {
+      setUsedFullUrl(true);
+      setThumbUrl(u);
+      return;
+    }
+    // If we couldn't resolve anything, drop the preview so we fall back to a file chip.
+    setThumbUrl(null);
+  }, [item.media?.path, resolvePathUrl, usedFullUrl]);
+
+  // Match ChatScreen-ish thumbnail sizing: capped max size, preserve aspect ratio, no crop.
+  const CHAT_MEDIA_MAX_HEIGHT = 240;
+  const CHAT_MEDIA_MAX_WIDTH_FRACTION = 0.86;
+  const maxW = Math.max(220, Math.floor(windowWidth * CHAT_MEDIA_MAX_WIDTH_FRACTION));
+  const maxH = CHAT_MEDIA_MAX_HEIGHT;
+  const aspect = typeof thumbAspect === 'number' ? thumbAspect : 1;
+  const capped = (() => {
+    const w = maxW;
+    const h = Math.max(80, Math.round(w / Math.max(0.1, aspect)));
+    if (h <= maxH) return { w, h };
+    const w2 = Math.max(160, Math.round(maxH * Math.max(0.1, aspect)));
+    return { w: Math.min(maxW, w2), h: maxH };
+  })();
+
+  return (
+    <View style={[styles.msgRow]}>
+      <View style={[styles.bubble, isDark && styles.bubbleDark]}>
+        <Text style={[styles.userText, isDark && styles.userTextDark]}>{item.user}</Text>
+        {item.text?.trim() ? (
+          <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
+        ) : null}
+
+        {hasMedia ? (
+          <Pressable
+            onPress={() => void openMedia()}
+            style={({ pressed }) => [{ marginTop: item.text?.trim() ? 10 : 6, opacity: pressed ? 0.92 : 1 }]}
+            accessibilityRole="button"
+            accessibilityLabel="Open media"
+          >
+            {item.media?.kind === 'image' && thumbUrl ? (
+              <Image
+                source={{ uri: thumbUrl }}
+                style={[
+                  styles.guestMediaImage,
+                  { width: capped.w, height: capped.h },
+                  isDark && styles.guestMediaImageDark,
+                ]}
+                // Match ChatScreen: no crop, preserve aspect.
+                resizeMode="contain"
+                onError={() => void onThumbError()}
+              />
+            ) : item.media?.kind === 'video' && thumbUrl ? (
+              <View style={[styles.guestMediaVideoWrap, isDark && styles.guestMediaVideoWrapDark]}>
+                <Image
+                  source={{ uri: thumbUrl }}
+                  style={[
+                    styles.guestMediaImage,
+                    { width: capped.w, height: capped.h },
+                    isDark && styles.guestMediaImageDark,
+                  ]}
+                  resizeMode="cover"
+                  onError={() => void onThumbError()}
+                />
+                <View style={[styles.guestMediaPlayBadge, isDark && styles.guestMediaPlayBadgeDark]}>
+                  <Text style={[styles.guestMediaPlayText, isDark && styles.guestMediaPlayTextDark]}>Play</Text>
+                </View>
+              </View>
+            ) : (
+              <View style={[styles.guestMediaFileChip, isDark && styles.guestMediaFileChipDark]}>
+                <Text style={[styles.guestMediaFileText, isDark && styles.guestMediaFileTextDark]} numberOfLines={1}>
+                  {item.media?.fileName ? item.media.fileName : item.media?.kind === 'video' ? 'Video' : 'File'}
+                </Text>
+              </View>
+            )}
+          </Pressable>
+        ) : null}
+
+        {item.reactions ? (
+          <View style={styles.guestReactionRow}>
+            {Object.entries(item.reactions)
+              .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
+              .slice(0, 3)
+              .map(([emoji, info], idx) => (
+                <View
+                  key={`${item.id}:${emoji}`}
+                  style={[
+                    styles.guestReactionChip,
+                    isDark && styles.guestReactionChipDark,
+                    idx ? styles.guestReactionChipStacked : null,
+                  ]}
+                >
+                  <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
+                    {emoji}
+                    {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
+                  </Text>
+                </View>
+              ))}
+          </View>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -353,6 +597,26 @@ const styles = StyleSheet.create({
     backgroundColor: '#1c1c22',
     borderColor: '#2a2a33',
   },
+  guestReactionRow: {
+    flexDirection: 'row',
+    marginTop: 8,
+  },
+  guestReactionChip: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    marginRight: -10,
+  },
+  guestReactionChipStacked: {},
+  guestReactionChipDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  guestReactionText: { color: '#111', fontWeight: '800', fontSize: 12 },
+  guestReactionTextDark: { color: '#fff' },
   userText: {
     fontSize: 12,
     fontWeight: '800',
@@ -368,6 +632,61 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   msgTextDark: {
+    color: '#fff',
+  },
+  guestMediaImage: {
+    borderRadius: 12,
+    backgroundColor: '#e9e9ee',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+  },
+  guestMediaImageDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  guestMediaVideoWrap: {
+    position: 'relative',
+  },
+  guestMediaVideoWrapDark: {},
+  guestMediaPlayBadge: {
+    position: 'absolute',
+    right: 10,
+    bottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  guestMediaPlayBadgeDark: {
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  guestMediaPlayText: {
+    color: '#fff',
+    fontWeight: '900',
+    fontSize: 12,
+  },
+  guestMediaPlayTextDark: {
+    color: '#fff',
+  },
+  guestMediaFileChip: {
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    maxWidth: 260,
+  },
+  guestMediaFileChipDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  guestMediaFileText: {
+    color: '#111',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+  guestMediaFileTextDark: {
     color: '#fff',
   },
   bottomCta: {

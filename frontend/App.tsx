@@ -9,7 +9,6 @@ import {
   TextInput,
   Pressable,
   Modal,
-  Alert,
   Switch,
   KeyboardAvoidingView,
   Platform,
@@ -18,6 +17,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import ChatScreen from './src/screens/ChatScreen';
 import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
+import { AnimatedDots } from './src/components/AnimatedDots';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { Amplify } from "aws-amplify";
@@ -108,11 +108,51 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const [passphraseInput, setPassphraseInput] = useState('');
   const [hasRecoveryBlob, setHasRecoveryBlob] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [uiPrompt, setUiPrompt] = useState<
+    | null
+    | {
+        kind: 'alert' | 'confirm';
+        title: string;
+        message: string;
+        confirmText?: string;
+        cancelText?: string;
+        destructive?: boolean;
+        resolve: (value: any) => void;
+      }
+  >(null);
 
   const promptPassphrase = (mode: 'setup' | 'restore'): Promise<string> =>
     new Promise<string>((resolve, reject) => {
       setPassphraseInput('');
       setPassphrasePrompt({ mode, resolve, reject });
+    });
+
+  const promptAlert = (title: string, message: string): Promise<void> =>
+    new Promise<void>((resolve) => {
+      setUiPrompt({
+        kind: 'alert',
+        title,
+        message,
+        confirmText: 'OK',
+        resolve,
+      });
+    });
+
+  const promptConfirm = (
+    title: string,
+    message: string,
+    opts?: { confirmText?: string; cancelText?: string; destructive?: boolean }
+  ): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      setUiPrompt({
+        kind: 'confirm',
+        title,
+        message,
+        confirmText: opts?.confirmText ?? 'OK',
+        cancelText: opts?.cancelText ?? 'Cancel',
+        destructive: !!opts?.destructive,
+        resolve,
+      });
     });
 
   const closePrompt = () => {
@@ -130,26 +170,19 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     setTimeout(() => passphrasePrompt.resolve(passphraseInput), 0);
   };
 
-  const handlePromptCancel = () => {
+  const handlePromptCancel = async () => {
     if (!passphrasePrompt) return;
     const isSetup = passphrasePrompt.mode === 'setup';
-    Alert.alert(
+    const ok = await promptConfirm(
       'Cancel recovery passphrase',
       isSetup
         ? "Are you sure? If you don't set a recovery passphrase, you won't be able to decrypt older messages if you switch devices or need recovery later.\n\nWe do NOT store your passphrase, so make sure you remember it."
         : "Are you sure? If you don't enter your recovery passphrase, you won't be able to decrypt older messages on this device.\n\nYou can try again if you remember it.",
-      [
-        { text: 'Go back', style: 'cancel' },
-        {
-          text: 'Yes, cancel',
-          style: 'destructive',
-          onPress: () => {
-            closePrompt();
-            passphrasePrompt.reject(new Error('Prompt cancelled'));
-          },
-        },
-      ]
+      { confirmText: 'Yes, cancel', cancelText: 'Go back', destructive: true }
     );
+    if (!ok) return;
+    closePrompt();
+    passphrasePrompt.reject(new Error('Prompt cancelled'));
   };
 
   const uploadRecoveryBlob = async (
@@ -290,9 +323,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   recovered = true;
                   closePrompt();
                 } catch (err) {
-                  Alert.alert(
+                  await promptAlert(
                     'Incorrect passphrase',
-                    'You have entered an incorrect passphrase. Try again'
+                    'You have entered an incorrect passphrase. Try again.'
                   );
                   console.warn('Recovery attempt failed', err);
                   closePrompt();
@@ -630,6 +663,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
               }}
               placeholder="User to Message"
               placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+              selectionColor={isDark ? '#ffffff' : '#111'}
+              cursorColor={isDark ? '#ffffff' : '#111'}
               style={[styles.searchInput, isDark && styles.searchInputDark]}
             />
             <Pressable
@@ -694,32 +729,97 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
   return (
     <View style={[styles.appContent, isDark ? styles.appContentDark : null]}>
+        <Modal visible={!!uiPrompt} transparent animationType="fade">
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, isDark ? styles.modalContentDark : null]}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
+                {uiPrompt?.title || ''}
+              </Text>
+              <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+                {uiPrompt?.message || ''}
+              </Text>
+              <View style={styles.modalButtons}>
+                {uiPrompt?.kind === 'confirm' ? (
+                  <Pressable
+                    style={[styles.modalButton, isDark ? styles.modalButtonDark : null]}
+                    onPress={() => {
+                      const resolve = uiPrompt?.resolve;
+                      setUiPrompt(null);
+                      resolve?.(false);
+                    }}
+                  >
+                    <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                      {uiPrompt?.cancelText || 'Cancel'}
+                    </Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  style={[
+                    styles.modalButton,
+                    uiPrompt?.kind === 'alert' ? styles.modalButtonPrimary : null,
+                    uiPrompt?.destructive ? styles.modalButtonDanger : null,
+                    isDark ? styles.modalButtonDark : null,
+                    isDark && uiPrompt?.kind === 'alert' ? styles.modalButtonPrimaryDark : null,
+                    isDark && uiPrompt?.destructive ? styles.modalButtonDangerDark : null,
+                  ]}
+                  onPress={() => {
+                    const resolve = uiPrompt?.resolve;
+                    const kind = uiPrompt?.kind;
+                    setUiPrompt(null);
+                    resolve?.(kind === 'confirm' ? true : undefined);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.modalButtonText,
+                      uiPrompt?.kind === 'alert' ? styles.modalButtonPrimaryText : null,
+                      uiPrompt?.destructive ? styles.modalButtonDangerText : null,
+                      isDark ? styles.modalButtonTextDark : null,
+                    ]}
+                  >
+                    {uiPrompt?.confirmText || 'OK'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
         <Modal visible={promptVisible} transparent animationType="fade">
           <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>{promptLabel}</Text>
+            <View style={[styles.modalContent, isDark ? styles.modalContentDark : null]}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>{promptLabel}</Text>
               {passphrasePrompt?.mode === 'setup' ? (
-                <Text style={styles.modalHelperText}>
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
                   Make sure you remember your passphrase for future device recovery - we do not
                   store it.
                 </Text>
               ) : null}
               <TextInput
-                style={styles.modalInput}
+                style={[
+                  styles.modalInput,
+                  isDark ? styles.modalInputDark : styles.modalInputLight,
+                  processing ? styles.modalInputDisabled : null,
+                  isDark && processing ? styles.modalInputDisabledDark : null,
+                ]}
                 secureTextEntry
                 value={passphraseInput}
                 onChangeText={setPassphraseInput}
                 placeholder="Passphrase"
+                placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+                selectionColor={isDark ? '#ffffff' : '#111'}
+                cursorColor={isDark ? '#ffffff' : '#111'}
                 autoFocus
                 editable={!processing}
               />
               <View style={styles.modalButtons}>
                 <Pressable
                   style={[styles.modalButton, processing && { opacity: 0.45 }]}
-                  onPress={handlePromptCancel}
+                  onPress={() => void handlePromptCancel()}
                   disabled={processing}
                 >
-                  <Text style={styles.modalButtonText}>Cancel</Text>
+                  <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                    Cancel
+                  </Text>
                 </Pressable>
                 <Pressable
                   style={[
@@ -730,19 +830,24 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   onPress={handlePromptSubmit}
                   disabled={processing}
                   >
-                    <Text
-                      style={{
-                        color: '#fff',
-                        fontWeight: '600',
-                        textAlign: 'center',
-                      }}
-                    >
-                      {processing
-                        ? (passphrasePrompt?.mode === 'restore'
-                          ? 'Decrypting...'
-                          : 'Encrypting backup...')
-                        : 'Submit'}
-                    </Text>
+                    {processing ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                        <Text style={{ color: '#fff', fontWeight: '700', textAlign: 'center' }}>
+                          {passphrasePrompt?.mode === 'restore' ? 'Decrypting' : 'Encrypting backup'}
+                        </Text>
+                        <AnimatedDots color="#fff" size={18} />
+                      </View>
+                    ) : (
+                      <Text
+                        style={{
+                          color: '#fff',
+                          fontWeight: '600',
+                          textAlign: 'center',
+                        }}
+                      >
+                        Submit
+                      </Text>
+                    )}
                 </Pressable>
               </View>
             </View>
@@ -1683,15 +1788,24 @@ const styles = StyleSheet.create({
     elevation: 6,
     position: 'relative',
   },
+  modalContentDark: {
+    backgroundColor: '#1c1c22',
+  },
   modalTitle: {
     fontSize: 18,
     fontWeight: '600',
     marginBottom: 12,
   },
+  modalTitleDark: {
+    color: '#fff',
+  },
   modalHelperText: {
     color: '#555',
     marginBottom: 12,
     lineHeight: 18,
+  },
+  modalHelperTextDark: {
+    color: '#b7b7c2',
   },
   modalInput: {
     borderWidth: 1,
@@ -1701,9 +1815,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     marginBottom: 12,
   },
+  modalInputLight: {
+    color: '#111',
+    backgroundColor: '#fff',
+  },
+  modalInputDark: {
+    borderColor: '#2a2a33',
+    backgroundColor: '#14141a',
+    color: '#fff',
+  },
   modalInputDisabled: {
     backgroundColor: '#f5f5f5',
     color: '#999',
+  },
+  modalInputDisabledDark: {
+    backgroundColor: '#14141a',
+    color: '#8f8fa3',
+    opacity: 0.7,
   },
   modalButtons: {
     flexDirection: 'row',
@@ -1718,8 +1846,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1a73e8',
   },
+  modalButtonDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
   modalButtonPrimary: {
     backgroundColor: '#1a73e8',
+    borderColor: 'transparent',
+  },
+  modalButtonPrimaryDark: {
+    backgroundColor: '#1976d2',
+    borderColor: 'transparent',
+  },
+  modalButtonDanger: {
+    backgroundColor: '#b00020',
+    borderColor: 'transparent',
+  },
+  modalButtonDangerDark: {
+    backgroundColor: '#ff6b6b',
     borderColor: 'transparent',
   },
   modalButtonText: {
@@ -1727,7 +1871,13 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
   },
+  modalButtonTextDark: {
+    color: '#d7d7e0',
+  },
   modalButtonPrimaryText: {
+    color: '#fff',
+  },
+  modalButtonDangerText: {
     color: '#fff',
   },
 });

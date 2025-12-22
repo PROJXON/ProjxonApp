@@ -22,6 +22,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { AnimatedDots } from '../components/AnimatedDots';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
@@ -198,6 +199,7 @@ type ChatMessage = {
   editedAt?: number; // epoch ms
   deletedAt?: number; // epoch ms
   deletedBySub?: string;
+  reactions?: Record<string, { count: number; userSubs: string[] }>;
   media?: {
     path: string;
     thumbPath?: string;
@@ -276,6 +278,25 @@ const parseChatEnvelope = (raw: string): ChatEnvelope | null => {
   }
 };
 
+const normalizeReactions = (
+  raw: any
+): Record<string, { count: number; userSubs: string[] }> | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, { count: number; userSubs: string[] }> = {};
+  for (const [emoji, info] of Object.entries(raw)) {
+    if (!emoji) continue;
+    const count = Number((info as any)?.count);
+    const userSubsRaw = (info as any)?.userSubs;
+    const userSubs = Array.isArray(userSubsRaw)
+      ? userSubsRaw.map((s) => String(s)).filter(Boolean)
+      : [];
+    const safeCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : userSubs.length;
+    if (safeCount <= 0 && userSubs.length === 0) continue;
+    out[String(emoji)] = { count: safeCount, userSubs };
+  }
+  return Object.keys(out).length ? out : undefined;
+};
+
 const guessContentTypeFromName = (name?: string): string | undefined => {
   if (!name) return undefined;
   const lower = name.toLowerCase();
@@ -351,6 +372,12 @@ export default function ChatScreen({
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
   const [cipherOpen, setCipherOpen] = React.useState(false);
   const [cipherText, setCipherText] = React.useState<string>('');
+  const [reactionInfoOpen, setReactionInfoOpen] = React.useState(false);
+  const [reactionInfoEmoji, setReactionInfoEmoji] = React.useState<string>('');
+  const [reactionInfoSubs, setReactionInfoSubs] = React.useState<string[]>([]);
+  const [nameBySub, setNameBySub] = React.useState<Record<string, string>>({});
+  const [reactionPickerOpen, setReactionPickerOpen] = React.useState(false);
+  const [reactionPickerTarget, setReactionPickerTarget] = React.useState<ChatMessage | null>(null);
   const [messageActionOpen, setMessageActionOpen] = React.useState(false);
   const [messageActionTarget, setMessageActionTarget] = React.useState<ChatMessage | null>(null);
   const [messageActionAnchor, setMessageActionAnchor] = React.useState<{ x: number; y: number } | null>(null);
@@ -398,6 +425,7 @@ export default function ChatScreen({
   const pendingMediaRef = React.useRef<typeof pendingMedia>(null);
   const [mediaUrlByPath, setMediaUrlByPath] = React.useState<Record<string, string>>({});
   const inFlightMediaUrlRef = React.useRef<Set<string>>(new Set());
+  const [storageSessionReady, setStorageSessionReady] = React.useState<boolean>(false);
   const [imageAspectByPath, setImageAspectByPath] = React.useState<Record<string, number>>({});
   const inFlightImageSizeRef = React.useRef<Set<string>>(new Set());
   const [viewerOpen, setViewerOpen] = React.useState(false);
@@ -875,9 +903,46 @@ export default function ChatScreen({
     }
   }, []);
 
+  // Ensure we have credentials before trying to resolve signed URLs for media.
+  // Without this, `getUrl()` can fail right after sign-in and thumbnails get stuck without a URL.
+  React.useEffect(() => {
+    let cancelled = false;
+    setStorageSessionReady(false);
+
+    (async () => {
+      // If we don't have a signed-in user, don't block the UI.
+      if (!user) {
+        setStorageSessionReady(true);
+        return;
+      }
+
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          const sess = await fetchAuthSession({ forceRefresh: attempt === 0 });
+          if (sess?.credentials?.accessKeyId) {
+            if (!cancelled) setStorageSessionReady(true);
+            return;
+          }
+        } catch {
+          // ignore; retry
+        }
+        // Small backoff (keeps the UI snappy but avoids tight loops)
+        await new Promise((r) => setTimeout(r, 250 + attempt * 250));
+      }
+
+      // Don't block forever; we'll still retry getUrl, but the user can at least interact.
+      if (!cancelled) setStorageSessionReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
   // Lazily resolve signed URLs for any media we see in message list (Global only).
   React.useEffect(() => {
     if (isDm) return;
+    if (!storageSessionReady) return;
     let cancelled = false;
     const needed: string[] = [];
 
@@ -902,10 +967,17 @@ export default function ChatScreen({
       const pairs: Array<[string, string]> = [];
       for (const path of needed) {
         try {
-          const { url } = await getUrl({ path });
-          pairs.push([path, url.toString()]);
+          // One short retry helps with transient network hiccups (without adding complex state).
+          try {
+            const { url } = await getUrl({ path });
+            pairs.push([path, url.toString()]);
+          } catch {
+            await new Promise((r) => setTimeout(r, 300));
+            const { url } = await getUrl({ path });
+            pairs.push([path, url.toString()]);
+          }
         } catch {
-          // ignore
+          // ignore; user can still tap to open, and future renders may re-trigger resolution
         }
       }
       if (cancelled) return;
@@ -922,7 +994,7 @@ export default function ChatScreen({
     return () => {
       cancelled = true;
     };
-  }, [isDm, messages, mediaUrlByPath]);
+  }, [isDm, messages, mediaUrlByPath, storageSessionReady]);
 
   // Lazily fetch image aspect ratios so thumbnails can render without letterboxing (and thus can be truly rounded).
   React.useEffect(() => {
@@ -1882,6 +1954,37 @@ export default function ChatScreen({
           return;
         }
 
+        // Reaction events (broadcast by backend)
+        if (payload && payload.type === 'reaction') {
+          const messageCreatedAt = Number(payload.createdAt);
+          if (!Number.isFinite(messageCreatedAt)) return;
+
+          // New shape: payload.reactions is the full map { emoji: {count, userSubs} }
+          if (payload.reactions) {
+            const normalized = normalizeReactions(payload.reactions);
+            setMessages((prev) =>
+              prev.map((m) => (m.createdAt === messageCreatedAt ? { ...m, reactions: normalized } : m))
+            );
+            return;
+          }
+
+          // Backward compat: payload has { emoji, users }
+          const emoji = typeof payload.emoji === 'string' ? payload.emoji : '';
+          const users = Array.isArray(payload.users) ? payload.users.map(String).filter(Boolean) : [];
+          if (emoji) {
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.createdAt !== messageCreatedAt) return m;
+                const nextReactions = { ...(m.reactions || {}) };
+                if (users.length === 0) delete nextReactions[emoji];
+                else nextReactions[emoji] = { count: users.length, userSubs: users };
+                return { ...m, reactions: Object.keys(nextReactions).length ? nextReactions : undefined };
+              })
+            );
+          }
+          return;
+        }
+
         if (payload && payload.text) {
           // Only render messages for the currently open conversation.
           // (We still emit DM notifications above for other conversations.)
@@ -1908,6 +2011,7 @@ export default function ChatScreen({
                 : typeof payload.user === 'string'
                   ? normalizeUser(payload.user)
                   : undefined,
+            reactions: normalizeReactions((payload as any)?.reactions),
             rawText,
             encrypted: encrypted ?? undefined,
             text: encrypted ? ENCRYPTED_PLACEHOLDER : rawText,
@@ -2050,6 +2154,7 @@ export default function ChatScreen({
               editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
               deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
               deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
+              reactions: normalizeReactions((it as any)?.reactions),
               rawText: typeof it.text === 'string' ? String(it.text) : '',
               encrypted: parseEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
               text:
@@ -2474,6 +2579,16 @@ export default function ChatScreen({
     setMessageActionAnchor(null);
   }, []);
 
+  const QUICK_REACTIONS = React.useMemo(() => ['❤️', '😂', '👍', '😮', '😢', '😡'], []);
+  const MORE_REACTIONS = React.useMemo(
+    () => [
+      ...QUICK_REACTIONS,
+      '🔥','🎉','🙏','👏','✅','❌','🤔','👀','😎','💯','🥹','💀','🤣','😍','😊','😭','😅','😬','🙃','😴','🤯',
+      '🤝','💪','🫶','🙌','😤','😈','😇','🤷','🤷‍♂️','🤷‍♀️','🤦','🤦‍♂️','🤦‍♀️','🤍','💙','💚','💛','💜',
+    ],
+    [QUICK_REACTIONS]
+  );
+
   const openInfo = React.useCallback((title: string, body: string) => {
     setInfoTitle(title);
     setInfoBody(body);
@@ -2657,6 +2772,117 @@ export default function ChatScreen({
       Alert.alert('Delete failed', e?.message ?? 'Failed to delete message');
     }
   }, [messageActionTarget, activeConversationId, closeMessageActions]);
+
+  const sendReaction = React.useCallback(
+    (target: ChatMessage, emoji: string) => {
+      if (!target) return;
+      if (!emoji) return;
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      const all = target.reactions || {};
+      let currentEmoji: string | null = null;
+      if (myUserId) {
+        for (const [e, info] of Object.entries(all)) {
+          if (info?.userSubs?.includes(myUserId)) {
+            currentEmoji = e;
+            break;
+          }
+        }
+      }
+      const alreadySame = !!currentEmoji && currentEmoji === emoji;
+      const op: 'add' | 'remove' = alreadySame ? 'remove' : 'add';
+
+      // Optimistic UI: toggle locally immediately (best-effort).
+      if (myUserId) {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.createdAt !== target.createdAt) return m;
+            const next = { ...(m.reactions || {}) };
+
+            // Remove my reaction from all emojis first (single-reaction model)
+            for (const [e, info] of Object.entries(next)) {
+              const subs = Array.isArray(info?.userSubs) ? info.userSubs : [];
+              const filtered = subs.filter((s) => s !== myUserId);
+              if (filtered.length === 0) delete next[e];
+              else next[e] = { count: filtered.length, userSubs: filtered };
+            }
+
+            if (op === 'add') {
+              const subs = next[emoji]?.userSubs ? [...next[emoji].userSubs] : [];
+              if (!subs.includes(myUserId)) subs.push(myUserId);
+              next[emoji] = { count: subs.length, userSubs: subs };
+            }
+
+            return { ...m, reactions: Object.keys(next).length ? next : undefined };
+          })
+        );
+      }
+      try {
+        wsRef.current.send(
+          JSON.stringify({
+            action: 'react',
+            conversationId: activeConversationId,
+            messageCreatedAt: target.createdAt,
+            emoji,
+            op,
+            createdAt: Date.now(),
+          })
+        );
+      } catch {
+        // ignore
+      }
+    },
+    [activeConversationId, myUserId]
+  );
+
+  const openReactionPicker = React.useCallback((target: ChatMessage) => {
+    setReactionPickerTarget(target);
+    setReactionPickerOpen(true);
+  }, []);
+
+  const closeReactionPicker = React.useCallback(() => {
+    setReactionPickerOpen(false);
+    setReactionPickerTarget(null);
+  }, []);
+
+  const openReactionInfo = React.useCallback(
+    async (emoji: string, subs: string[]) => {
+      setReactionInfoEmoji(emoji);
+      setReactionInfoSubs(subs);
+      setReactionInfoOpen(true);
+
+      // Best-effort: resolve names by sub when signed in.
+      if (!API_URL) return;
+      try {
+        const { tokens } = await fetchAuthSession().catch(() => ({ tokens: undefined }));
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const missing = subs.filter((s) => s && !nameBySub[s]);
+        if (!missing.length) return;
+        await Promise.all(
+          missing.slice(0, 25).map(async (sub) => {
+            try {
+              const res = await fetch(
+                `${API_URL.replace(/\/$/, '')}/users?sub=${encodeURIComponent(sub)}`,
+                { headers: { Authorization: `Bearer ${idToken}` } }
+              );
+              if (!res.ok) return;
+              const data = await res.json().catch(() => null);
+              const display =
+                (data && (data.displayName || data.preferred_username || data.username)) ? String(data.displayName || data.preferred_username || data.username) : '';
+              if (display) {
+                setNameBySub((prev) => ({ ...prev, [sub]: display }));
+              }
+            } catch {
+              // ignore
+            }
+          })
+        );
+      } catch {
+        // ignore
+      }
+    },
+    [API_URL, nameBySub]
+  );
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
     const dt = new Date(readAtSec * 1000);
@@ -2849,6 +3075,12 @@ export default function ChatScreen({
           const isDeleted = typeof item.deletedAt === 'number' && Number.isFinite(item.deletedAt);
           const displayText = isDeleted ? 'This message has been deleted' : captionText;
           const isEdited = !isDeleted && typeof item.editedAt === 'number' && Number.isFinite(item.editedAt);
+          const reactionEntries = item.reactions
+            ? Object.entries(item.reactions)
+                .map(([emoji, info]) => ({ emoji, count: info?.count ?? 0, userSubs: info?.userSubs ?? [] }))
+                .filter((r) => r.emoji && r.count > 0)
+                .sort((a, b) => b.count - a.count)
+            : [];
           const media = envelope?.media ?? item.media;
           const mediaUrl = media?.path ? mediaUrlByPath[media.path] : null;
           const mediaThumbUrl = media?.thumbPath ? mediaUrlByPath[media.thumbPath] : null;
@@ -3005,6 +3237,41 @@ export default function ChatScreen({
                                 </View>
                               </View>
                             </Pressable>
+                          ) : !isDm && (mediaLooksImage || mediaLooksVideo) ? (
+                            // If the thumbnail URL isn't resolved yet, show a compact loading placeholder
+                            // (instead of exposing the attachment link text).
+                            (() => {
+                              const keyPath = (media as any)?.thumbPath || (media as any)?.path;
+                              const isResolving =
+                                !storageSessionReady ||
+                                (keyPath && inFlightMediaUrlRef.current.has(String(keyPath)));
+                              if (!isResolving) return null;
+                              const textColor = isDark ? '#b7b7c2' : '#555';
+                              return (
+                                <Pressable
+                                  onPress={() => void openMedia(media.path)}
+                                  accessibilityRole="button"
+                                  accessibilityLabel="Open media"
+                                >
+                                  <View
+                                    style={[
+                                      styles.imageThumbWrap,
+                                      {
+                                        width: capped.w,
+                                        height: capped.h,
+                                        justifyContent: 'center',
+                                        alignItems: 'center',
+                                      },
+                                    ]}
+                                  >
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                      <Text style={{ color: textColor, fontWeight: '700', fontSize: 14 }}>Loading</Text>
+                                      <AnimatedDots color={textColor} size={16} />
+                                    </View>
+                                  </View>
+                                </Pressable>
+                              );
+                            })()
                           ) : isDm && mediaLooksImage ? (
                             <Pressable onPress={() => void openDmMediaViewer(item)}>
                               <View style={[styles.imageThumbWrap, { width: capped.w, height: capped.h }]}>
@@ -3023,6 +3290,44 @@ export default function ChatScreen({
                               </Text>
                             </Pressable>
                           )
+                        ) : null}
+
+                        {reactionEntries.length ? (
+                          <View
+                            style={[
+                              styles.reactionOverlay,
+                              isOutgoing ? styles.reactionOverlayOutgoing : styles.reactionOverlayIncoming,
+                            ]}
+                            pointerEvents="box-none"
+                          >
+                            {reactionEntries.slice(0, 3).map((r, idx) => {
+                              const mine = myUserId ? r.userSubs.includes(myUserId) : false;
+                              return (
+                                <Pressable
+                                  key={`ov:${item.id}:${r.emoji}`}
+                                  onPress={() => void openReactionInfo(r.emoji, r.userSubs)}
+                                  onLongPress={() => sendReaction(item, r.emoji)}
+                                  style={({ pressed }) => [
+                                    styles.reactionMiniChip,
+                                    isDark ? styles.reactionMiniChipDark : null,
+                                    mine ? (isDark ? styles.reactionMiniChipMineDark : styles.reactionMiniChipMine) : null,
+                                    idx ? styles.reactionMiniChipStacked : null,
+                                    pressed ? { opacity: 0.85 } : null,
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.reactionMiniText,
+                                      isDark ? styles.reactionMiniTextDark : null,
+                                    ]}
+                                  >
+                                    {r.emoji}
+                                    {r.count > 1 ? ` ${r.count}` : ''}
+                                  </Text>
+                                </Pressable>
+                              );
+                            })}
+                          </View>
                         ) : null}
                       </View>
 
@@ -3200,6 +3505,44 @@ export default function ChatScreen({
                           {seenLabel}
                         </Text>
                       ) : null}
+
+                      {reactionEntries.length ? (
+                        <View
+                          style={[
+                            styles.reactionOverlay,
+                            isOutgoing ? styles.reactionOverlayOutgoing : styles.reactionOverlayIncoming,
+                          ]}
+                          pointerEvents="box-none"
+                        >
+                          {reactionEntries.slice(0, 3).map((r, idx) => {
+                            const mine = myUserId ? r.userSubs.includes(myUserId) : false;
+                            return (
+                              <Pressable
+                                key={`ov:${item.id}:${r.emoji}`}
+                                onPress={() => void openReactionInfo(r.emoji, r.userSubs)}
+                                onLongPress={() => sendReaction(item, r.emoji)}
+                                style={({ pressed }) => [
+                                  styles.reactionMiniChip,
+                                  isDark ? styles.reactionMiniChipDark : null,
+                                  mine ? (isDark ? styles.reactionMiniChipMineDark : styles.reactionMiniChipMine) : null,
+                                  idx ? styles.reactionMiniChipStacked : null,
+                                  pressed ? { opacity: 0.85 } : null,
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.reactionMiniText,
+                                    isDark ? styles.reactionMiniTextDark : null,
+                                  ]}
+                                >
+                                  {r.emoji}
+                                  {r.count > 1 ? ` ${r.count}` : ''}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
                     </View>
                   )}
                 </View>
@@ -3268,7 +3611,14 @@ export default function ChatScreen({
             disabled={isUploading}
           >
             <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>
-              {isUploading ? 'Uploading…' : 'Send'}
+              {isUploading ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                  <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
+                  <AnimatedDots color="#fff" size={18} />
+                </View>
+              ) : (
+                'Send'
+              )}
             </Text>
           </Pressable>
         </View>
@@ -3363,6 +3713,60 @@ export default function ChatScreen({
             ) : null}
 
             <View style={styles.actionMenuOptions}>
+              {/* Reactions */}
+              {messageActionTarget && !messageActionTarget.deletedAt ? (
+                <View style={styles.reactionQuickRow}>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.reactionQuickScrollContent}
+                  >
+                    {QUICK_REACTIONS.map((emoji) => {
+                      const mine = myUserId
+                        ? (messageActionTarget.reactions?.[emoji]?.userSubs || []).includes(myUserId)
+                        : false;
+                      return (
+                        <Pressable
+                          key={`quick:${emoji}`}
+                          onPress={() => {
+                            sendReaction(messageActionTarget, emoji);
+                            closeMessageActions();
+                          }}
+                          style={({ pressed }) => [
+                            styles.reactionQuickBtn,
+                            isDark ? styles.reactionQuickBtnDark : null,
+                            mine ? (isDark ? styles.reactionQuickBtnMineDark : styles.reactionQuickBtnMine) : null,
+                            pressed ? { opacity: 0.85 } : null,
+                          ]}
+                          accessibilityRole="button"
+                          accessibilityLabel={`React ${emoji}`}
+                        >
+                          <Text style={styles.reactionQuickEmoji}>{emoji}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+
+                  <Pressable
+                    onPress={() => {
+                      openReactionPicker(messageActionTarget);
+                      closeMessageActions();
+                    }}
+                    style={({ pressed }) => [
+                      styles.reactionQuickMore,
+                      isDark ? styles.reactionQuickMoreDark : null,
+                      pressed ? { opacity: 0.85 } : null,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel="More reactions"
+                  >
+                    <Text style={[styles.reactionQuickMoreText, isDark ? styles.reactionQuickMoreTextDark : null]}>
+                      …
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
               {messageActionTarget?.encrypted ? (
                 <Pressable
                   onPress={() => {
@@ -3449,6 +3853,52 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={reactionPickerOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeReactionPicker} />
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              React
+            </Text>
+            <ScrollView style={styles.summaryScroll} contentContainerStyle={styles.reactionPickerGrid}>
+              {MORE_REACTIONS.map((emoji) => {
+                const target = reactionPickerTarget;
+                const mine = target && myUserId
+                  ? (target.reactions?.[emoji]?.userSubs || []).includes(myUserId)
+                  : false;
+                return (
+                  <Pressable
+                    key={`more:${emoji}`}
+                    onPress={() => {
+                      if (reactionPickerTarget) sendReaction(reactionPickerTarget, emoji);
+                      closeReactionPicker();
+                    }}
+                    style={({ pressed }) => [
+                      styles.reactionPickerBtn,
+                      isDark ? styles.reactionPickerBtnDark : null,
+                      mine ? (isDark ? styles.reactionPickerBtnMineDark : styles.reactionPickerBtnMine) : null,
+                      pressed ? { opacity: 0.85 } : null,
+                    ]}
+                  >
+                    <Text style={styles.reactionPickerEmoji}>{emoji}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={closeReactionPicker}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={cipherOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
@@ -3464,6 +3914,48 @@ export default function ChatScreen({
               <Pressable
                 style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
                 onPress={() => setCipherOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={reactionInfoOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              Reactions {reactionInfoEmoji ? `· ${reactionInfoEmoji}` : ''}
+            </Text>
+            <ScrollView style={styles.summaryScroll}>
+              {reactionInfoSubs.length ? (
+                reactionInfoSubs.map((sub) => {
+                  const label =
+                    myUserId && sub === myUserId
+                      ? 'You'
+                      : nameBySub[sub] || `${String(sub).slice(0, 6)}…${String(sub).slice(-4)}`;
+                  return (
+                    <Text
+                      key={sub}
+                      style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}
+                    >
+                      {label}
+                    </Text>
+                  );
+                })
+              ) : (
+                <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
+                  No reactions.
+                </Text>
+              )}
+            </ScrollView>
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setReactionInfoOpen(false)}
               >
                 <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
                   Close
@@ -3784,17 +4276,19 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
     overflow: 'hidden',
-    // For resizeMode="contain", this is the letterbox background (avoid theme-colored "borders").
-    backgroundColor: '#000',
+    // For resizeMode="contain", let the parent `mediaCard` provide the background.
+    // This avoids a visible dark seam between the header and the media in light mode.
+    backgroundColor: 'transparent',
   },
   mediaAutoImage: {
     width: '100%',
-    backgroundColor: '#000',
+    backgroundColor: 'transparent',
   },
   mediaCappedImage: {
     borderBottomLeftRadius: 16,
     borderBottomRightRadius: 16,
-    backgroundColor: '#000',
+    // Let the parent provide letterbox background.
+    backgroundColor: 'transparent',
   },
   mediaFrame: {
     marginTop: 8,
@@ -3807,7 +4301,7 @@ const styles = StyleSheet.create({
   mediaFill: {
     width: '100%',
     height: '100%',
-    backgroundColor: '#000',
+    backgroundColor: 'transparent',
   },
   mediaThumb: {
     width: '100%',
@@ -3940,6 +4434,7 @@ const styles = StyleSheet.create({
     borderColor: '#ddd',
     borderRadius: 8,
     backgroundColor: '#fff',
+    color: '#111',
   },
   inputDark: {
     backgroundColor: '#14141a',
@@ -4052,6 +4547,129 @@ const styles = StyleSheet.create({
   actionMenuCardDark: { backgroundColor: '#14141a' },
   actionMenuPreviewRow: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee' },
   actionMenuOptions: { paddingVertical: 6 },
+  reactionOverlay: {
+    position: 'absolute',
+    bottom: -12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  reactionOverlayIncoming: { left: 10 },
+  reactionOverlayOutgoing: { right: 10, flexDirection: 'row-reverse' },
+  reactionMiniChip: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  reactionMiniChipStacked: {
+    marginLeft: -10,
+  },
+  reactionMiniChipDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  reactionMiniChipMine: {
+    backgroundColor: 'rgba(25,118,210,0.12)',
+    borderColor: 'rgba(25,118,210,0.35)',
+  },
+  reactionMiniChipMineDark: {
+    backgroundColor: 'rgba(25,118,210,0.22)',
+    borderColor: 'rgba(25,118,210,0.45)',
+  },
+  reactionMiniText: { color: '#111', fontWeight: '800', fontSize: 12 },
+  reactionMiniTextDark: { color: '#fff' },
+
+  reactionQuickRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    paddingTop: 6,
+    gap: 10,
+  },
+  reactionQuickScrollContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingRight: 6,
+  },
+  reactionQuickBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+  },
+  reactionQuickBtnDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  reactionQuickBtnMine: {
+    backgroundColor: 'rgba(25,118,210,0.15)',
+    borderColor: 'rgba(25,118,210,0.35)',
+  },
+  reactionQuickBtnMineDark: {
+    backgroundColor: 'rgba(25,118,210,0.25)',
+    borderColor: 'rgba(25,118,210,0.45)',
+  },
+  reactionQuickEmoji: { fontSize: 18 },
+  reactionQuickMore: {
+    height: 38,
+    paddingHorizontal: 12,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+  },
+  reactionQuickMoreDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  reactionQuickMoreText: { color: '#111', fontWeight: '800' },
+  reactionQuickMoreTextDark: { color: '#fff' },
+  reactionPickerGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    paddingVertical: 10,
+  },
+  reactionPickerBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+  },
+  reactionPickerBtnDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  reactionPickerBtnMine: {
+    backgroundColor: 'rgba(25,118,210,0.15)',
+    borderColor: 'rgba(25,118,210,0.35)',
+  },
+  reactionPickerBtnMineDark: {
+    backgroundColor: 'rgba(25,118,210,0.25)',
+    borderColor: 'rgba(25,118,210,0.45)',
+  },
+  reactionPickerEmoji: { fontSize: 20 },
   actionMenuRow: { paddingHorizontal: 16, paddingVertical: 12 },
   actionMenuRowPressed: { opacity: 0.75 },
   actionMenuText: { fontSize: 16, color: '#111', fontWeight: '600' },
