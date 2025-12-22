@@ -2886,10 +2886,13 @@ export default function ChatScreen({
 
   const formatSeenLabel = React.useCallback((readAtSec: number): string => {
     const dt = new Date(readAtSec * 1000);
-    return `Seen · ${dt.toLocaleDateString()} · ${dt.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    })}`;
+    const now = new Date();
+    const isToday =
+      dt.getFullYear() === now.getFullYear() &&
+      dt.getMonth() === now.getMonth() &&
+      dt.getDate() === now.getDate();
+    const time = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return isToday ? `Seen · ${time}` : `Seen · ${dt.toLocaleDateString()} · ${time}`;
   }, []);
 
   const getSeenLabelFor = React.useCallback(
@@ -3044,11 +3047,14 @@ export default function ChatScreen({
           keyExtractor={(m) => m.id}
           inverted
           renderItem={({ item }) => {
-            const timestamp = new Date(item.createdAt); 
-            const formatted = `${timestamp.toLocaleDateString()} · ${timestamp.toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-            })}`;
+            const timestamp = new Date(item.createdAt);
+            const now = new Date();
+            const isToday =
+              timestamp.getFullYear() === now.getFullYear() &&
+              timestamp.getMonth() === now.getMonth() &&
+              timestamp.getDate() === now.getDate();
+            const time = timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const formatted = isToday ? time : `${timestamp.toLocaleDateString()} · ${time}`;
             const expiresIn =
               isDm && typeof item.expiresAt === 'number' ? item.expiresAt - nowSec : null;
 
@@ -3108,6 +3114,8 @@ export default function ChatScreen({
             thumbKeyPath && imageAspectByPath[thumbKeyPath] ? imageAspectByPath[thumbKeyPath] : undefined;
           const capped = getCappedMediaSize(thumbAspect);
           const hideMetaUntilDecrypted = !!item.encrypted && !item.decryptedText;
+          const canReact = !isDeleted && (!item.encrypted || !!item.decryptedText);
+          const reactionEntriesVisible = canReact ? reactionEntries : [];
           const metaPrefix =
             hideMetaUntilDecrypted || isOutgoing ? '' : `${item.user ?? 'anon'} · `;
           const metaLine = hideMetaUntilDecrypted
@@ -3292,7 +3300,7 @@ export default function ChatScreen({
                           )
                         ) : null}
 
-                        {reactionEntries.length ? (
+                        {reactionEntriesVisible.length ? (
                           <View
                             style={[
                               styles.reactionOverlay,
@@ -3300,13 +3308,14 @@ export default function ChatScreen({
                             ]}
                             pointerEvents="box-none"
                           >
-                            {reactionEntries.slice(0, 3).map((r, idx) => {
+                            {reactionEntriesVisible.slice(0, 3).map((r, idx) => {
                               const mine = myUserId ? r.userSubs.includes(myUserId) : false;
                               return (
                                 <Pressable
                                   key={`ov:${item.id}:${r.emoji}`}
                                   onPress={() => void openReactionInfo(r.emoji, r.userSubs)}
                                   onLongPress={() => sendReaction(item, r.emoji)}
+                                  disabled={!canReact}
                                   style={({ pressed }) => [
                                     styles.reactionMiniChip,
                                     isDark ? styles.reactionMiniChipDark : null,
@@ -3506,7 +3515,7 @@ export default function ChatScreen({
                         </Text>
                       ) : null}
 
-                      {reactionEntries.length ? (
+                      {reactionEntriesVisible.length ? (
                         <View
                           style={[
                             styles.reactionOverlay,
@@ -3514,13 +3523,14 @@ export default function ChatScreen({
                           ]}
                           pointerEvents="box-none"
                         >
-                          {reactionEntries.slice(0, 3).map((r, idx) => {
+                          {reactionEntriesVisible.slice(0, 3).map((r, idx) => {
                             const mine = myUserId ? r.userSubs.includes(myUserId) : false;
                             return (
                               <Pressable
                                 key={`ov:${item.id}:${r.emoji}`}
                                 onPress={() => void openReactionInfo(r.emoji, r.userSubs)}
                                 onLongPress={() => sendReaction(item, r.emoji)}
+                                disabled={!canReact}
                                 style={({ pressed }) => [
                                   styles.reactionMiniChip,
                                   isDark ? styles.reactionMiniChipDark : null,
@@ -3699,7 +3709,7 @@ export default function ChatScreen({
           >
             {/* Message preview (Signal-style) */}
             {messageActionTarget ? (
-              <View style={styles.actionMenuPreviewRow}>
+              <View style={[styles.actionMenuPreviewRow, isDark ? styles.actionMenuPreviewRowDark : null]}>
                 <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
                   <Text style={[styles.messageText, styles.messageTextOutgoing]}>
                     {messageActionTarget.deletedAt
@@ -3714,7 +3724,9 @@ export default function ChatScreen({
 
             <View style={styles.actionMenuOptions}>
               {/* Reactions */}
-              {messageActionTarget && !messageActionTarget.deletedAt ? (
+              {messageActionTarget &&
+              !messageActionTarget.deletedAt &&
+              (!messageActionTarget.encrypted || !!messageActionTarget.decryptedText) ? (
                 <View style={styles.reactionQuickRow}>
                   <ScrollView
                     horizontal
@@ -4546,6 +4558,7 @@ const styles = StyleSheet.create({
   },
   actionMenuCardDark: { backgroundColor: '#14141a' },
   actionMenuPreviewRow: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  actionMenuPreviewRowDark: { borderBottomColor: '#2a2a33' },
   actionMenuOptions: { paddingVertical: 6 },
   reactionOverlay: {
     position: 'absolute',

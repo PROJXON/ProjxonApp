@@ -15,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { API_URL } from '../config/env';
 import { getUrl } from 'aws-amplify/storage';
 
@@ -40,6 +41,20 @@ type ChatEnvelope = {
   text?: string;
   media?: GuestMessage['media'];
 };
+
+function formatGuestTimestamp(ms: number): string {
+  const t = Number(ms);
+  if (!Number.isFinite(t) || t <= 0) return '';
+  const d = new Date(t);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const now = new Date();
+  const isToday =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (isToday) return time;
+  return `${d.toLocaleDateString()} ${time}`;
+}
 
 function normalizeGuestReactions(raw: any): Record<string, { count: number; userSubs: string[] }> | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -240,7 +255,7 @@ export default function GuestGlobalScreen({
   }, [fetchNow]);
 
   return (
-    <View style={[styles.container, isDark && styles.containerDark]}>
+    <SafeAreaView style={[styles.container, isDark && styles.containerDark]} edges={['top', 'bottom']}>
       <View style={styles.headerRow}>
         <Text style={[styles.headerTitle, isDark && styles.headerTitleDark]}>Global</Text>
         <View style={styles.headerRight}>
@@ -306,21 +321,24 @@ export default function GuestGlobalScreen({
         )}
       />
 
-      <Pressable
-        onPress={onSignIn}
-        style={({ pressed }) => [
-          styles.bottomCta,
-          isDark && styles.bottomCtaDark,
-          pressed && { opacity: 0.9 },
-        ]}
-        accessibilityRole="button"
-        accessibilityLabel="Sign in to post"
-      >
-        <Text style={[styles.bottomCtaText, isDark && styles.bottomCtaTextDark]}>
-          Sign in to post
-        </Text>
-      </Pressable>
-    </View>
+      {/* Bottom bar CTA (like the chat input row), so messages never render behind it */}
+      <View style={[styles.bottomBar, isDark && styles.bottomBarDark]}>
+        <Pressable
+          onPress={onSignIn}
+          style={({ pressed }) => [
+            styles.bottomBarCta,
+            isDark && styles.bottomBarCtaDark,
+            pressed && { opacity: 0.9 },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="Sign in to chat"
+        >
+          <Text style={[styles.bottomBarCtaText, isDark && styles.bottomBarCtaTextDark]}>
+            Sign in to Chat
+          </Text>
+        </Pressable>
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -378,6 +396,7 @@ function GuestMessageRow({
   }, [item.media?.path, resolvePathUrl]);
 
   const hasMedia = !!item.media?.path;
+  const ts = formatGuestTimestamp(item.createdAt);
 
   const onThumbError = React.useCallback(async () => {
     // Common cases:
@@ -414,7 +433,16 @@ function GuestMessageRow({
   return (
     <View style={[styles.msgRow]}>
       <View style={[styles.bubble, isDark && styles.bubbleDark]}>
-        <Text style={[styles.userText, isDark && styles.userTextDark]}>{item.user}</Text>
+        <View style={styles.userRow}>
+          <Text style={[styles.userText, isDark && styles.userTextDark]} numberOfLines={1}>
+            {item.user}
+          </Text>
+          {ts ? (
+            <Text style={[styles.timeText, isDark && styles.timeTextDark]} numberOfLines={1}>
+              {ts}
+            </Text>
+          ) : null}
+        </View>
         {item.text?.trim() ? (
           <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
         ) : null}
@@ -578,7 +606,9 @@ const styles = StyleSheet.create({
   },
   listContent: {
     paddingHorizontal: 12,
-    paddingBottom: 80,
+    // Inverted list: include symmetric padding so the newest message doesn't hug the bottom bar.
+    paddingTop: 12,
+    paddingBottom: 12,
   },
   msgRow: {
     paddingVertical: 4,
@@ -621,7 +651,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     color: '#444',
+  },
+  userRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: 10,
     marginBottom: 4,
+  },
+  timeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#777',
+  },
+  timeTextDark: {
+    color: '#a7a7b4',
   },
   userTextDark: {
     color: '#d7d7e0',
@@ -689,26 +733,34 @@ const styles = StyleSheet.create({
   guestMediaFileTextDark: {
     color: '#fff',
   },
-  bottomCta: {
-    position: 'absolute',
-    left: 12,
-    right: 12,
-    bottom: 12,
+  bottomBar: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#e3e3e3',
+    backgroundColor: '#f2f2f7',
+  },
+  bottomBarDark: {
+    backgroundColor: '#1c1c22',
+    borderTopColor: '#2a2a33',
+  },
+  bottomBarCta: {
     height: 48,
     borderRadius: 12,
     backgroundColor: '#111',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  bottomCtaDark: {
+  bottomBarCtaDark: {
     backgroundColor: '#2a2a33',
   },
-  bottomCtaText: {
+  bottomBarCtaText: {
     color: '#fff',
     fontWeight: '800',
     fontSize: 15,
   },
-  bottomCtaTextDark: {
+  bottomBarCtaTextDark: {
     color: '#fff',
   },
 });
