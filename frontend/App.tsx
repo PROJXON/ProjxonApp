@@ -11,6 +11,9 @@ import {
   Modal,
   Alert,
   Switch,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import ChatScreen from './src/screens/ChatScreen';
@@ -18,7 +21,22 @@ import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { Amplify } from "aws-amplify";
-import { Authenticator, useAuthenticator } from "@aws-amplify/ui-react-native";
+import {
+  Authenticator,
+  ThemeProvider,
+  useAuthenticator,
+} from "@aws-amplify/ui-react-native";
+// IMPORTANT: use the React-Native entrypoint (`src/*`) so these primitives share the same ThemeContext
+// as our `ThemeProvider` and Authenticator defaults. Importing from `dist/*` creates a separate context,
+// causing mismatched colors/borders (especially in dark mode).
+import { icons } from '@aws-amplify/ui-react-native/src/assets';
+import { IconButton, PhoneNumberField, TextField } from '@aws-amplify/ui-react-native/src/primitives';
+import { authenticatorTextUtil, getErrors } from '@aws-amplify/ui';
+import {
+  DefaultContent,
+  FederatedProviderButtons,
+} from '@aws-amplify/ui-react-native/src/Authenticator/common';
+import { useFieldValues } from '@aws-amplify/ui-react-native/src/Authenticator/hooks';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { API_URL } from './src/config/env';
@@ -668,7 +686,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         </View>
       )}
 
-      {searchError ? <Text style={styles.errorText}>{searchError}</Text> : null}
+      {searchError ? (
+        <Text style={[styles.errorText, isDark && styles.errorTextDark]}>{searchError}</Text>
+      ) : null}
     </>
   );
 
@@ -742,9 +762,285 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   );
 };
 
+const AuthModalGate = ({
+  onAuthed,
+}: {
+  onAuthed: () => void;
+}): React.JSX.Element => {
+  const { user } = useAuthenticator();
+
+  React.useEffect(() => {
+    if (user) onAuthed();
+  }, [user, onAuthed]);
+
+  // While unauthenticated, the Authenticator will render its own UI.
+  // When authenticated, this component renders nothing and the parent closes the modal.
+  return <View />;
+};
+
+function injectCaretColors(
+  fields: Array<any>,
+  caret: { selectionColor: string; cursorColor?: string }
+): Array<any> {
+  return (Array.isArray(fields) ? fields : []).map((f) => ({
+    ...f,
+    selectionColor: caret.selectionColor,
+    cursorColor: caret.cursorColor,
+  }));
+}
+
+// iOS workaround: multiple secureTextEntry inputs can glitch unless we insert a hidden TextInput
+// after each secure input.
+const HIDDEN_INPUT_PROPS = {
+  accessibilityElementsHidden: true,
+  pointerEvents: 'none' as const,
+  style: { backgroundColor: 'transparent', height: 0.1, width: 0.1 },
+};
+
+const LinkedConfirmResetPasswordFormFields = ({
+  isDark,
+  caret,
+  fieldContainerStyle,
+  fieldErrorsContainer,
+  fieldErrorStyle,
+  fieldStyle,
+  fields,
+  isPending = false,
+  style,
+  validationErrors,
+}: any & {
+  isDark: boolean;
+  caret: { selectionColor: string; cursorColor?: string };
+}): React.JSX.Element => {
+  const [showPassword, setShowPassword] = React.useState(false);
+
+  const formFields = (fields ?? []).map(({ name, type, ...field }: any) => {
+    const errors = validationErrors ? getErrors(validationErrors?.[name]) : [];
+    const hasError = errors?.length > 0;
+    const isPassword = type === 'password';
+
+    const FieldComp =
+      isPassword ? TextField : type === 'phone' ? PhoneNumberField : TextField;
+
+    const endAccessory = isPassword ? (
+      <IconButton
+        accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+        disabled={isPending}
+        // If `color` is undefined, Amplify's Icon uses `tintColor: undefined`,
+        // which can make the PNG invisible on dark backgrounds.
+        color={isDark ? '#d7d7e0' : '#666'}
+        size={16}
+        source={showPassword ? icons.visibilityOff : icons.visibilityOn}
+        onPress={() => setShowPassword((v) => !v)}
+      />
+    ) : undefined;
+
+    return (
+      <React.Fragment key={name}>
+        <FieldComp
+          {...field}
+          disabled={isPending}
+          error={hasError}
+          fieldStyle={fieldStyle}
+          style={fieldContainerStyle}
+          selectionColor={caret.selectionColor}
+          cursorColor={caret.cursorColor}
+          secureTextEntry={isPassword ? !showPassword : undefined}
+          endAccessory={endAccessory}
+        />
+        {Platform.OS === 'ios' && isPassword ? <TextInput {...HIDDEN_INPUT_PROPS} /> : null}
+        {errors?.length ? (
+          <View style={fieldErrorsContainer}>
+            {errors.map((e: string) => (
+              <Text key={`${name}:${e}`} style={fieldErrorStyle}>
+                {e}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+      </React.Fragment>
+    );
+  });
+
+  return <View style={style}>{formFields}</View>;
+};
+
+const LinkedSignUpFormFields = ({
+  isDark,
+  caret,
+  fieldContainerStyle,
+  fieldErrorsContainer,
+  fieldErrorStyle,
+  fieldStyle,
+  fields,
+  isPending = false,
+  style,
+  validationErrors,
+}: any & {
+  isDark: boolean;
+  caret: { selectionColor: string; cursorColor?: string };
+}): React.JSX.Element => {
+  const [showPassword, setShowPassword] = React.useState(false);
+
+  const formFields = (fields ?? []).map(({ name, type, ...field }: any) => {
+    const errors = validationErrors ? getErrors(validationErrors?.[name]) : [];
+    const hasError = errors?.length > 0;
+    const isPassword = type === 'password';
+
+    const FieldComp = type === 'phone' ? PhoneNumberField : TextField;
+
+    const endAccessory = isPassword ? (
+      <IconButton
+        accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
+        disabled={isPending}
+        color={isDark ? '#d7d7e0' : '#666'}
+        size={16}
+        source={showPassword ? icons.visibilityOff : icons.visibilityOn}
+        onPress={() => setShowPassword((v) => !v)}
+      />
+    ) : undefined;
+
+    return (
+      <React.Fragment key={name}>
+        <FieldComp
+          {...field}
+          disabled={isPending}
+          error={hasError}
+          fieldStyle={fieldStyle}
+          style={fieldContainerStyle}
+          selectionColor={caret.selectionColor}
+          cursorColor={caret.cursorColor}
+          secureTextEntry={isPassword ? !showPassword : undefined}
+          endAccessory={endAccessory}
+        />
+        {Platform.OS === 'ios' && isPassword ? <TextInput {...HIDDEN_INPUT_PROPS} /> : null}
+        {errors?.length ? (
+          <View style={fieldErrorsContainer}>
+            {errors.map((e: string) => (
+              <Text key={`${name}:${e}`} style={fieldErrorStyle}>
+                {e}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+      </React.Fragment>
+    );
+  });
+
+  return <View style={style}>{formFields}</View>;
+};
+
+const CustomSignUp = ({
+  fields,
+  handleBlur,
+  handleChange,
+  handleSubmit,
+  hasValidationErrors,
+  hideSignIn,
+  isPending,
+  socialProviders,
+  toFederatedSignIn,
+  toSignIn,
+  validationErrors,
+  Footer,
+  Header,
+  FormFields,
+  ...rest
+}: any): React.JSX.Element => {
+  const {
+    getCreateAccountText,
+    getCreatingAccountText,
+    getBackToSignInText,
+    getSignUpTabText,
+  } = authenticatorTextUtil;
+
+  const {
+    disableFormSubmit,
+    fields: fieldsWithHandlers,
+    fieldValidationErrors,
+    handleFormSubmit,
+  } = useFieldValues({
+    componentName: 'SignUp',
+    fields,
+    handleBlur,
+    handleChange,
+    handleSubmit,
+    validationErrors,
+  });
+
+  const disabled = hasValidationErrors || disableFormSubmit;
+  const headerText = getSignUpTabText();
+  const primaryButtonText = isPending ? getCreatingAccountText() : getCreateAccountText();
+  const secondaryButtonText = getBackToSignInText();
+
+  const body = socialProviders ? (
+    <FederatedProviderButtons
+      route="signUp"
+      socialProviders={socialProviders}
+      toFederatedSignIn={toFederatedSignIn}
+    />
+  ) : null;
+
+  const buttons = React.useMemo(
+    () => ({
+      primary: {
+        children: primaryButtonText,
+        disabled,
+        onPress: handleFormSubmit,
+      },
+      links: hideSignIn ? undefined : [{ children: secondaryButtonText, onPress: toSignIn }],
+    }),
+    [disabled, handleFormSubmit, hideSignIn, primaryButtonText, secondaryButtonText, toSignIn]
+  );
+
+  return (
+    <DefaultContent
+      body={body}
+      buttons={buttons}
+      error={rest?.error}
+      fields={fieldsWithHandlers}
+      Footer={Footer}
+      FormFields={FormFields}
+      Header={Header}
+      headerText={headerText}
+      isPending={isPending}
+      validationErrors={fieldValidationErrors}
+    />
+  );
+};
+
+const ConfirmResetPasswordWithBackToSignIn = ({
+  isDark,
+  ...props
+}: any & { isDark: boolean }): React.JSX.Element => {
+  const { toSignIn } = useAuthenticator();
+  return (
+    <View>
+      <Authenticator.ConfirmResetPassword {...props} />
+      <Pressable
+        onPress={() => toSignIn()}
+        style={({ pressed }) => [styles.authBackLinkBtn, pressed && { opacity: 0.85 }]}
+        accessibilityRole="button"
+        accessibilityLabel="Back to sign in"
+      >
+        <Text style={[styles.authBackLinkText, isDark ? styles.authBackLinkTextDark : null]}>
+          Back to sign in
+        </Text>
+      </Pressable>
+    </View>
+  );
+};
+
 export default function App(): React.JSX.Element {
   const [booting, setBooting] = React.useState<boolean>(true);
-  const [rootMode, setRootMode] = React.useState<'guest' | 'auth'>('guest');
+  const [rootMode, setRootMode] = React.useState<'guest' | 'app'>('guest');
+  const [authModalOpen, setAuthModalOpen] = React.useState<boolean>(false);
+  const [uiTheme, setUiTheme] = React.useState<'light' | 'dark'>('light');
+  const isDark = uiTheme === 'dark';
+
+  // (Removed) We previously tried setting global TextInput defaultProps for caret color,
+  // but on Android it can be ignored/overridden. We now inject caret colors directly into
+  // Amplify Authenticator fields via `components` overrides.
 
   React.useEffect(() => {
     let mounted = true;
@@ -752,7 +1048,7 @@ export default function App(): React.JSX.Element {
       try {
         const sess = await fetchAuthSession().catch(() => ({ tokens: undefined }));
         const hasToken = !!sess?.tokens?.idToken?.toString();
-        if (mounted) setRootMode(hasToken ? 'auth' : 'guest');
+        if (mounted) setRootMode(hasToken ? 'app' : 'guest');
       } finally {
         if (mounted) setBooting(false);
       }
@@ -761,6 +1057,220 @@ export default function App(): React.JSX.Element {
       mounted = false;
     };
   }, []);
+
+  // Read the stored theme so the auth modal matches the rest of the app.
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem('ui:theme');
+        if (!mounted) return;
+        if (stored === 'dark' || stored === 'light') setUiTheme(stored);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Re-read theme when opening the auth modal in case the user toggled it on the guest screen.
+  React.useEffect(() => {
+    if (!authModalOpen) return;
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem('ui:theme');
+        if (stored === 'dark' || stored === 'light') setUiTheme(stored);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [authModalOpen]);
+
+  const amplifyTheme = React.useMemo(
+    () => ({
+      // Light defaults (match app)
+      tokens: {
+        colors: {
+          background: {
+            primary: '#ffffff',
+            secondary: '#f2f2f7',
+            tertiary: '#ffffff',
+          },
+          border: {
+            primary: '#e3e3e3',
+            secondary: '#ddd',
+          },
+          font: {
+            primary: '#111',
+            secondary: '#444',
+            tertiary: '#666',
+            interactive: '#111',
+            error: '#b00020',
+          },
+          // Kill the teal/blue brand colors for this app; keep it neutral.
+          primary: {
+            10: '#f2f2f7',
+            20: '#e3e3e3',
+            40: '#c7c7cc',
+            60: '#8e8e93',
+            80: '#2a2a33',
+            90: '#111',
+            100: '#000',
+          },
+        },
+      },
+      // Dark mode override tokens to ensure the authenticator background never goes "bluish".
+      overrides: [
+        {
+          colorMode: 'dark' as const,
+          tokens: {
+            colors: {
+              background: {
+                primary: '#14141a',
+                secondary: '#1c1c22',
+                tertiary: '#14141a',
+                // Used by the `ErrorMessage` primitive container.
+                error: '#2a1a1a',
+              },
+              border: {
+                primary: '#2a2a33',
+                secondary: '#2a2a33',
+              },
+              font: {
+                primary: '#ffffff',
+                secondary: '#d7d7e0',
+                tertiary: '#a7a7b4',
+                interactive: '#ffffff',
+                // Validation errors ("Please enter a valid email", etc).
+                // This is the main fix for readability on dark backgrounds.
+                error: '#ff6b6b',
+              },
+              primary: {
+                10: '#2a2a33',
+                20: '#2a2a33',
+                40: '#444',
+                60: '#666',
+                80: '#d7d7e0',
+                90: '#ffffff',
+                100: '#ffffff',
+              },
+            },
+          },
+        },
+      ],
+      components: {
+        button: () => ({
+          container: {
+            borderRadius: 12,
+            height: 44,
+            alignItems: 'center' as const,
+            justifyContent: 'center' as const,
+          },
+          containerPrimary: {
+            backgroundColor: isDark ? '#2a2a33' : '#111',
+            borderWidth: 0,
+          },
+          containerDefault: {
+            backgroundColor: isDark ? '#1c1c22' : '#fff',
+            borderWidth: 1,
+            borderColor: isDark ? '#2a2a33' : '#e3e3e3',
+          },
+          pressed: { opacity: 0.9 },
+          text: { fontWeight: '800' as const, fontSize: 15 },
+          textPrimary: { color: '#fff' },
+          textDefault: { color: isDark ? '#fff' : '#111' },
+          containerLink: { backgroundColor: 'transparent' },
+          textLink: { color: isDark ? '#fff' : '#111', fontWeight: '800' as const },
+        }),
+        textField: () => ({
+          label: { color: isDark ? '#d7d7e0' : '#444', fontWeight: '700' as const },
+          fieldContainer: {
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: isDark ? '#2a2a33' : '#e3e3e3',
+            backgroundColor: isDark ? '#1c1c22' : '#fff',
+            paddingHorizontal: 12,
+          },
+          field: {
+            color: isDark ? '#fff' : '#111',
+            paddingVertical: 12,
+          },
+        }),
+        errorMessage: () => ({
+          label: {
+            // Higher-contrast error color for dark backgrounds.
+            color: isDark ? '#ff6b6b' : '#b00020',
+            fontWeight: '700' as const,
+          },
+        }),
+      },
+    }),
+    [isDark]
+  );
+
+  const caretProps = React.useMemo(
+    () => ({
+      selectionColor: isDark ? '#ffffff' : '#111',
+      cursorColor: isDark ? '#ffffff' : '#111',
+    }),
+    [isDark]
+  );
+
+  const confirmResetFormFields = React.useCallback(
+    (ffProps: any) => (
+      <LinkedConfirmResetPasswordFormFields {...ffProps} isDark={isDark} caret={caretProps} />
+    ),
+    [isDark, caretProps]
+  );
+
+  const signUpFormFields = React.useCallback(
+    (ffProps: any) => <LinkedSignUpFormFields {...ffProps} isDark={isDark} caret={caretProps} />,
+    [isDark, caretProps]
+  );
+
+  const authComponents = React.useMemo(
+    () => ({
+      SignIn: (props: any) => (
+        <Authenticator.SignIn {...props} fields={injectCaretColors(props?.fields, caretProps)} />
+      ),
+      SignUp: (props: any) => (
+        <CustomSignUp
+          {...props}
+          fields={injectCaretColors(props?.fields, caretProps)}
+          FormFields={signUpFormFields}
+        />
+      ),
+      ForgotPassword: (props: any) => (
+        <Authenticator.ForgotPassword
+          {...props}
+          fields={injectCaretColors(props?.fields, caretProps)}
+        />
+      ),
+      ConfirmResetPassword: (props: any) => (
+        <ConfirmResetPasswordWithBackToSignIn
+          {...props}
+          isDark={isDark}
+          fields={injectCaretColors(props?.fields, caretProps)}
+          FormFields={confirmResetFormFields}
+        />
+      ),
+      ConfirmSignUp: (props: any) => (
+        <Authenticator.ConfirmSignUp
+          {...props}
+          fields={injectCaretColors(props?.fields, caretProps)}
+        />
+      ),
+      ConfirmSignIn: (props: any) => (
+        <Authenticator.ConfirmSignIn
+          {...props}
+          fields={injectCaretColors(props?.fields, caretProps)}
+        />
+      ),
+    }),
+    [caretProps, confirmResetFormFields, signUpFormFields, isDark]
+  );
 
   return (
     <SafeAreaProvider>
@@ -771,14 +1281,77 @@ export default function App(): React.JSX.Element {
               <ActivityIndicator />
             </View>
           ) : rootMode === 'guest' ? (
-            <GuestGlobalScreen onSignIn={() => setRootMode('auth')} />
+            <>
+              <GuestGlobalScreen onSignIn={() => setAuthModalOpen(true)} />
+
+              <Modal
+                visible={authModalOpen}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setAuthModalOpen(false)}
+              >
+                <View style={styles.authModalOverlay}>
+                  <KeyboardAvoidingView
+                    behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                    style={styles.authModalOverlayInner}
+                  >
+                    <View style={[styles.authModalSheet, isDark && styles.authModalSheetDark]}>
+                      <View style={[styles.authModalTopRow, isDark && styles.authModalTopRowDark]}>
+                        <View style={{ width: 44 }} />
+                        <Text style={[styles.authModalTitle, isDark && styles.authModalTitleDark]}>
+                          Sign in
+                        </Text>
+                        <Pressable
+                          onPress={() => setAuthModalOpen(false)}
+                          style={({ pressed }) => [
+                            styles.authModalCloseCircle,
+                            isDark && styles.authModalCloseCircleDark,
+                            pressed && { opacity: 0.85 },
+                          ]}
+                          accessibilityRole="button"
+                          accessibilityLabel="Close sign in"
+                        >
+                          <Text style={[styles.authModalCloseX, isDark && styles.authModalCloseXDark]}>
+                            ×
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <ThemeProvider theme={amplifyTheme} colorMode={isDark ? 'dark' : 'light'}>
+                        <ScrollView
+                          style={styles.authModalBody}
+                          contentContainerStyle={styles.authModalBodyContent}
+                          keyboardShouldPersistTaps="handled"
+                        >
+                          <Authenticator
+                            loginMechanisms={['email']}
+                            signUpAttributes={['preferred_username']}
+                            components={authComponents}
+                          >
+                            <AuthModalGate
+                              onAuthed={() => {
+                                setAuthModalOpen(false);
+                                setRootMode('app');
+                              }}
+                            />
+                          </Authenticator>
+                        </ScrollView>
+                      </ThemeProvider>
+                    </View>
+                  </KeyboardAvoidingView>
+                </View>
+              </Modal>
+            </>
           ) : (
-            <Authenticator
-              loginMechanisms={['email']}
-              signUpAttributes={['preferred_username']}
-            >
-              <MainAppContent onSignedOut={() => setRootMode('guest')} />
-            </Authenticator>
+            <ThemeProvider theme={amplifyTheme} colorMode={isDark ? 'dark' : 'light'}>
+              <Authenticator
+                loginMechanisms={['email']}
+                signUpAttributes={['preferred_username']}
+                components={authComponents}
+              >
+                <MainAppContent onSignedOut={() => setRootMode('guest')} />
+              </Authenticator>
+            </ThemeProvider>
           )}
         </Authenticator.Provider>
 
@@ -796,6 +1369,96 @@ const styles = StyleSheet.create({
   },
   appSafe: {
     backgroundColor: '#fff',
+  },
+  authModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    padding: 12,
+    justifyContent: 'center',
+  },
+  authModalOverlayInner: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  authModalSheet: {
+    width: '100%',
+    maxWidth: 520,
+    alignSelf: 'center',
+    // Keep it feeling like a popup, not a full screen.
+    // ScrollView inside will handle overflow on small screens.
+    maxHeight: 640,
+    minHeight: 360,
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    overflow: 'hidden',
+  },
+  authModalSheetDark: {
+    backgroundColor: '#14141a',
+  },
+  authModalTopRow: {
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  authModalTopRowDark: {
+    backgroundColor: '#14141a',
+  },
+  authModalBody: {
+    paddingHorizontal: 12,
+  },
+  authModalBodyContent: {
+    paddingBottom: 18,
+  },
+  authModalCloseCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f2f2f7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+  },
+  authModalCloseCircleDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  authModalCloseX: {
+    fontSize: 22,
+    lineHeight: 22,
+    fontWeight: '900',
+    color: '#111',
+    marginTop: -1,
+  },
+  authModalCloseXDark: {
+    color: '#fff',
+  },
+  authModalTitle: {
+    fontWeight: '900',
+    fontSize: 16,
+    color: '#111',
+  },
+  authModalTitleDark: {
+    color: '#fff',
+  },
+  authBackLinkBtn: {
+    alignSelf: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 4,
+    marginTop: 6,
+  },
+  authBackLinkText: {
+    fontWeight: '800',
+    color: '#111',
+    textDecorationLine: 'none',
+  },
+  authBackLinkTextDark: {
+    color: '#fff',
   },
   topRow: {
     flexDirection: 'row',
@@ -856,7 +1519,7 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#d32f2f',
+    backgroundColor: '#1976d2',
   },
   signOutPill: {
     paddingHorizontal: 12,
@@ -992,8 +1655,11 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   errorText: {
-    color: '#d32f2f',
+    color: '#b00020',
     marginBottom: 8,
+  },
+  errorTextDark: {
+    color: '#ff6b6b',
   },
   appContent: {
     flex: 1,
