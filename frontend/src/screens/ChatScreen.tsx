@@ -2507,6 +2507,12 @@ export default function ChatScreen({
     return `${users.slice(0, -1).join(', ')}, and ${users[users.length - 1]} are typing`;
   }, [typingByUserExpiresAt]);
 
+  const openInfo = React.useCallback((title: string, body: string) => {
+    setInfoTitle(title);
+    setInfoBody(body);
+    setInfoOpen(true);
+  }, []);
+
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
       if (msg.deletedAt) return;
@@ -2549,10 +2555,16 @@ export default function ChatScreen({
         if (!isFromMe) sendReadReceipt(msg.createdAt);
       if (!isFromMe) markMySeen(msg.createdAt, readAt);
       } catch (e: any) {
-        Alert.alert('Cannot decrypt', e?.message ?? 'Failed to decrypt message');
+        const rawMsg = typeof e?.message === 'string' ? e.message : '';
+        const lower = rawMsg.toLowerCase();
+        const hint =
+          lower.includes('ghash') || lower.includes('tag') || lower.includes('aes')
+            ? "This message can't be decrypted on this device. It may have been encrypted with a different key, or the message is corrupted."
+            : "This message can't be decrypted right now. Please try again later.";
+        openInfo("Couldn't decrypt message", hint);
       }
     },
-    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm, markMySeen]
+    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm, markMySeen, openInfo]
   );
 
   const openMessageActions = React.useCallback(
@@ -2588,12 +2600,6 @@ export default function ChatScreen({
     ],
     [QUICK_REACTIONS]
   );
-
-  const openInfo = React.useCallback((title: string, body: string) => {
-    setInfoTitle(title);
-    setInfoBody(body);
-    setInfoOpen(true);
-  }, []);
 
   const beginInlineEdit = React.useCallback(
     (target: ChatMessage) => {
