@@ -454,6 +454,7 @@ function GuestMessageRow({
 
   const hasMedia = !!item.media?.path;
   const ts = formatGuestTimestamp(item.createdAt);
+  const metaLine = `${item.user}${ts ? ` · ${ts}` : ''}`;
 
   const onThumbError = React.useCallback(async () => {
     // Common cases:
@@ -489,98 +490,142 @@ function GuestMessageRow({
 
   return (
     <View style={[styles.msgRow]}>
-      <View style={[styles.bubble, isDark && styles.bubbleDark]}>
-        <View style={styles.userRow}>
-          <Text style={[styles.userText, isDark && styles.userTextDark]} numberOfLines={1}>
-            {item.user}
-          </Text>
-          {ts ? (
-            <Text style={[styles.timeText, isDark && styles.timeTextDark]} numberOfLines={1}>
-              {ts}
-            </Text>
-          ) : null}
-        </View>
-        {item.text?.trim() ? (
-          <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
-        ) : null}
-
-        {hasMedia ? (
-          <Pressable
-            onPress={() => void openMedia()}
-            style={({ pressed }) => [{ marginTop: item.text?.trim() ? 10 : 6, opacity: pressed ? 0.92 : 1 }]}
-            accessibilityRole="button"
-            accessibilityLabel="Open media"
+      {hasMedia ? (
+        <View style={{ alignSelf: 'flex-start' }}>
+          <View
+            style={[
+              styles.guestMediaCard,
+              isDark ? styles.guestMediaCardDark : null,
+              { width: capped.w },
+            ]}
           >
-            {item.media?.kind === 'image' && thumbUrl ? (
-              <Image
-                source={{ uri: thumbUrl }}
-                style={[
-                  styles.guestMediaImage,
-                  { width: capped.w, height: capped.h },
-                  isDark && styles.guestMediaImageDark,
-                ]}
-                // Match ChatScreen: no crop, preserve aspect.
-                resizeMode="contain"
-                onError={() => void onThumbError()}
-              />
-            ) : item.media?.kind === 'video' && thumbUrl ? (
-              <View style={[styles.guestMediaVideoWrap, isDark && styles.guestMediaVideoWrapDark]}>
+            <View style={[styles.guestMediaHeader, isDark ? styles.guestMediaHeaderDark : null]}>
+              <Text style={[styles.guestMediaMeta, isDark ? styles.guestMediaMetaDark : null]} numberOfLines={1}>
+                {metaLine}
+              </Text>
+              {item.text?.trim() ? (
+                <Text style={[styles.guestMediaCaption, isDark ? styles.guestMediaCaptionDark : null]}>
+                  {item.text}
+                </Text>
+              ) : null}
+            </View>
+
+            <Pressable
+              onPress={() => void openMedia()}
+              style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
+              accessibilityRole="button"
+              accessibilityLabel="Open media"
+            >
+              {item.media?.kind === 'image' && thumbUrl ? (
                 <Image
                   source={{ uri: thumbUrl }}
-                  style={[
-                    styles.guestMediaImage,
-                    { width: capped.w, height: capped.h },
-                    isDark && styles.guestMediaImageDark,
-                  ]}
-                  resizeMode="cover"
+                  style={{ width: capped.w, height: capped.h }}
+                  resizeMode="contain"
                   onError={() => void onThumbError()}
                 />
-                <View style={[styles.guestMediaPlayBadge, isDark && styles.guestMediaPlayBadgeDark]}>
-                  <Text style={[styles.guestMediaPlayText, isDark && styles.guestMediaPlayTextDark]}>Play</Text>
+              ) : item.media?.kind === 'video' && thumbUrl ? (
+                <View style={{ width: capped.w, height: capped.h }}>
+                  <Image
+                    source={{ uri: thumbUrl }}
+                    style={styles.mediaFill}
+                    resizeMode="cover"
+                    onError={() => void onThumbError()}
+                  />
+                  <View style={styles.guestMediaPlayOverlay}>
+                    <Text style={styles.guestMediaPlayOverlayText}>▶</Text>
+                  </View>
                 </View>
-              </View>
-            ) : (
-              <View style={[styles.guestMediaFileChip, isDark && styles.guestMediaFileChipDark]}>
-                <Text style={[styles.guestMediaFileText, isDark && styles.guestMediaFileTextDark]} numberOfLines={1}>
-                  {item.media?.fileName ? item.media.fileName : item.media?.kind === 'video' ? 'Video' : 'File'}
-                </Text>
-              </View>
-            )}
-          </Pressable>
-        ) : null}
-
-        {item.reactions ? (
-          <View style={styles.guestReactionRow}>
-            {Object.entries(item.reactions)
-              .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
-              .slice(0, 3)
-              .map(([emoji, info], idx) => (
-                <Pressable
-                  key={`${item.id}:${emoji}`}
-                  onPress={() =>
-                    onOpenReactionInfo(
-                      String(emoji),
-                      (info?.userSubs || []).map(String),
-                      item.reactionUsers
-                    )
-                  }
-                  style={[
-                    styles.guestReactionChip,
-                    isDark && styles.guestReactionChipDark,
-                    idx ? styles.guestReactionChipStacked : null,
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Reactions ${emoji}`}
-                >
-                  <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
-                    {emoji}
-                    {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
+              ) : (
+                <View style={[styles.guestMediaFileChip, isDark && styles.guestMediaFileChipDark]}>
+                  <Text style={[styles.guestMediaFileText, isDark && styles.guestMediaFileTextDark]} numberOfLines={1}>
+                    {item.media?.fileName ? item.media.fileName : item.media?.kind === 'video' ? 'Video' : 'File'}
                   </Text>
-                </Pressable>
-              ))}
+                </View>
+              )}
+            </Pressable>
           </View>
-        ) : null}
-      </View>
+
+          {item.reactions ? (
+            <View style={styles.guestReactionRow}>
+              {Object.entries(item.reactions)
+                .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
+                .slice(0, 3)
+                .map(([emoji, info], idx) => (
+                  <Pressable
+                    key={`${item.id}:${emoji}`}
+                    onPress={() =>
+                      onOpenReactionInfo(
+                        String(emoji),
+                        (info?.userSubs || []).map(String),
+                        item.reactionUsers
+                      )
+                    }
+                    style={[
+                      styles.guestReactionChip,
+                      isDark && styles.guestReactionChipDark,
+                      idx ? styles.guestReactionChipStacked : null,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Reactions ${emoji}`}
+                  >
+                    <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
+                      {emoji}
+                      {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
+                    </Text>
+                  </Pressable>
+                ))}
+            </View>
+          ) : null}
+        </View>
+      ) : (
+        <View style={[styles.bubble, isDark && styles.bubbleDark]}>
+          <View style={styles.userRow}>
+            <Text style={[styles.userText, isDark && styles.userTextDark]} numberOfLines={1}>
+              {item.user}
+            </Text>
+            {ts ? (
+              <Text style={[styles.timeText, isDark && styles.timeTextDark]} numberOfLines={1}>
+                {ts}
+              </Text>
+            ) : null}
+          </View>
+          {item.text?.trim() ? (
+            <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
+          ) : null}
+
+          {item.reactions ? (
+            <View style={styles.guestReactionRow}>
+              {Object.entries(item.reactions)
+                .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
+                .slice(0, 3)
+                .map(([emoji, info], idx) => (
+                  <Pressable
+                    key={`${item.id}:${emoji}`}
+                    onPress={() =>
+                      onOpenReactionInfo(
+                        String(emoji),
+                        (info?.userSubs || []).map(String),
+                        item.reactionUsers
+                      )
+                    }
+                    style={[
+                      styles.guestReactionChip,
+                      isDark && styles.guestReactionChipDark,
+                      idx ? styles.guestReactionChipStacked : null,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Reactions ${emoji}`}
+                  >
+                    <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
+                      {emoji}
+                      {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
+                    </Text>
+                  </Pressable>
+                ))}
+            </View>
+          ) : null}
+        </View>
+      )}
     </View>
   );
 }
@@ -744,40 +789,59 @@ const styles = StyleSheet.create({
   msgTextDark: {
     color: '#fff',
   },
-  guestMediaImage: {
-    borderRadius: 12,
-    backgroundColor: '#e9e9ee',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#e3e3e3',
+  guestMediaCard: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#f1f1f1',
   },
-  guestMediaImageDark: {
-    backgroundColor: '#14141a',
-    borderColor: '#2a2a33',
+  guestMediaCardDark: {
+    backgroundColor: '#1c1c22',
   },
-  guestMediaVideoWrap: {
-    position: 'relative',
+  guestMediaHeader: {
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 6,
+    backgroundColor: '#f1f1f1',
   },
-  guestMediaVideoWrapDark: {},
-  guestMediaPlayBadge: {
-    position: 'absolute',
-    right: 10,
-    bottom: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+  guestMediaHeaderDark: {
+    backgroundColor: '#1c1c22',
   },
-  guestMediaPlayBadgeDark: {
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
-  guestMediaPlayText: {
-    color: '#fff',
-    fontWeight: '900',
+  guestMediaMeta: {
     fontSize: 12,
+    fontWeight: '700',
+    color: '#555',
   },
-  guestMediaPlayTextDark: {
+  guestMediaMetaDark: {
+    color: '#b7b7c2',
+  },
+  guestMediaCaption: {
+    marginTop: 4,
+    fontSize: 15,
+    fontWeight: '400',
+    color: '#111',
+    lineHeight: 20,
+  },
+  guestMediaCaptionDark: {
     color: '#fff',
   },
+  guestMediaPlayOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  guestMediaPlayOverlayText: {
+    color: '#fff',
+    fontSize: 42,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 6,
+  },
+  mediaFill: { width: '100%', height: '100%' },
   guestMediaFileChip: {
     borderRadius: 12,
     paddingHorizontal: 12,
