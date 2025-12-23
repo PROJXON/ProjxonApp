@@ -500,7 +500,7 @@ function GuestMessageRow({
             ]}
           >
             <View style={[styles.guestMediaHeader, isDark ? styles.guestMediaHeaderDark : null]}>
-              <Text style={[styles.guestMediaMeta, isDark ? styles.guestMediaMetaDark : null]} numberOfLines={1}>
+              <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>
                 {metaLine}
               </Text>
               {item.text?.trim() ? (
@@ -579,16 +579,7 @@ function GuestMessageRow({
         </View>
       ) : (
         <View style={[styles.bubble, isDark && styles.bubbleDark]}>
-          <View style={styles.userRow}>
-            <Text style={[styles.userText, isDark && styles.userTextDark]} numberOfLines={1}>
-              {item.user}
-            </Text>
-            {ts ? (
-              <Text style={[styles.timeText, isDark && styles.timeTextDark]} numberOfLines={1}>
-                {ts}
-              </Text>
-            ) : null}
-          </View>
+          <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>{metaLine}</Text>
           {item.text?.trim() ? (
             <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
           ) : null}
@@ -769,6 +760,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 10,
     marginBottom: 4,
+  },
+  guestMetaLine: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#555',
+    marginBottom: 4,
+    flexWrap: 'wrap',
+  },
+  guestMetaLineDark: {
+    color: '#b7b7c2',
   },
   timeText: {
     fontSize: 12,

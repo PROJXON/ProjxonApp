@@ -375,6 +375,7 @@ export default function ChatScreen({
   const [reactionInfoOpen, setReactionInfoOpen] = React.useState(false);
   const [reactionInfoEmoji, setReactionInfoEmoji] = React.useState<string>('');
   const [reactionInfoSubs, setReactionInfoSubs] = React.useState<string[]>([]);
+  const [reactionInfoTarget, setReactionInfoTarget] = React.useState<ChatMessage | null>(null);
   const [nameBySub, setNameBySub] = React.useState<Record<string, string>>({});
   const [reactionPickerOpen, setReactionPickerOpen] = React.useState(false);
   const [reactionPickerTarget, setReactionPickerTarget] = React.useState<ChatMessage | null>(null);
@@ -2851,9 +2852,10 @@ export default function ChatScreen({
   }, []);
 
   const openReactionInfo = React.useCallback(
-    async (emoji: string, subs: string[]) => {
+    async (target: ChatMessage, emoji: string, subs: string[]) => {
       setReactionInfoEmoji(emoji);
       setReactionInfoSubs(subs);
+      setReactionInfoTarget(target);
       setReactionInfoOpen(true);
 
       // Best-effort: resolve names by sub when signed in.
@@ -3325,7 +3327,7 @@ export default function ChatScreen({
                               return (
                                 <Pressable
                                   key={`ov:${item.id}:${r.emoji}`}
-                                  onPress={() => void openReactionInfo(r.emoji, r.userSubs)}
+                                  onPress={() => void openReactionInfo(item, r.emoji, r.userSubs)}
                                   onLongPress={() => sendReaction(item, r.emoji)}
                                   disabled={!canReact}
                                   style={({ pressed }) => [
@@ -3540,7 +3542,7 @@ export default function ChatScreen({
                             return (
                               <Pressable
                                 key={`ov:${item.id}:${r.emoji}`}
-                                onPress={() => void openReactionInfo(r.emoji, r.userSubs)}
+                                onPress={() => void openReactionInfo(item, r.emoji, r.userSubs)}
                                 onLongPress={() => sendReaction(item, r.emoji)}
                                 disabled={!canReact}
                                 style={({ pressed }) => [
@@ -3957,17 +3959,47 @@ export default function ChatScreen({
             <ScrollView style={styles.summaryScroll}>
               {reactionInfoSubs.length ? (
                 reactionInfoSubs.map((sub) => {
-                  const label =
-                    myUserId && sub === myUserId
-                      ? 'You'
-                      : nameBySub[sub] || `${String(sub).slice(0, 6)}…${String(sub).slice(-4)}`;
+                  const isMe = !!myUserId && sub === myUserId;
+                  const label = isMe
+                    ? 'You'
+                    : nameBySub[sub] || `${String(sub).slice(0, 6)}…${String(sub).slice(-4)}`;
                   return (
-                    <Text
+                    <Pressable
                       key={sub}
-                      style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}
+                      onPress={() => {
+                        // Signal-like: allow removing your reaction from the reaction list view.
+                        if (!isMe) return;
+                        if (!reactionInfoTarget || !reactionInfoEmoji) return;
+                        sendReaction(reactionInfoTarget, reactionInfoEmoji);
+                        setReactionInfoOpen(false);
+                        setReactionInfoTarget(null);
+                      }}
+                      disabled={!isMe}
+                      style={({ pressed }) => [pressed && isMe ? { opacity: 0.7 } : null]}
+                      accessibilityRole={isMe ? 'button' : undefined}
+                      accessibilityLabel={isMe ? 'Remove reaction' : undefined}
                     >
-                      {label}
-                    </Text>
+                      <Text
+                        style={[
+                          styles.summaryText,
+                          isDark ? styles.summaryTextDark : null,
+                          isMe ? { fontWeight: '800' } : null,
+                        ]}
+                      >
+                        {label}
+                      </Text>
+                      {isMe ? (
+                        <Text
+                          style={[
+                            styles.summaryText,
+                            isDark ? styles.summaryTextDark : null,
+                            { opacity: isDark ? 0.85 : 0.7, fontSize: 12, marginTop: 2, fontWeight: '700' },
+                          ]}
+                        >
+                          Tap to remove
+                        </Text>
+                      ) : null}
+                    </Pressable>
                   );
                 })
               ) : (
@@ -3979,7 +4011,10 @@ export default function ChatScreen({
             <View style={styles.summaryButtons}>
               <Pressable
                 style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
-                onPress={() => setReactionInfoOpen(false)}
+                onPress={() => {
+                  setReactionInfoOpen(false);
+                  setReactionInfoTarget(null);
+                }}
               >
                 <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
                   Close
