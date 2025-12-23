@@ -3052,6 +3052,12 @@ export default function ChatScreen({
           data={messages}
           keyExtractor={(m) => m.id}
           inverted
+          // Perf tuning (especially on Android):
+          removeClippedSubviews={Platform.OS === 'android'}
+          initialNumToRender={18}
+          maxToRenderPerBatch={12}
+          updateCellsBatchingPeriod={50}
+          windowSize={7}
           renderItem={({ item }) => {
             const timestamp = new Date(item.createdAt);
             const now = new Date();

@@ -6,8 +6,10 @@ import {
   FlatList,
   Image,
   Linking,
+  Modal,
   RefreshControl,
   Pressable,
+  ScrollView,
   StyleSheet,
   Switch,
   Text,
@@ -25,6 +27,7 @@ type GuestMessage = {
   text: string;
   createdAt: number;
   reactions?: Record<string, { count: number; userSubs: string[] }>;
+  reactionUsers?: Record<string, string>;
   media?: {
     path: string;
     thumbPath?: string;
@@ -108,6 +111,10 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
       text,
       createdAt,
       reactions: normalizeGuestReactions((it as any)?.reactions),
+      reactionUsers:
+        (it as any)?.reactionUsers && typeof (it as any).reactionUsers === 'object'
+          ? Object.fromEntries(Object.entries((it as any).reactionUsers).map(([k, v]) => [String(k), String(v)]))
+          : undefined,
       media,
     });
   }
@@ -182,6 +189,10 @@ export default function GuestGlobalScreen({
   const [refreshing, setRefreshing] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
   const [urlByPath, setUrlByPath] = React.useState<Record<string, string>>({});
+  const [reactionInfoOpen, setReactionInfoOpen] = React.useState<boolean>(false);
+  const [reactionInfoEmoji, setReactionInfoEmoji] = React.useState<string>('');
+  const [reactionInfoSubs, setReactionInfoSubs] = React.useState<string[]>([]);
+  const [reactionInfoNamesBySub, setReactionInfoNamesBySub] = React.useState<Record<string, string>>({});
 
   const resolvePathUrl = React.useCallback(
     async (path: string): Promise<string | null> => {
@@ -199,6 +210,14 @@ export default function GuestGlobalScreen({
     },
     [urlByPath]
   );
+
+  const openReactionInfo = React.useCallback(
+    (emoji: string, subs: string[], namesBySub?: Record<string, string>) => {
+    setReactionInfoEmoji(String(emoji || ''));
+    setReactionInfoSubs(Array.isArray(subs) ? subs.map(String).filter(Boolean) : []);
+    setReactionInfoNamesBySub(namesBySub && typeof namesBySub === 'object' ? namesBySub : {});
+    setReactionInfoOpen(true);
+  }, []);
 
   const fetchNow = React.useCallback(async (opts?: { isManual?: boolean }) => {
     const isManual = !!opts?.isManual;
@@ -317,6 +336,7 @@ export default function GuestGlobalScreen({
             item={item}
             isDark={isDark}
             resolvePathUrl={resolvePathUrl}
+            onOpenReactionInfo={openReactionInfo}
           />
         )}
       />
@@ -338,6 +358,41 @@ export default function GuestGlobalScreen({
           </Text>
         </Pressable>
       </View>
+
+      <Modal visible={reactionInfoOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, isDark && styles.modalCardDark]}>
+            <Text style={[styles.modalTitle, isDark && styles.modalTitleDark]}>
+              Reactions{reactionInfoEmoji ? ` · ${reactionInfoEmoji}` : ''}
+            </Text>
+            <ScrollView style={styles.modalScroll}>
+              {reactionInfoSubs.length ? (
+                reactionInfoSubs.map((sub) => {
+                  const name = reactionInfoNamesBySub[sub];
+                  const label = name ? String(name) : sub;
+                  return (
+                  <Text key={`rx:${reactionInfoEmoji}:${sub}`} style={[styles.modalRowText, isDark && styles.modalRowTextDark]}>
+                    {label}
+                  </Text>
+                  );
+                })
+              ) : (
+                <Text style={[styles.modalRowText, isDark && styles.modalRowTextDark]}>No reactors</Text>
+              )}
+            </ScrollView>
+            <View style={styles.modalButtons}>
+              <Pressable
+                style={[styles.modalBtn, isDark && styles.modalBtnDark]}
+                onPress={() => setReactionInfoOpen(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close reactions"
+              >
+                <Text style={[styles.modalBtnText, isDark && styles.modalBtnTextDark]}>OK</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -346,10 +401,12 @@ function GuestMessageRow({
   item,
   isDark,
   resolvePathUrl,
+  onOpenReactionInfo,
 }: {
   item: GuestMessage;
   isDark: boolean;
   resolvePathUrl: (path: string) => Promise<string | null>;
+  onOpenReactionInfo: (emoji: string, subs: string[], namesBySub?: Record<string, string>) => void;
 }) {
   const { width: windowWidth } = useWindowDimensions();
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
@@ -498,19 +555,28 @@ function GuestMessageRow({
               .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
               .slice(0, 3)
               .map(([emoji, info], idx) => (
-                <View
+                <Pressable
                   key={`${item.id}:${emoji}`}
+                  onPress={() =>
+                    onOpenReactionInfo(
+                      String(emoji),
+                      (info?.userSubs || []).map(String),
+                      item.reactionUsers
+                    )
+                  }
                   style={[
                     styles.guestReactionChip,
                     isDark && styles.guestReactionChipDark,
                     idx ? styles.guestReactionChipStacked : null,
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Reactions ${emoji}`}
                 >
                   <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
                     {emoji}
                     {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
                   </Text>
-                </View>
+                </Pressable>
               ))}
           </View>
         ) : null}
@@ -763,6 +829,50 @@ const styles = StyleSheet.create({
   bottomBarCtaTextDark: {
     color: '#fff',
   },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+  },
+  modalCard: {
+    width: '92%',
+    maxWidth: 420,
+    maxHeight: '80%',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+  },
+  modalCardDark: {
+    backgroundColor: '#14141a',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#111',
+    marginBottom: 10,
+  },
+  modalTitleDark: { color: '#fff' },
+  modalScroll: { maxHeight: 420 },
+  modalRowText: { color: '#222', lineHeight: 20, marginBottom: 8 },
+  modalRowTextDark: { color: '#d7d7e0' },
+  modalButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+  modalBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+  },
+  modalBtnDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  modalBtnText: { color: '#111', fontWeight: '800' },
+  modalBtnTextDark: { color: '#fff' },
 });
 
 

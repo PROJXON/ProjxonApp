@@ -396,6 +396,139 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: 'Delete processed.' };
     }
 
+    // ---- REACT ----
+    if (action === 'react') {
+      const messageCreatedAt = Number(body.messageCreatedAt ?? body.createdAt);
+      const emoji = typeof body.emoji === 'string' ? String(body.emoji) : '';
+      const opRaw = typeof body.op === 'string' ? String(body.op) : '';
+      const op = opRaw === 'remove' ? 'remove' : 'add';
+
+      if (!Number.isFinite(messageCreatedAt) || messageCreatedAt <= 0) {
+        return { statusCode: 400, body: 'Invalid messageCreatedAt.' };
+      }
+      if (!emoji || emoji.length > 16) {
+        return { statusCode: 400, body: 'Invalid emoji.' };
+      }
+      if (!process.env.MESSAGES_TABLE) return { statusCode: 500, body: 'Missing MESSAGES_TABLE env.' };
+
+      const key = { conversationId, createdAt: messageCreatedAt };
+      const setVal = new Set([senderSub]);
+      const senderName = senderDisplayName ? String(senderDisplayName) : 'anon';
+
+      // Enforce "single reaction per user per message":
+      // - reactions is a map: emoji -> StringSet(userSub)
+      // - when adding a reaction, remove userSub from ALL other emoji sets first
+      const existing = await ddb.send(
+        new GetCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: key,
+          ProjectionExpression: 'messageId, reactions',
+        })
+      );
+      const existingReactions = existing?.Item?.reactions && typeof existing.Item.reactions === 'object'
+        ? existing.Item.reactions
+        : {};
+
+      const emojiKeys = Object.keys(existingReactions || {});
+      const toRemoveFrom = [];
+      for (const k of emojiKeys) {
+        try {
+          const set = existingReactions[k];
+          const arr =
+            set && typeof set === 'object' && set instanceof Set
+              ? Array.from(set)
+              : Array.isArray(set)
+              ? set
+              : [];
+          if (arr.map(String).includes(senderSub) && k !== emoji) toRemoveFrom.push(k);
+        } catch {
+          // ignore malformed reaction set
+        }
+      }
+
+      const exprNames = { '#e': emoji };
+      const exprValues = { ':u': setVal, ':empty': {} };
+      const deleteParts = [];
+
+      for (let i = 0; i < toRemoveFrom.length; i++) {
+        const k = toRemoveFrom[i];
+        const nameKey = `#r${i}`;
+        exprNames[nameKey] = k;
+        deleteParts.push(`reactions.${nameKey} :u`);
+      }
+
+      // DynamoDB cannot update 'reactions' and 'reactions.<emoji>' in the same UpdateExpression
+      // (paths overlap). So we do it in two steps:
+      // 1) ensure reactions map exists (and also reactionUsers map for name snapshots)
+      // 2) apply ADD/DELETE on reactions.<emoji> sets (and other emoji sets for single-reaction model)
+      await ddb.send(
+        new UpdateCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: key,
+          UpdateExpression:
+            'SET reactions = if_not_exists(reactions, :empty), reactionUsers = if_not_exists(reactionUsers, :emptyUsers)',
+          ExpressionAttributeValues: { ':empty': {}, ':emptyUsers': {} },
+        })
+      );
+
+      // DynamoDB UpdateExpression section order matters (SET, REMOVE, ADD, DELETE).
+      // We SET reactionUsers.<senderSub> (username snapshot) and ADD/DELETE reactions.* sets.
+      let updateExpression = '';
+      // add/remove username snapshot (remove when user removes their reaction)
+      exprNames['#s'] = senderSub;
+      if (op === 'remove') {
+        // Order must be: SET, REMOVE, ADD, DELETE
+        updateExpression = 'REMOVE reactionUsers.#s DELETE reactions.#e :u';
+      } else {
+        updateExpression = 'SET reactionUsers.#s = :sn ADD reactions.#e :u';
+        if (deleteParts.length) updateExpression += ` DELETE ${deleteParts.join(', ')}`;
+      }
+
+      await ddb.send(
+        new UpdateCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: key,
+          UpdateExpression: updateExpression,
+          ExpressionAttributeNames: exprNames,
+          ExpressionAttributeValues: op === 'remove' ? { ':u': setVal } : { ':u': setVal, ':sn': senderName },
+        })
+      );
+
+      // Fetch updated reactions (full map) so clients can reconcile multiple-emoji changes.
+      const updated = await ddb.send(
+        new GetCommand({
+          TableName: process.env.MESSAGES_TABLE,
+          Key: key,
+          ProjectionExpression: 'messageId, createdAt, reactions',
+        })
+      );
+      const msg = updated.Item || {};
+
+      const reactions = msg?.reactions && typeof msg.reactions === 'object' ? msg.reactions : {};
+      const reactionPayload = {};
+      for (const [k, set] of Object.entries(reactions)) {
+        const arr =
+          set && typeof set === 'object' && set instanceof Set
+            ? Array.from(set).map(String)
+            : Array.isArray(set)
+            ? set.map(String)
+            : [];
+        if (arr.length) reactionPayload[String(k)] = { count: arr.length, userSubs: arr };
+      }
+
+      await broadcast(mgmt, recipientConnIds, {
+        type: 'reaction',
+        conversationId,
+        messageId: msg.messageId ? String(msg.messageId) : undefined,
+        createdAt: messageCreatedAt,
+        reactions: reactionPayload,
+        actorSub: senderSub,
+        op,
+      });
+
+      return { statusCode: 200, body: 'Reaction processed.' };
+    }
+
     // ---- MESSAGE ----
     const text = String(body.text || '').trim();
     if (!text) return { statusCode: 400, body: 'Empty message.' };
