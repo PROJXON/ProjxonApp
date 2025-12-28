@@ -176,6 +176,13 @@ export default function GuestGlobalScreen({
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light');
   const isDark = theme === 'dark';
 
+  // --- Guest onboarding (Option A + C) ---
+  // A: show once per install (versioned key)
+  // C: provide an "About" button to reopen later
+  const ONBOARDING_VERSION = 'v1';
+  const ONBOARDING_KEY = `onboardingSeen:${ONBOARDING_VERSION}`;
+  const [onboardingOpen, setOnboardingOpen] = React.useState<boolean>(false);
+
   React.useEffect(() => {
     (async () => {
       try {
@@ -196,6 +203,31 @@ export default function GuestGlobalScreen({
       }
     })();
   }, [theme]);
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const seen = await AsyncStorage.getItem(ONBOARDING_KEY);
+        if (!mounted) return;
+        if (!seen) setOnboardingOpen(true);
+      } catch {
+        if (mounted) setOnboardingOpen(true);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const dismissOnboarding = React.useCallback(async () => {
+    setOnboardingOpen(false);
+    try {
+      await AsyncStorage.setItem(ONBOARDING_KEY, '1');
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const [messages, setMessages] = React.useState<GuestMessage[]>([]);
   const [loading, setLoading] = React.useState<boolean>(true);
@@ -312,7 +344,8 @@ export default function GuestGlobalScreen({
   }, [fetchNow]);
 
   return (
-    <SafeAreaView style={[styles.container, isDark && styles.containerDark]} edges={['top', 'bottom']}>
+    // App.tsx already applies the top safe area. Avoid double top inset here (dead space).
+    <SafeAreaView style={[styles.container, isDark && styles.containerDark]} edges={['left', 'right', 'bottom']}>
       <View style={styles.headerRow}>
         <Text style={[styles.headerTitle, isDark && styles.headerTitleDark]}>Global</Text>
         <View style={styles.headerRight}>
@@ -327,6 +360,18 @@ export default function GuestGlobalScreen({
               thumbColor={isDark ? '#2a2a33' : '#ffffff'}
             />
           </View>
+          <Pressable
+            onPress={() => setOnboardingOpen(true)}
+            style={({ pressed }) => [
+              styles.signInPill,
+              isDark && styles.signInPillDark,
+              pressed && { opacity: 0.85 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="About Projxon"
+          >
+            <Text style={[styles.signInPillText, isDark && styles.signInPillTextDark]}>About</Text>
+          </Pressable>
           <Pressable
             onPress={onSignIn}
             style={({ pressed }) => [
@@ -427,6 +472,46 @@ export default function GuestGlobalScreen({
                 accessibilityLabel="Close reactions"
               >
                 <Text style={[styles.modalBtnText, isDark && styles.modalBtnTextDark]}>OK</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={onboardingOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, isDark && styles.modalCardDark]}>
+            <Text style={[styles.modalTitle, isDark && styles.modalTitleDark]}>Welcome to Projxon</Text>
+            <ScrollView style={styles.modalScroll}>
+              <Text style={[styles.modalRowText, isDark && styles.modalRowTextDark]}>
+                You’re currently viewing a guest preview of Global chat. You can join public channels.
+              </Text>
+              <Text style={[styles.modalRowText, isDark && styles.modalRowTextDark]}>
+                Sign in to send messages, react, utilize AI features, and access direct messages.
+              </Text>
+              <Text style={[styles.modalRowText, isDark && styles.modalRowTextDark]}>
+                Tip: DMs support end-to-end encryption on signed-in devices.
+              </Text>
+            </ScrollView>
+            <View style={styles.modalButtons}>
+              <Pressable
+                style={[styles.modalBtn, isDark && styles.modalBtnDark]}
+                onPress={() => void dismissOnboarding()}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss welcome"
+              >
+                <Text style={[styles.modalBtnText, isDark && styles.modalBtnTextDark]}>Got it</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalBtn, isDark && styles.modalBtnDark]}
+                onPress={() => {
+                  void dismissOnboarding();
+                  onSignIn();
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Sign in"
+              >
+                <Text style={[styles.modalBtnText, isDark && styles.modalBtnTextDark]}>Sign in</Text>
               </Pressable>
             </View>
           </View>
@@ -1028,7 +1113,7 @@ const styles = StyleSheet.create({
   modalScroll: { maxHeight: 420 },
   modalRowText: { color: '#222', lineHeight: 20, marginBottom: 8 },
   modalRowTextDark: { color: '#d7d7e0' },
-  modalButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+  modalButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12, gap: 8 },
   modalBtn: {
     paddingHorizontal: 12,
     paddingVertical: 8,
