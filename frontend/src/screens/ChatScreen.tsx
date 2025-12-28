@@ -3418,7 +3418,9 @@ export default function ChatScreen({
                                   disabled={inlineEditUploading}
                                   style={({ pressed }) => [
                                     styles.inlineEditBtn,
-                                    inlineEditUploading ? styles.btnDisabled : null,
+                                    inlineEditUploading
+                                      ? (isOutgoing ? styles.inlineEditBtnUploadingOutgoing : (isDark ? styles.btnDisabledDark : styles.btnDisabled))
+                                      : null,
                                     pressed ? styles.inlineEditBtnPressed : null,
                                   ]}
                                 >
@@ -3453,7 +3455,9 @@ export default function ChatScreen({
                                   disabled={inlineEditUploading}
                                   style={({ pressed }) => [
                                     styles.inlineEditBtn,
-                                    inlineEditUploading ? styles.btnDisabled : null,
+                                    inlineEditUploading
+                                      ? (isOutgoing ? styles.inlineEditBtnUploadingOutgoing : (isDark ? styles.btnDisabledDark : styles.btnDisabled))
+                                      : null,
                                     pressed ? styles.inlineEditBtnPressed : null,
                                   ]}
                                 >
@@ -3739,7 +3743,9 @@ export default function ChatScreen({
                                   disabled={inlineEditUploading}
                                   style={({ pressed }) => [
                                     styles.inlineEditBtn,
-                                    inlineEditUploading ? styles.btnDisabled : null,
+                                    inlineEditUploading
+                                      ? (isOutgoing ? styles.inlineEditBtnUploadingOutgoing : (isDark ? styles.btnDisabledDark : styles.btnDisabled))
+                                      : null,
                                     pressed ? styles.inlineEditBtnPressed : null,
                                   ]}
                                 >
@@ -3774,7 +3780,9 @@ export default function ChatScreen({
                                   disabled={inlineEditUploading}
                                   style={({ pressed }) => [
                                     styles.inlineEditBtn,
-                                    inlineEditUploading ? styles.btnDisabled : null,
+                                    inlineEditUploading
+                                      ? (isOutgoing ? styles.inlineEditBtnUploadingOutgoing : (isDark ? styles.btnDisabledDark : styles.btnDisabled))
+                                      : null,
                                     pressed ? styles.inlineEditBtnPressed : null,
                                   ]}
                                 >
@@ -3989,21 +3997,21 @@ export default function ChatScreen({
             style={[
               styles.sendBtn,
               isDark ? styles.sendBtnDark : null,
-              isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+              isUploading
+                ? (isDark ? styles.sendBtnUploadingDark : styles.sendBtnUploading)
+                : (inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null),
             ]}
             onPress={sendMessage}
             disabled={isUploading || !!inlineEditTargetId}
           >
-            <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>
-              {isUploading ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
-                  <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
-                  <AnimatedDots color="#fff" size={18} />
-                </View>
-              ) : (
-                'Send'
-              )}
-            </Text>
+            {isUploading ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
+                <AnimatedDots color="#fff" size={18} />
+              </View>
+            ) : (
+              <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>Send</Text>
+            )}
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -4789,6 +4797,9 @@ const styles = StyleSheet.create({
   },
   inlineEditBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: 'rgba(0,0,0,0.08)' },
   inlineEditBtnPressed: { opacity: 0.75 },
+  // When editing an outgoing media message, the editor sits on a blue header bar.
+  // Use a translucent white pill so "Uploading…" doesn't look like a disabled grey block.
+  inlineEditBtnUploadingOutgoing: { backgroundColor: 'rgba(255,255,255,0.18)', borderColor: 'transparent', opacity: 0.95 },
   inlineEditBtnText: { fontWeight: '700' },
   inlineEditBtnTextIncoming: { color: '#111' },
   inlineEditBtnTextOutgoing: { color: '#fff' },
@@ -5054,6 +5065,17 @@ const styles = StyleSheet.create({
     backgroundColor: '#2a2a33',
     borderWidth: 0,
     borderColor: 'transparent',
+  },
+  sendBtnUploading: {
+    backgroundColor: '#111',
+    borderColor: '#111',
+    opacity: 0.92,
+  },
+  sendBtnUploadingDark: {
+    backgroundColor: '#2a2a33',
+    borderWidth: 0,
+    borderColor: 'transparent',
+    opacity: 0.8,
   },
   sendTxt: { color: '#111', fontWeight: '700' },
   sendTxtDark: { color: '#fff' },
