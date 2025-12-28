@@ -32,7 +32,8 @@
     },
     "plugins": [
       "expo-secure-store",
-      "expo-video"
+      "expo-video",
+      "expo-notifications"
     ]
   }
 }

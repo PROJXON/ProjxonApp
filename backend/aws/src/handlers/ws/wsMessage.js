@@ -17,6 +17,119 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // Connections TTL refresh window (must match your DynamoDB TTL attribute "expiresAt")
 const CONN_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
+const safeString = (v) => {
+  if (typeof v !== 'string') return '';
+  return String(v).trim();
+};
+
+const isLikelyExpoToken = (token) => {
+  const t = safeString(token);
+  if (!t) return false;
+  return (
+    /^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(t) ||
+    t.startsWith('ExponentPushToken[') ||
+    t.startsWith('ExpoPushToken[')
+  );
+};
+
+const queryExpoPushTokensByUserSub = async (userSub) => {
+  const table = process.env.PUSH_TOKENS_TABLE;
+  if (!table) return [];
+  const u = safeString(userSub);
+  if (!u) return [];
+  try {
+    const resp = await ddb.send(
+      new QueryCommand({
+        TableName: table,
+        KeyConditionExpression: 'userSub = :u',
+        ExpressionAttributeValues: { ':u': u },
+        ProjectionExpression: 'expoPushToken',
+      })
+    );
+    return (resp.Items || [])
+      .map((it) => (it ? it.expoPushToken : undefined))
+      .filter((t) => typeof t === 'string')
+      .map((t) => String(t).trim())
+      .filter((t) => isLikelyExpoToken(t));
+  } catch (err) {
+    console.warn('queryExpoPushTokensByUserSub failed', err);
+    return [];
+  }
+};
+
+const sendExpoPush = async (messages) => {
+  // Expo push endpoint doesn't require credentials (it validates tokens server-side).
+  // Requires Node 18+ for fetch in Lambda.
+  if (typeof fetch !== 'function') {
+    console.warn('sendExpoPush skipped: runtime missing fetch (use Node.js 18+ / 20.x)');
+    return;
+  }
+  const url = process.env.EXPO_PUSH_URL || 'https://exp.host/--/api/v2/push/send';
+  const payload = Array.isArray(messages) ? messages : [];
+  if (!payload.length) return;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      console.warn('expo push non-2xx', resp.status, text);
+      return;
+    }
+    const json = await resp.json().catch(() => null);
+    const data = json && (json.data || json);
+    if (Array.isArray(data)) {
+      for (const r of data) {
+        if (r && r.status === 'error') {
+          console.warn('expo push error', r?.message || r);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('sendExpoPush failed', err);
+  }
+};
+
+const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderSub, conversationId }) => {
+  try {
+    const tokens = await queryExpoPushTokensByUserSub(recipientSub);
+    if (!tokens.length) return;
+
+    // Privacy-first default (Signal-like): show sender name, no message preview.
+    const title = safeString(senderDisplayName) || 'New message';
+    const body = 'New message';
+    const convId = safeString(conversationId);
+    const sSub = safeString(senderSub);
+
+    const base = {
+      title,
+      body,
+      sound: 'default',
+      priority: 'high',
+      channelId: 'dm',
+      data: {
+        kind: 'dm',
+        conversationId: convId,
+        senderDisplayName: safeString(senderDisplayName),
+        senderSub: sSub,
+      },
+    };
+
+    // Expo accepts up to 100 messages per request.
+    const batchSize = 100;
+    for (let i = 0; i < tokens.length; i += batchSize) {
+      const slice = tokens.slice(i, i + batchSize);
+      const msgs = slice.map((to) => ({ ...base, to }));
+      // eslint-disable-next-line no-await-in-loop
+      await sendExpoPush(msgs);
+    }
+  } catch (err) {
+    console.warn('sendDmPushNotification failed', err);
+  }
+};
+
 const broadcast = async (mgmt, connectionIds, payloadObj) => {
   const data = Buffer.from(JSON.stringify(payloadObj));
   await Promise.all(
@@ -588,6 +701,19 @@ exports.handler = async (event) => {
           displayName: senderDisplayName,
           createdAtMs: nowMs,
         });
+
+        // Best-effort: DM push for background/offline users.
+        // We avoid pushing when the recipient appears "online" (has any active WS connections).
+        // Default payload mirrors Signal privacy: sender name only, no message content.
+        const activeRecipientConns = await queryConnIdsByUserSub(dmRecipientSub).catch(() => []);
+        if (!Array.isArray(activeRecipientConns) || activeRecipientConns.length === 0) {
+          await sendDmPushNotification({
+            recipientSub: dmRecipientSub,
+            senderDisplayName,
+            senderSub,
+            conversationId,
+          });
+        }
       } catch {
         // ignore
       }

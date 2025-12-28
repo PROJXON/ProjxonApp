@@ -40,6 +40,11 @@ import { useFieldValues } from '@aws-amplify/ui-react-native/src/Authenticator/h
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { API_URL } from './src/config/env';
+import {
+  registerForDmPushNotifications,
+  setForegroundNotificationPolicy,
+  unregisterDmPushNotifications,
+} from './utils/pushNotifications';
 
 import {
   generateKeypair,
@@ -78,6 +83,9 @@ const SignOutButton = ({
     <Pressable
       onPress={async () => {
         try {
+          // Clean up push token before auth is cleared, so another account on this device
+          // doesn't accidentally receive this user's DM notifications.
+          await unregisterDmPushNotifications();
           await signOut();
         } finally {
           onSignedOut?.();
@@ -256,6 +264,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
     (async () => {
       try {
+        // Notification policy: avoid banners/sounds while foregrounded (chat UI handles it).
+        await setForegroundNotificationPolicy();
+
         // reset per-user UI state on sign-in changes
         setHasRecoveryBlob(false);
         setProcessing(false);
@@ -369,6 +380,27 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       }
     })();
 
+    return () => {
+      mounted = false;
+    };
+  }, [user]);
+
+  // Best-effort: register DM push token after login (Signal-like: sender name only, no message preview).
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (!user) return;
+        const res = await registerForDmPushNotifications();
+        if (!mounted) return;
+        if (!res.ok) {
+          // Avoid spamming a modal; this should be transparent unless debugging.
+          console.log('push registration skipped/failed:', res.reason || 'unknown');
+        }
+      } catch (err) {
+        console.log('push registration error:', err);
+      }
+    })();
     return () => {
       mounted = false;
     };
@@ -506,6 +538,37 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     },
     [unreadDmMap]
   );
+
+  // Handle taps on OS notifications to jump into the DM.
+  React.useEffect(() => {
+    let sub: any;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Notifications = require('expo-notifications');
+      sub = Notifications.addNotificationResponseReceivedListener((resp: any) => {
+        const data = resp?.notification?.request?.content?.data || {};
+        const kind = typeof data.kind === 'string' ? data.kind : '';
+        const convId = typeof data.conversationId === 'string' ? data.conversationId : '';
+        const senderName = typeof data.senderDisplayName === 'string' ? data.senderDisplayName : '';
+        if (kind === 'dm' && convId) {
+          setSearchOpen(false);
+          setPeerInput('');
+          setSearchError(null);
+          setConversationId(convId);
+          setPeer(senderName || 'Direct Message');
+        }
+      });
+    } catch {
+      // expo-notifications not installed / dev client not rebuilt
+    }
+    return () => {
+      try {
+        sub?.remove?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
 
   const handleNewDmNotification = React.useCallback(
     (newConversationId: string, sender: string, senderSub?: string) => {

@@ -60,6 +60,16 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
   - **Body**: `{ conversationId, peer?, instruction, messages: [{ user, text, createdAt }] }`
   - **Returns**: `{ answer, suggestions: string[] }`
 
+- **POST `/push/token`** → `http/registerPushToken.js`
+  - **Auth**: JWT
+  - **Body**: `{ expoPushToken, platform?, deviceId? }`
+  - **Notes**: stores the device’s Expo push token for DM notifications
+
+- **POST `/push/token/delete`** → `http/unregisterPushToken.js`
+  - **Auth**: JWT
+  - **Body**: `{ expoPushToken?, deviceId? }`
+  - **Notes**: removes a token on sign-out (prevents another account on the same device from receiving pushes)
+
 ### WebSocket API (API Gateway WebSockets)
 
 > **Auth**: WebSocket connections are authorized by `ws/wsAuthorizer.js` (Cognito JWT).
