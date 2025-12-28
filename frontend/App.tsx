@@ -399,6 +399,16 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const isDark = theme === 'dark';
   const [menuOpen, setMenuOpen] = React.useState<boolean>(false);
   const [chatsOpen, setChatsOpen] = React.useState<boolean>(false);
+  const [blocklistOpen, setBlocklistOpen] = React.useState<boolean>(false);
+  const [blocklistLoading, setBlocklistLoading] = React.useState<boolean>(false);
+  const [blockUsername, setBlockUsername] = React.useState<string>('');
+  const [blockError, setBlockError] = React.useState<string | null>(null);
+  const [blockedUsers, setBlockedUsers] = React.useState<
+    Array<{ blockedSub: string; blockedDisplayName?: string; blockedUsernameLower?: string; blockedAt?: number }>
+  >([]);
+  const [blocklistCacheAt, setBlocklistCacheAt] = React.useState<number>(0);
+
+  const blockedSubs = React.useMemo(() => blockedUsers.map((b) => b.blockedSub).filter(Boolean), [blockedUsers]);
 
   const upsertDmThread = React.useCallback((convId: string, peerName: string, lastActivityAt?: number) => {
     const id = String(convId || '').trim();
@@ -516,6 +526,147 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     },
     [API_URL, promptConfirm]
   );
+
+  const fetchBlocks = React.useCallback(async (): Promise<void> => {
+    if (!API_URL) return;
+    try {
+      setBlocklistLoading(true);
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) return;
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/blocks`, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      const arr = Array.isArray(json?.blocked) ? json.blocked : [];
+      const parsed = arr
+        .map((it: any) => ({
+          blockedSub: String(it?.blockedSub || ''),
+          blockedDisplayName: it?.blockedDisplayName ? String(it.blockedDisplayName) : undefined,
+          blockedUsernameLower: it?.blockedUsernameLower ? String(it.blockedUsernameLower) : undefined,
+          blockedAt: typeof it?.blockedAt === 'number' ? Number(it.blockedAt) : undefined,
+        }))
+        .filter((b: any) => b.blockedSub);
+      setBlockedUsers(parsed);
+      setBlocklistCacheAt(Date.now());
+      try {
+        await AsyncStorage.setItem('blocklist:cache:v1', JSON.stringify({ at: Date.now(), blocked: parsed }));
+      } catch {
+        // ignore
+      }
+    } catch {
+      // ignore
+    } finally {
+      setBlocklistLoading(false);
+    }
+  }, [API_URL]);
+
+  const addBlockByUsername = React.useCallback(async (): Promise<void> => {
+    if (!API_URL) return;
+    const username = blockUsername.trim();
+    if (!username) {
+      setBlockError('Enter a username');
+      return;
+    }
+    const ok = await promptConfirm(
+      'Block user?',
+      `Block "${username}"? You won’t see their messages, and they won’t be able to DM you.\n\nYou can unblock them later from your Blocklist.`,
+      { confirmText: 'Block', cancelText: 'Cancel', destructive: true }
+    );
+    if (!ok) return;
+
+    try {
+      setBlockError(null);
+      setBlocklistLoading(true);
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) return;
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/blocks`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username }),
+      });
+      if (res.status === 404) {
+        setBlockError('No such user');
+        return;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        setBlockError(text ? `Failed to block (${res.status})` : `Failed to block (${res.status})`);
+        return;
+      }
+      setBlockUsername('');
+      await fetchBlocks();
+    } catch {
+      setBlockError('Failed to block user');
+    } finally {
+      setBlocklistLoading(false);
+    }
+  }, [API_URL, blockUsername, fetchBlocks, promptConfirm]);
+
+  const unblockUser = React.useCallback(
+    async (blockedSub: string, label?: string) => {
+      const subToUnblock = String(blockedSub || '').trim();
+      if (!subToUnblock || !API_URL) return;
+      const ok = await promptConfirm(
+        'Unblock user?',
+        `Unblock ${label ? `"${label}"` : 'this user'}?`,
+        { confirmText: 'Unblock', cancelText: 'Cancel', destructive: false }
+      );
+      if (!ok) return;
+
+      try {
+        setBlocklistLoading(true);
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/blocks/delete`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blockedSub: subToUnblock }),
+        });
+        if (!res.ok) return;
+        setBlockedUsers((prev) => prev.filter((b) => b.blockedSub !== subToUnblock));
+      } finally {
+        setBlocklistLoading(false);
+      }
+    },
+    [API_URL, promptConfirm]
+  );
+
+  React.useEffect(() => {
+    if (!blocklistOpen) return;
+    setBlockError(null);
+    // Cache strategy:
+    // - Show whatever we already have immediately (state or persisted cache).
+    // - Refresh in background only if stale.
+    const STALE_MS = 60_000;
+    if (blocklistCacheAt && Date.now() - blocklistCacheAt < STALE_MS) return;
+    void fetchBlocks();
+  }, [blocklistOpen, fetchBlocks, blocklistCacheAt]);
+
+  // Load cached blocklist on boot so Blocklist opens instantly.
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('blocklist:cache:v1');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const arr = Array.isArray(parsed?.blocked) ? parsed.blocked : [];
+        const at = Number(parsed?.at ?? 0);
+        if (!mounted) return;
+        if (arr.length) setBlockedUsers(arr);
+        if (Number.isFinite(at) && at > 0) setBlocklistCacheAt(at);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const chatsList = React.useMemo(() => {
     const mapUnread = unreadDmMap;
@@ -666,6 +817,10 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       if (!peerSub) {
         console.warn('getUser ok but missing sub', data);
         setSearchError('User lookup missing sub (check getUser response JSON)');
+        return;
+      }
+      if (blockedSubs.includes(peerSub)) {
+        setSearchError('That user is in your Blocklist. Unblock them to start a DM.');
         return;
       }
       const normalizedCanonical = canonical.toLowerCase();
@@ -1007,8 +1162,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             label: 'Blocklist',
             onPress: () => {
               setMenuOpen(false);
-              // Placeholder until blocking ships.
-              console.log('Blocked users coming soon');
+              setBlocklistOpen(true);
             },
           },
           {
@@ -1033,12 +1187,6 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           <View style={[styles.chatsCard, isDark ? styles.chatsCardDark : null]}>
             <View style={styles.chatsTopRow}>
               <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Chats</Text>
-              <Pressable
-                style={[styles.chatsCloseBtn, isDark ? styles.chatsCloseBtnDark : null]}
-                onPress={() => setChatsOpen(false)}
-              >
-                <Text style={[styles.chatsCloseText, isDark ? styles.chatsCloseTextDark : null]}>Close</Text>
-              </Pressable>
             </View>
             <ScrollView style={styles.chatsScroll}>
               {chatsLoading ? (
@@ -1103,6 +1251,117 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 </Text>
               )}
             </ScrollView>
+            <View style={styles.modalButtons}>
+              <Pressable
+                style={[styles.modalButton, styles.modalButtonSmall, isDark ? styles.modalButtonDark : null]}
+                onPress={() => setChatsOpen(false)}
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={blocklistOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setBlocklistOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setBlocklistOpen(false)} />
+          <View style={[styles.blocksCard, isDark ? styles.blocksCardDark : null]}>
+            <View style={styles.blocksTopRow}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Blocklist</Text>
+            </View>
+
+            <View style={styles.blocksSearchRow}>
+              <TextInput
+                value={blockUsername}
+                onChangeText={(v) => {
+                  setBlockUsername(v);
+                  setBlockError(null);
+                }}
+                placeholder="Username to block"
+                placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+                selectionColor={isDark ? '#ffffff' : '#111'}
+                cursorColor={isDark ? '#ffffff' : '#111'}
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={[styles.blocksInput, isDark ? styles.blocksInputDark : null]}
+              />
+              <Pressable
+                onPress={() => void addBlockByUsername()}
+                style={({ pressed }) => [
+                  styles.blocksBtn,
+                  isDark ? styles.blocksBtnDark : null,
+                  pressed ? { opacity: 0.9 } : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Block user"
+              >
+                <Text style={[styles.blocksBtnText, isDark ? styles.blocksBtnTextDark : null]}>Block</Text>
+              </Pressable>
+            </View>
+
+            {blockError ? (
+              <Text style={[styles.errorText, isDark ? styles.errorTextDark : null]}>{blockError}</Text>
+            ) : null}
+
+            <ScrollView style={styles.blocksScroll}>
+              {blocklistLoading ? (
+                <View style={styles.chatsLoadingRow}>
+                  <Text
+                    style={[
+                      styles.modalHelperText,
+                      isDark ? styles.modalHelperTextDark : null,
+                      styles.chatsLoadingText,
+                    ]}
+                  >
+                    Loading
+                  </Text>
+                  <View style={styles.chatsLoadingDotsWrap}>
+                    <AnimatedDots color={isDark ? '#ffffff' : '#111'} size={18} />
+                  </View>
+                </View>
+              ) : blockedUsers.length ? (
+                blockedUsers
+                  .slice()
+                  .sort((a, b) => String(a.blockedDisplayName || a.blockedUsernameLower || '').localeCompare(String(b.blockedDisplayName || b.blockedUsernameLower || '')))
+                  .map((b) => (
+                    <View key={`blocked:${b.blockedSub}`} style={[styles.blockRow, isDark ? styles.blockRowDark : null]}>
+                      <Text style={[styles.blockRowName, isDark ? styles.blockRowNameDark : null]} numberOfLines={1}>
+                        {b.blockedDisplayName || b.blockedUsernameLower || b.blockedSub}
+                      </Text>
+                      <Pressable
+                        onPress={() => void unblockUser(b.blockedSub, b.blockedDisplayName || b.blockedUsernameLower)}
+                        style={({ pressed }) => [
+                          styles.blockActionBtn,
+                          isDark ? styles.blockActionBtnDark : null,
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Unblock user"
+                      >
+                        <Feather name="user-check" size={16} color={isDark ? '#fff' : '#111'} />
+                      </Pressable>
+                    </View>
+                  ))
+              ) : (
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+                  No blocked users
+                </Text>
+              )}
+            </ScrollView>
+            <View style={styles.modalButtons}>
+              <Pressable
+                style={[styles.modalButton, styles.modalButtonSmall, isDark ? styles.modalButtonDark : null]}
+                onPress={() => setBlocklistOpen(false)}
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1116,20 +1375,6 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 {uiPrompt?.message || ''}
               </Text>
               <View style={styles.modalButtons}>
-                {uiPrompt?.kind === 'confirm' ? (
-                  <Pressable
-                    style={[styles.modalButton, isDark ? styles.modalButtonDark : null]}
-                    onPress={() => {
-                      const resolve = uiPrompt?.resolve;
-                      setUiPrompt(null);
-                      resolve?.(false);
-                    }}
-                  >
-                    <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
-                      {uiPrompt?.cancelText || 'Cancel'}
-                    </Text>
-                  </Pressable>
-                ) : null}
                 <Pressable
                   style={[
                     styles.modalButton,
@@ -1157,6 +1402,20 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                     {uiPrompt?.confirmText || 'OK'}
                   </Text>
                 </Pressable>
+                {uiPrompt?.kind === 'confirm' ? (
+                  <Pressable
+                    style={[styles.modalButton, isDark ? styles.modalButtonDark : null]}
+                    onPress={() => {
+                      const resolve = uiPrompt?.resolve;
+                      setUiPrompt(null);
+                      resolve?.(false);
+                    }}
+                  >
+                    <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                      {uiPrompt?.cancelText || 'Cancel'}
+                    </Text>
+                  </Pressable>
+                ) : null}
               </View>
             </View>
           </View>
@@ -1238,6 +1497,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           onNewDmNotification={handleNewDmNotification}
           headerTop={headerTop}
           theme={theme}
+          blockedUserSubs={blockedSubs}
         />
       </View>
     </View>
@@ -2231,6 +2491,11 @@ const styles = StyleSheet.create({
     // Neutral "tool button" style (avoid blue default buttons in light mode).
     borderColor: '#ddd',
   },
+  modalButtonSmall: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
   modalButtonDark: {
     backgroundColor: '#2a2a33',
     borderColor: 'transparent',
@@ -2326,4 +2591,70 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   chatDeleteBtnDark: { backgroundColor: '#2a2a33', borderWidth: 0, borderColor: 'transparent' },
+
+  blocksCard: {
+    width: '92%',
+    maxWidth: 520,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    maxHeight: '70%',
+  },
+  blocksCardDark: { backgroundColor: '#14141a', borderColor: '#2a2a33' },
+  blocksTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  blocksSearchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8, marginBottom: 10 },
+  blocksInput: {
+    flex: 1,
+    height: 40,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    color: '#111',
+  },
+  blocksInputDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33', color: '#fff' },
+  blocksBtn: {
+    height: 40,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blocksBtnDark: { backgroundColor: '#2a2a33', borderColor: 'transparent' },
+  blocksBtnText: { color: '#111', fontWeight: '800' },
+  blocksBtnTextDark: { color: '#fff' },
+  blocksScroll: { maxHeight: 420, marginTop: 2 },
+  blockRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    marginBottom: 8,
+  },
+  blockRowDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
+  blockRowName: { fontWeight: '800', color: '#111', flexShrink: 1 },
+  blockRowNameDark: { color: '#fff' },
+  blockActionBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blockActionBtnDark: { backgroundColor: '#2a2a33', borderWidth: 0, borderColor: 'transparent' },
 });

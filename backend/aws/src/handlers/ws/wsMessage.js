@@ -165,6 +165,23 @@ const queryConnIdsByConversation = async (conversationId) => {
   return (resp.Items || []).map((it) => it.connectionId).filter(Boolean);
 };
 
+// Requires Connections GSI:
+// - byConversationWithUser (PK conversationId, SK connectionId) projecting userSub
+const queryConnRecordsByConversationWithUser = async (conversationId) => {
+  const resp = await ddb.send(
+    new QueryCommand({
+      TableName: process.env.CONNECTIONS_TABLE,
+      IndexName: 'byConversationWithUser',
+      KeyConditionExpression: 'conversationId = :c',
+      ExpressionAttributeValues: { ':c': conversationId },
+      ProjectionExpression: 'connectionId, userSub',
+    })
+  );
+  return (resp.Items || [])
+    .map((it) => ({ connectionId: it.connectionId, userSub: it.userSub }))
+    .filter((r) => r && r.connectionId && r.userSub);
+};
+
 const queryConnIdsByUserSub = async (userSub) => {
   const resp = await ddb.send(
     new QueryCommand({
@@ -248,6 +265,77 @@ const upsertConversationIndex = async ({
   } catch (err) {
     console.warn('upsertConversationIndex failed', err);
   }
+};
+
+// BLOCKS_TABLE schema:
+// - PK: blockerSub (String)
+// - SK: blockedSub (String)
+const hasBlock = async (blockerSub, blockedSub) => {
+  const table = process.env.BLOCKS_TABLE;
+  const blocker = safeString(blockerSub);
+  const blocked = safeString(blockedSub);
+  if (!table || !blocker || !blocked) return false;
+  try {
+    const resp = await ddb.send(
+      new GetCommand({
+        TableName: table,
+        Key: { blockerSub: blocker, blockedSub: blocked },
+        ProjectionExpression: 'blockedSub',
+      })
+    );
+    return !!resp?.Item;
+  } catch (err) {
+    console.warn('hasBlock failed', err);
+    return false;
+  }
+};
+
+// For global, avoid delivering messages to users who have blocked the sender.
+const filterConnIdsForGlobalSender = async (senderSub, connRecords) => {
+  const table = process.env.BLOCKS_TABLE;
+  if (!table) return (connRecords || []).map((r) => r.connectionId).filter(Boolean);
+
+  const sender = safeString(senderSub);
+  const recs = Array.isArray(connRecords) ? connRecords : [];
+
+  const idsByUser = new Map();
+  for (const r of recs) {
+    const cid = r?.connectionId ? String(r.connectionId) : '';
+    const u = r?.userSub ? String(r.userSub) : '';
+    if (!cid || !u) continue;
+    const arr = idsByUser.get(u) || [];
+    arr.push(cid);
+    idsByUser.set(u, arr);
+  }
+  const userSubs = Array.from(idsByUser.keys()).filter(Boolean);
+  if (!userSubs.length || !sender) return recs.map((r) => r.connectionId).filter(Boolean);
+
+  // NOTE: We intentionally use GetCommand fan-out instead of BatchGetCommand to avoid
+  // any AWS SDK version mismatch issues in deployed Lambdas.
+  const blockedRecipientSubs = new Set();
+  await Promise.all(
+    userSubs.map(async (u) => {
+      try {
+        const resp = await ddb.send(
+          new GetCommand({
+            TableName: table,
+            Key: { blockerSub: String(u), blockedSub: String(sender) },
+            ProjectionExpression: 'blockerSub',
+          })
+        );
+        if (resp?.Item?.blockerSub) blockedRecipientSubs.add(String(resp.Item.blockerSub));
+      } catch {
+        // ignore
+      }
+    })
+  );
+
+  const allowedConnIds = [];
+  for (const [u, cids] of idsByUser.entries()) {
+    if (blockedRecipientSubs.has(u)) continue;
+    allowedConnIds.push(...cids);
+  }
+  return allowedConnIds;
 };
 
 const markUnread = async (recipientSub, conversationId, sender) => {
@@ -353,7 +441,15 @@ exports.handler = async (event) => {
 
     if (conversationId === 'global') {
       // Only broadcast to people who are currently "joined" to global
-      recipientConnIds = await queryConnIdsByConversation('global');
+      // Prefer the newer index that projects userSub so we can do realtime server-side global blocking.
+      // If it's not created/active yet, fall back to the legacy byConversation index.
+      try {
+        const connRecords = await queryConnRecordsByConversationWithUser('global');
+        recipientConnIds = await filterConnIdsForGlobalSender(senderSub, connRecords);
+      } catch (err) {
+        console.warn('byConversationWithUser unavailable; falling back to byConversation', err);
+        recipientConnIds = await queryConnIdsByConversation('global');
+      }
     } else {
       dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
       if (!dmRecipientSub) {
@@ -702,6 +798,26 @@ exports.handler = async (event) => {
     const text = String(body.text || '').trim();
     if (!text) return { statusCode: 400, body: 'Empty message.' };
     if (!process.env.MESSAGES_TABLE) return { statusCode: 500, body: 'Missing MESSAGES_TABLE env.' };
+
+    // Block enforcement (DM only).
+    // If either party has blocked the other, do not persist or broadcast.
+    // This is intentionally "silent": client will treat it like a send failure/timeout.
+    if (conversationId !== 'global') {
+      try {
+        if (!dmRecipientSub) dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
+        if (dmRecipientSub) {
+          const [senderBlockedRecipient, recipientBlockedSender] = await Promise.all([
+            hasBlock(senderSub, dmRecipientSub),
+            hasBlock(dmRecipientSub, senderSub),
+          ]);
+          if (senderBlockedRecipient || recipientBlockedSender) {
+            return { statusCode: 200, body: 'Message ignored (blocked).' };
+          }
+        }
+      } catch {
+        // ignore (fail-open)
+      }
+    }
 
     // Optional DM self-destruct duration (seconds)
     let ttlSeconds;

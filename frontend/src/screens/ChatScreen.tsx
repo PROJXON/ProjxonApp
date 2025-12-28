@@ -180,6 +180,7 @@ type ChatScreenProps = {
   onNewDmNotification?: (conversationId: string, user: string, userSub?: string) => void;
   headerTop?: React.ReactNode;
   theme?: 'light' | 'dark';
+  blockedUserSubs?: string[];
 };
 
 type ChatMessage = {
@@ -337,11 +338,17 @@ export default function ChatScreen({
   onNewDmNotification,
   headerTop,
   theme = 'light',
+  blockedUserSubs = [],
 }: ChatScreenProps): React.JSX.Element {
   const isDark = theme === 'dark';
   const { user } = useAuthenticator();
   const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
+  const blockedSubsSet = React.useMemo(() => new Set((blockedUserSubs || []).filter(Boolean)), [blockedUserSubs]);
+  const visibleMessages = React.useMemo(
+    () => messages.filter((m) => !(m.userSub && blockedSubsSet.has(String(m.userSub)))),
+    [messages, blockedSubsSet]
+  );
   const [input, setInput] = React.useState<string>('');
   const inputRef = React.useRef<string>('');
   const textInputRef = React.useRef<TextInput | null>(null);
@@ -1902,6 +1909,7 @@ export default function ChatScreen({
           if (incomingConv !== activeConv) return;
           const u = typeof payload.user === 'string' ? payload.user : 'someone';
           const payloadUserSub = typeof payload.userSub === 'string' ? payload.userSub : '';
+          if (payloadUserSub && blockedSubsSet.has(payloadUserSub)) return;
           if (myUserId && payloadUserSub && payloadUserSub === myUserId) return;
           if (!payloadUserSub && payloadUserLower && payloadUserLower === myUserLower) return;
           const isTyping = payload.isTyping === true;
@@ -2040,6 +2048,7 @@ export default function ChatScreen({
             deletedAt: typeof payload.deletedAt === 'number' ? payload.deletedAt : undefined,
             deletedBySub: typeof payload.deletedBySub === 'string' ? payload.deletedBySub : undefined,
           };
+          if (msg.userSub && blockedSubsSet.has(String(msg.userSub))) return;
           if (hiddenMessageIds[msg.id]) return;
           setMessages((prev) => {
             const idx = prev.findIndex((m) => m.id === msg.id);
@@ -2068,6 +2077,7 @@ export default function ChatScreen({
           text: String(event.data),
           createdAt: Date.now(),
         };
+        if (msg.userSub && blockedSubsSet.has(String(msg.userSub))) return;
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
       }
     };
@@ -3307,7 +3317,7 @@ export default function ChatScreen({
           ) : null}
         </View>
         <FlatList
-          data={messages}
+          data={visibleMessages}
           keyExtractor={(m) => m.id}
           inverted
           keyboardShouldPersistTaps="handled"
@@ -5010,13 +5020,15 @@ const styles = StyleSheet.create({
   sendFailedTextAlignOutgoing: {
     textAlign: 'right',
     alignSelf: 'flex-end',
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    // Use an OPAQUE red pill so it stays red on the blue bubble (no purple blending),
+    // and white bold text for maximum contrast.
+    backgroundColor: '#b00020',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 10,
     overflow: 'hidden',
-    // Keep the "failed" cue red-ish, but readable on the outgoing blue bubble.
-    color: 'rgba(255,210,210,0.98)',
+    color: '#fff',
+    fontWeight: '700',
   },
   messageTextRow: { flexDirection: 'row', alignItems: 'flex-end' },
   messageTextRowOutgoing: { justifyContent: 'flex-end' },
