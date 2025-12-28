@@ -962,38 +962,45 @@ export default function ChatScreen({
     }
 
     if (!needed.length) return;
-    needed.forEach((path) => inFlightMediaUrlRef.current.add(path));
+    const uniqueNeeded = Array.from(new Set(needed));
+    uniqueNeeded.forEach((path) => inFlightMediaUrlRef.current.add(path));
 
     (async () => {
       const pairs: Array<[string, string]> = [];
-      for (const path of needed) {
-        try {
-          // One short retry helps with transient network hiccups (without adding complex state).
+      try {
+        for (const path of uniqueNeeded) {
           try {
-            const { url } = await getUrl({ path });
-            pairs.push([path, url.toString()]);
+            // One short retry helps with transient network hiccups (without adding complex state).
+            try {
+              const { url } = await getUrl({ path });
+              pairs.push([path, url.toString()]);
+            } catch {
+              await new Promise((r) => setTimeout(r, 300));
+              const { url } = await getUrl({ path });
+              pairs.push([path, url.toString()]);
+            }
           } catch {
-            await new Promise((r) => setTimeout(r, 300));
-            const { url } = await getUrl({ path });
-            pairs.push([path, url.toString()]);
+            // ignore; user can still tap to open, and future renders may re-trigger resolution
           }
-        } catch {
-          // ignore; user can still tap to open, and future renders may re-trigger resolution
         }
+        if (!cancelled && pairs.length) {
+          setMediaUrlByPath((prev) => {
+            const next = { ...prev };
+            for (const [p, u] of pairs) next[p] = u;
+            return next;
+          });
+        }
+      } finally {
+        // IMPORTANT: always clear in-flight flags, even if the effect is cancelled
+        // (otherwise thumbnails can get stuck "loading" forever).
+        for (const p of uniqueNeeded) inFlightMediaUrlRef.current.delete(p);
       }
-      if (cancelled) return;
-      if (pairs.length) {
-        setMediaUrlByPath((prev) => {
-          const next = { ...prev };
-          for (const [p, u] of pairs) next[p] = u;
-          return next;
-        });
-      }
-      for (const p of needed) inFlightMediaUrlRef.current.delete(p);
     })();
 
     return () => {
       cancelled = true;
+      // Also clear any remaining in-flight flags for this run.
+      for (const p of uniqueNeeded) inFlightMediaUrlRef.current.delete(p);
     };
   }, [isDm, messages, mediaUrlByPath, storageSessionReady]);
 
