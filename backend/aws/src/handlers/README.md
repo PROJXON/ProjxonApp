@@ -32,6 +32,12 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
   - **Auth**: JWT
   - **Notes**: DM-only unread badge hydration
 
+- **GET `/conversations`** → `http/getConversations.js`
+  - **Auth**: JWT
+  - **Query**: `limit` (default 50, max 200)
+  - **Returns**: `{ conversations: [{ conversationId, peerSub?, peerDisplayName?, lastMessageAt, lastSenderSub?, lastSenderDisplayName? }] }`
+  - **Notes**: DM inbox list, newest-first (requires Conversations GSI; falls back to unsorted base query if missing)
+
 - **GET `/users`** → `http/getUser.js`
   - **Auth**: JWT (current frontend expects this)
   - **Query**: `username` (case-insensitive) **or** `sub`
