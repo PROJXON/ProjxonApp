@@ -16,7 +16,7 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
 - **GET `/messages`** → `http/getMessages.js`
   - **Auth**: JWT
   - **Query**: `conversationId` (defaults to `global`), `limit` (default 50, max 200)
-  - **Notes**: returns newest-first
+  - **Notes**: returns newest-first; if `BLOCKS_TABLE` is configured, filters out messages authored by blocked users (server-side)
 
 - **GET `/public/messages`** → `http/getPublicMessages.js`
   - **Auth**: **Public** (no authorizer)
@@ -80,6 +80,21 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
   - **Auth**: JWT
   - **Body**: `{ expoPushToken?, deviceId? }`
   - **Notes**: removes a token on sign-out (prevents another account on the same device from receiving pushes)
+
+- **GET `/blocks`** → `http/getBlocks.js`
+  - **Auth**: JWT
+  - **Returns**: `{ blocked: [{ blockedSub, blockedDisplayName?, blockedUsernameLower?, blockedAt? }] }`
+  - **Notes**: if `USERS_TABLE` is configured, hydrates missing `blockedDisplayName` from Users
+
+- **POST `/blocks`** → `http/addBlock.js`
+  - **Auth**: JWT
+  - **Body**: `{ username }` (case-insensitive) **or** `{ blockedSub }`
+  - **Notes**: adds a user to your blocklist
+
+- **POST `/blocks/delete`** → `http/deleteBlock.js`
+  - **Auth**: JWT
+  - **Body**: `{ blockedSub }`
+  - **Notes**: removes a user from your blocklist
 
 ### WebSocket API (API Gateway WebSockets)
 
