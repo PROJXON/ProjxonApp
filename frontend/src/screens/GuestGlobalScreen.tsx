@@ -21,6 +21,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { API_URL } from '../config/env';
 import { getUrl } from 'aws-amplify/storage';
 import { VideoView, useVideoPlayer } from 'expo-video';
+import Feather from '@expo/vector-icons/Feather';
 
 type GuestMessage = {
   id: string;
@@ -350,9 +351,12 @@ export default function GuestGlobalScreen({
         <Text style={[styles.headerTitle, isDark && styles.headerTitleDark]}>Global</Text>
         <View style={styles.headerRight}>
           <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
-            <Text style={[styles.themeToggleText, isDark && styles.themeToggleTextDark]}>
-              {isDark ? 'Dark' : 'Light'}
-            </Text>
+            <Feather
+              name={isDark ? 'moon' : 'sun'}
+              size={16}
+              color={isDark ? '#fff' : '#111'}
+              accessibilityLabel={isDark ? 'Dark mode' : 'Light mode'}
+            />
             <Switch
               value={isDark}
               onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
@@ -836,14 +840,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#14141a',
     borderColor: '#2a2a33',
   },
-  themeToggleText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#111',
-  },
-  themeToggleTextDark: {
-    color: '#fff',
-  },
+  // (Theme toggle icon replaces the old Light/Dark label)
   signInPill: {
     paddingHorizontal: 12,
     paddingVertical: 8,

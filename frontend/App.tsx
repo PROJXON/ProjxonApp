@@ -26,6 +26,7 @@ import {
   ThemeProvider,
   useAuthenticator,
 } from "@aws-amplify/ui-react-native";
+import Feather from '@expo/vector-icons/Feather';
 // IMPORTANT: use the React-Native entrypoint (`src/*`) so these primitives share the same ThemeContext
 // as our `ThemeProvider` and Authenticator defaults. Importing from `dist/*` creates a separate context,
 // causing mismatched colors/borders (especially in dark mode).
@@ -698,9 +699,12 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
         <View style={styles.rightControls}>
           <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
-            <Text style={[styles.themeToggleText, isDark && styles.themeToggleTextDark]}>
-              {isDark ? 'Dark' : 'Light'}
-            </Text>
+            <Feather
+              name={isDark ? 'moon' : 'sun'}
+              size={16}
+              color={isDark ? '#fff' : '#111'}
+              accessibilityLabel={isDark ? 'Dark mode' : 'Light mode'}
+            />
             <Switch
               value={isDark}
               onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
@@ -1724,14 +1728,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#14141a',
     borderColor: '#2a2a33',
   },
-  themeToggleText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#111',
-  },
-  themeToggleTextDark: {
-    color: '#fff',
-  },
+  // (Theme toggle icon replaces the old Light/Dark label)
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
