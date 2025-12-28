@@ -4991,7 +4991,8 @@ const styles = StyleSheet.create({
   messageRowIncoming: { justifyContent: 'flex-start' },
   messageRowOutgoing: { justifyContent: 'flex-end' },
   messageBubble: {
-    maxWidth: '82%',
+    // Match guest screen behavior: allow bubbles to grow wider so long text wraps naturally.
+    maxWidth: '92%',
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 16,

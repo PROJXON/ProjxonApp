@@ -20,6 +20,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { API_URL } from '../config/env';
 import { getUrl } from 'aws-amplify/storage';
+import { VideoView, useVideoPlayer } from 'expo-video';
 
 type GuestMessage = {
   id: string;
@@ -129,6 +130,16 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
   return out.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
 }
 
+function FullscreenVideo({ url }: { url: string }): React.JSX.Element {
+  const player = useVideoPlayer(url, (p: any) => {
+    try {
+      p.play();
+    } catch {}
+  });
+
+  return <VideoView player={player} style={styles.viewerVideo} contentFit="contain" nativeControls />;
+}
+
 async function fetchGuestGlobalHistory(): Promise<GuestMessage[]> {
   if (!API_URL) throw new Error('API_URL is not configured');
   const base = API_URL.replace(/\/$/, '');
@@ -196,6 +207,9 @@ export default function GuestGlobalScreen({
   const [reactionInfoSubs, setReactionInfoSubs] = React.useState<string[]>([]);
   const [reactionInfoNamesBySub, setReactionInfoNamesBySub] = React.useState<Record<string, string>>({});
 
+  const [viewerOpen, setViewerOpen] = React.useState<boolean>(false);
+  const [viewerMedia, setViewerMedia] = React.useState<null | { url: string; kind: 'image' | 'video' | 'file'; fileName?: string }>(null);
+
   const resolvePathUrl = React.useCallback(
     async (path: string): Promise<string | null> => {
       if (!path) return null;
@@ -220,6 +234,28 @@ export default function GuestGlobalScreen({
     setReactionInfoNamesBySub(namesBySub && typeof namesBySub === 'object' ? namesBySub : {});
     setReactionInfoOpen(true);
   }, []);
+
+  const openViewer = React.useCallback(
+    async (media: GuestMessage['media']) => {
+      if (!media?.path) return;
+      const url = await resolvePathUrl(media.path);
+      if (!url) return;
+
+      // For files, keep the existing behavior (open externally).
+      if (media.kind === 'file') {
+        await Linking.openURL(url.toString());
+        return;
+      }
+
+      setViewerMedia({
+        url: url.toString(),
+        kind: media.kind,
+        fileName: media.fileName,
+      });
+      setViewerOpen(true);
+    },
+    [resolvePathUrl]
+  );
 
   const fetchNow = React.useCallback(async (opts?: { isManual?: boolean }) => {
     const isManual = !!opts?.isManual;
@@ -339,6 +375,7 @@ export default function GuestGlobalScreen({
             isDark={isDark}
             resolvePathUrl={resolvePathUrl}
             onOpenReactionInfo={openReactionInfo}
+            onOpenViewer={openViewer}
           />
         )}
       />
@@ -395,6 +432,41 @@ export default function GuestGlobalScreen({
           </View>
         </View>
       </Modal>
+
+      <Modal visible={viewerOpen} transparent animationType="fade">
+        <View style={styles.viewerOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              setViewerOpen(false);
+              setViewerMedia(null);
+            }}
+          />
+          <View style={styles.viewerCard}>
+            <View style={styles.viewerTopBar}>
+              <Text style={styles.viewerTitle}>{viewerMedia?.fileName || 'Attachment'}</Text>
+              <Pressable
+                style={styles.viewerCloseBtn}
+                onPress={() => {
+                  setViewerOpen(false);
+                  setViewerMedia(null);
+                }}
+              >
+                <Text style={styles.viewerCloseText}>Close</Text>
+              </Pressable>
+            </View>
+            <View style={styles.viewerBody}>
+              {viewerMedia?.kind === 'image' && viewerMedia?.url ? (
+                <Image source={{ uri: viewerMedia.url }} style={styles.viewerImage} />
+              ) : viewerMedia?.kind === 'video' && viewerMedia?.url ? (
+                <FullscreenVideo url={viewerMedia.url} />
+              ) : (
+                <Text style={styles.viewerFallback}>No preview available.</Text>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -404,11 +476,13 @@ function GuestMessageRow({
   isDark,
   resolvePathUrl,
   onOpenReactionInfo,
+  onOpenViewer,
 }: {
   item: GuestMessage;
   isDark: boolean;
   resolvePathUrl: (path: string) => Promise<string | null>;
   onOpenReactionInfo: (emoji: string, subs: string[], namesBySub?: Record<string, string>) => void;
+  onOpenViewer: (media: GuestMessage['media']) => void;
 }) {
   const { width: windowWidth } = useWindowDimensions();
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
@@ -447,18 +521,18 @@ function GuestMessageRow({
     };
   }, [thumbUrl]);
 
-  const openMedia = React.useCallback(async () => {
-    const p = item.media?.path;
-    if (!p) return;
-    const u = await resolvePathUrl(p);
-    if (u) await Linking.openURL(u);
-  }, [item.media?.path, resolvePathUrl]);
-
   const hasMedia = !!item.media?.path;
   const ts = formatGuestTimestamp(item.createdAt);
   const metaLine = `${item.user}${ts ? ` · ${ts}` : ''}`;
   const isEdited = typeof item.editedAt === 'number' && Number.isFinite(item.editedAt);
   const captionHasText = !!item.text && item.text.trim().length > 0;
+
+  const reactionEntriesVisible = React.useMemo(() => {
+    const entries = item.reactions ? Object.entries(item.reactions) : [];
+    return entries
+      .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
+      .slice(0, 3);
+  }, [item.reactions]);
 
   const onThumbError = React.useCallback(async () => {
     // Common cases:
@@ -495,20 +569,22 @@ function GuestMessageRow({
   return (
     <View style={[styles.msgRow]}>
       {hasMedia ? (
-        <View style={{ alignSelf: 'flex-start' }}>
-          <View
-            style={[
-              styles.guestMediaCard,
-              isDark ? styles.guestMediaCardDark : null,
-              { width: capped.w },
-            ]}
-          >
+        <View style={[styles.guestMediaCardOuter, { width: capped.w }]}>
+          <View style={[styles.guestMediaCard, isDark ? styles.guestMediaCardDark : null]}>
             <View style={[styles.guestMediaHeader, isDark ? styles.guestMediaHeaderDark : null]}>
               <View style={styles.guestMediaHeaderTopRow}>
-                <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>{metaLine}</Text>
-                {isEdited && !captionHasText ? (
-                  <Text style={[styles.guestEditedLabel, isDark ? styles.guestEditedLabelDark : null]}>Edited</Text>
-                ) : null}
+                <View style={styles.guestMediaHeaderTopLeft}>
+                  <Text
+                    style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}
+                  >
+                    {metaLine}
+                  </Text>
+                </View>
+                <View style={styles.guestMediaHeaderTopRight}>
+                  {isEdited && !captionHasText ? (
+                    <Text style={[styles.guestEditedLabel, isDark ? styles.guestEditedLabelDark : null]}>Edited</Text>
+                  ) : null}
+                </View>
               </View>
               {captionHasText ? (
                 <View style={styles.guestMediaCaptionRow}>
@@ -533,7 +609,9 @@ function GuestMessageRow({
             </View>
 
             <Pressable
-              onPress={() => void openMedia()}
+              onPress={() => {
+                if (item.media) onOpenViewer(item.media);
+              }}
               style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
               accessibilityRole="button"
               accessibilityLabel="Open media"
@@ -567,79 +645,59 @@ function GuestMessageRow({
             </Pressable>
           </View>
 
-          {item.reactions ? (
-            <View style={styles.guestReactionRow}>
-              {Object.entries(item.reactions)
-                .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
-                .slice(0, 3)
-                .map(([emoji, info], idx) => (
-                  <Pressable
-                    key={`${item.id}:${emoji}`}
-                    onPress={() =>
-                      onOpenReactionInfo(
-                        String(emoji),
-                        (info?.userSubs || []).map(String),
-                        item.reactionUsers
-                      )
-                    }
-                    style={[
-                      styles.guestReactionChip,
-                      isDark && styles.guestReactionChipDark,
-                      idx ? styles.guestReactionChipStacked : null,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Reactions ${emoji}`}
-                  >
-                    <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
-                      {emoji}
-                      {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
-                    </Text>
-                  </Pressable>
-                ))}
+          {reactionEntriesVisible.length ? (
+            <View style={styles.guestReactionOverlay} pointerEvents="box-none">
+              {reactionEntriesVisible.map(([emoji, info]) => (
+                <Pressable
+                  key={`${item.id}:${emoji}`}
+                  onPress={() =>
+                    onOpenReactionInfo(String(emoji), (info?.userSubs || []).map(String), item.reactionUsers)
+                  }
+                  style={[styles.guestReactionChip, isDark && styles.guestReactionChipDark]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Reactions ${emoji}`}
+                >
+                  <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
+                    {emoji}
+                    {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
+                  </Text>
+                </Pressable>
+              ))}
             </View>
           ) : null}
         </View>
       ) : (
-        <View style={[styles.bubble, isDark && styles.bubbleDark]}>
-          <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>{metaLine}</Text>
-          {item.text?.trim() ? (
-            <View style={styles.guestTextRow}>
-              <Text style={[styles.msgText, isDark && styles.msgTextDark, styles.guestTextFlex]}>{item.text}</Text>
-              {isEdited ? (
-                <Text style={[styles.guestEditedInline, isDark ? styles.guestEditedLabelDark : null]}> Edited</Text>
-              ) : null}
-            </View>
-          ) : null}
+        <View style={styles.guestBubbleOuter}>
+          <View style={[styles.bubble, isDark && styles.bubbleDark]}>
+            <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>{metaLine}</Text>
+            {item.text?.trim() ? (
+              <View style={styles.guestTextRow}>
+                <Text style={[styles.msgText, isDark && styles.msgTextDark, styles.guestTextFlex]}>{item.text}</Text>
+                {isEdited ? (
+                  <Text style={[styles.guestEditedInline, isDark ? styles.guestEditedLabelDark : null]}>Edited</Text>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
 
-          {item.reactions ? (
-            <View style={styles.guestReactionRow}>
-              {Object.entries(item.reactions)
-                .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
-                .slice(0, 3)
-                .map(([emoji, info], idx) => (
-                  <Pressable
-                    key={`${item.id}:${emoji}`}
-                    onPress={() =>
-                      onOpenReactionInfo(
-                        String(emoji),
-                        (info?.userSubs || []).map(String),
-                        item.reactionUsers
-                      )
-                    }
-                    style={[
-                      styles.guestReactionChip,
-                      isDark && styles.guestReactionChipDark,
-                      idx ? styles.guestReactionChipStacked : null,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Reactions ${emoji}`}
-                  >
-                    <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
-                      {emoji}
-                      {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
-                    </Text>
-                  </Pressable>
-                ))}
+          {reactionEntriesVisible.length ? (
+            <View style={styles.guestReactionOverlay} pointerEvents="box-none">
+              {reactionEntriesVisible.map(([emoji, info]) => (
+                <Pressable
+                  key={`${item.id}:${emoji}`}
+                  onPress={() =>
+                    onOpenReactionInfo(String(emoji), (info?.userSubs || []).map(String), item.reactionUsers)
+                  }
+                  style={[styles.guestReactionChip, isDark && styles.guestReactionChipDark]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Reactions ${emoji}`}
+                >
+                  <Text style={[styles.guestReactionText, isDark && styles.guestReactionTextDark]}>
+                    {emoji}
+                    {(info?.count ?? 0) > 1 ? ` ${(info?.count ?? 0)}` : ''}
+                  </Text>
+                </Pressable>
+              ))}
             </View>
           ) : null}
         </View>
@@ -743,6 +801,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     alignItems: 'flex-start',
   },
+  guestBubbleOuter: { alignSelf: 'flex-start', position: 'relative', overflow: 'visible', maxWidth: '92%' },
   bubble: {
     maxWidth: '92%',
     borderRadius: 14,
@@ -756,29 +815,36 @@ const styles = StyleSheet.create({
     backgroundColor: '#1c1c22',
     borderColor: '#2a2a33',
   },
-  guestReactionRow: {
+  guestReactionOverlay: {
+    position: 'absolute',
+    bottom: -12,
+    right: 10,
     flexDirection: 'row',
-    marginTop: 8,
+    alignItems: 'center',
   },
   guestReactionChip: {
     borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
     backgroundColor: '#fff',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#e3e3e3',
-    marginRight: -10,
   },
-  guestReactionChipStacked: {},
   guestReactionChipDark: {
     backgroundColor: '#14141a',
     borderColor: '#2a2a33',
   },
   guestReactionText: { color: '#111', fontWeight: '800', fontSize: 12 },
   guestReactionTextDark: { color: '#fff' },
-  guestTextRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
-  guestTextFlex: { flex: 1 },
-  guestEditedInline: { marginLeft: 6, fontSize: 12, fontStyle: 'italic', fontWeight: '400', color: '#555' },
+  guestTextRow: { flexDirection: 'row', alignItems: 'flex-end', flexWrap: 'wrap' },
+  guestTextFlex: { flexShrink: 1 },
+  guestEditedInline: {
+    marginLeft: 6,
+    fontSize: 12,
+    fontStyle: 'italic',
+    fontWeight: '400',
+    color: '#555',
+  },
   userText: {
     fontSize: 12,
     fontWeight: '800',
@@ -820,6 +886,7 @@ const styles = StyleSheet.create({
   msgTextDark: {
     color: '#fff',
   },
+  guestMediaCardOuter: { alignSelf: 'flex-start', position: 'relative', overflow: 'visible' },
   guestMediaCard: {
     borderRadius: 16,
     overflow: 'hidden',
@@ -853,6 +920,8 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   guestMediaHeaderTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  guestMediaHeaderTopLeft: { flex: 1, paddingRight: 10 },
+  guestMediaHeaderTopRight: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
   guestMediaCaptionRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4 },
   guestMediaCaptionFlex: { flex: 1, marginTop: 0 },
   guestMediaCaptionIndicators: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'flex-end', marginLeft: 10 },
@@ -974,6 +1043,17 @@ const styles = StyleSheet.create({
   },
   modalBtnText: { color: '#111', fontWeight: '800' },
   modalBtnTextDark: { color: '#fff' },
+
+  viewerOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'center', alignItems: 'center', padding: 12 },
+  viewerCard: { width: '96%', maxWidth: 720, height: '78%', backgroundColor: '#111', borderRadius: 14, overflow: 'hidden' },
+  viewerTopBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  viewerTitle: { color: '#fff', fontWeight: '700', flex: 1, marginRight: 12 },
+  viewerCloseBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.12)' },
+  viewerCloseText: { color: '#fff', fontWeight: '800' },
+  viewerBody: { flex: 1 },
+  viewerImage: { width: '100%', height: '100%', resizeMode: 'contain' },
+  viewerVideo: { width: '100%', height: '100%' },
+  viewerFallback: { color: '#fff', padding: 14 },
 });
 
 
