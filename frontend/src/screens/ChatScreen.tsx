@@ -385,6 +385,10 @@ export default function ChatScreen({
   const actionMenuAnim = React.useRef(new Animated.Value(0)).current;
   const [inlineEditTargetId, setInlineEditTargetId] = React.useState<string | null>(null);
   const [inlineEditDraft, setInlineEditDraft] = React.useState<string>('');
+  const [inlineEditAttachmentMode, setInlineEditAttachmentMode] = React.useState<
+    'keep' | 'replace' | 'remove'
+  >('keep');
+  const [inlineEditUploading, setInlineEditUploading] = React.useState<boolean>(false);
   const [hiddenMessageIds, setHiddenMessageIds] = React.useState<Record<string, true>>({});
   const [infoOpen, setInfoOpen] = React.useState(false);
   const [infoTitle, setInfoTitle] = React.useState<string>('');
@@ -2202,6 +2206,13 @@ export default function ChatScreen({
   }, [isDm]);
 
   const sendMessage = React.useCallback(async () => {
+    if (inlineEditTargetId) {
+      // NOTE: openInfo is declared later in this file, so avoid referencing it here.
+      setInfoTitle('Finish editing');
+      setInfoBody('Save or cancel the edit before sending a new message.');
+      setInfoOpen(true);
+      return;
+    }
     if (isUploading) return;
     const currentInput = inputRef.current;
     const currentPendingMedia = pendingMediaRef.current;
@@ -2386,6 +2397,7 @@ export default function ChatScreen({
     }
   }, [
     isUploading,
+    inlineEditTargetId,
     uploadPendingMedia,
     uploadPendingMediaDmEncrypted,
     displayName,
@@ -2617,20 +2629,36 @@ export default function ChatScreen({
         openInfo('Decrypt first', 'Decrypt this message before editing it');
         return;
       }
-      const seed = target.encrypted
-        ? String(target.decryptedText || '')
-        : String(target.rawText ?? target.text ?? '');
+      let seed = '';
+      if (target.encrypted) {
+        const plain = String(target.decryptedText || '');
+        const dmEnv = parseDmMediaEnvelope(plain);
+        // If this is a DM media message, edit the caption (not the raw JSON envelope).
+        seed = dmEnv ? String(dmEnv.caption || '') : plain;
+      } else {
+        const raw = String(target.rawText ?? target.text ?? '');
+        // Global media messages store a ChatEnvelope JSON; edit the caption (env.text).
+        const env = !isDm ? parseChatEnvelope(raw) : null;
+        seed = env ? String(env.text || '') : raw;
+      }
       setInlineEditTargetId(target.id);
       setInlineEditDraft(seed);
       closeMessageActions();
     },
-    [closeMessageActions, openInfo]
+    [closeMessageActions, openInfo, isDm]
   );
 
   const cancelInlineEdit = React.useCallback(() => {
+    if (inlineEditUploading) return;
     setInlineEditTargetId(null);
     setInlineEditDraft('');
-  }, []);
+    // If we were in "replace attachment" mode, discard the picked media so it doesn't leak into new sends.
+    if (inlineEditAttachmentMode === 'replace') {
+      setPendingMedia(null);
+      pendingMediaRef.current = null;
+    }
+    setInlineEditAttachmentMode('keep');
+  }, [inlineEditAttachmentMode, inlineEditUploading]);
 
   const hiddenKey = React.useMemo(() => {
     const who = myUserId || normalizeUser(displayName || 'anon');
@@ -2680,6 +2708,7 @@ export default function ChatScreen({
 
 
   const commitInlineEdit = React.useCallback(async () => {
+    if (inlineEditUploading) return;
     const targetId = inlineEditTargetId;
     if (!targetId) return;
     const target = messages.find((m) => m.id === targetId);
@@ -2695,18 +2724,86 @@ export default function ChatScreen({
       setError('Not connected');
       return;
     }
-    const nextText = inlineEditDraft.trim();
-    if (!nextText) return;
+    const nextCaption = inlineEditDraft.trim();
 
-    let outgoingText = nextText;
+    // Decide whether we can submit an "empty caption" edit.
+    // - If the edit results in a media envelope, it's fine (the JSON string is non-empty).
+    // - If the edit results in plain text (e.g. removing an attachment), we require non-empty text.
+    if (inlineEditAttachmentMode === 'remove' && !nextCaption) {
+      openInfo('Add text', 'Add some text before removing the attachment (or choose Delete).');
+      return;
+    }
+
+    let outgoingText = nextCaption;
+    let dmPlaintextSent: string | null = null;
+    let dmMediaSent: ChatMessage['media'] | undefined = undefined;
     const needsEncryption = isDm && !!target.encrypted;
     if (needsEncryption) {
       if (!myPrivateKey || !peerPublicKey) {
         Alert.alert('Encryption not ready', 'Missing keys for editing.');
         return;
       }
-      const enc = encryptChatMessageV1(nextText, myPrivateKey, peerPublicKey);
+      // If this is a DM media message:
+      // - keep: update caption only
+      // - replace: upload new media + create new dm_media_v1 envelope
+      // - remove: send plain text (caption only) DM message
+      let plaintextToEncrypt = nextCaption;
+      const existingPlain = String(target.decryptedText || '');
+      const existingDmEnv = parseDmMediaEnvelope(existingPlain);
+
+      if (inlineEditAttachmentMode === 'replace' && pendingMediaRef.current) {
+        // Replace attachment by uploading new encrypted media and updating caption.
+        setInlineEditUploading(true);
+        try {
+          const dmEnv = await uploadPendingMediaDmEncrypted(
+            pendingMediaRef.current,
+            activeConversationId,
+            myPrivateKey,
+            peerPublicKey
+          );
+          plaintextToEncrypt = JSON.stringify({ ...dmEnv, caption: nextCaption || undefined });
+        } finally {
+          setInlineEditUploading(false);
+        }
+      } else if (inlineEditAttachmentMode === 'keep' && existingDmEnv) {
+        plaintextToEncrypt = JSON.stringify({ ...existingDmEnv, caption: nextCaption || undefined });
+      }
+
+      dmPlaintextSent = plaintextToEncrypt;
+      const parsed = parseDmMediaEnvelope(dmPlaintextSent);
+      if (parsed?.media?.path) {
+        dmMediaSent = {
+          path: parsed.media.path,
+          thumbPath: parsed.media.thumbPath,
+          kind: parsed.media.kind,
+          contentType: parsed.media.contentType,
+          thumbContentType: parsed.media.thumbContentType,
+          fileName: parsed.media.fileName,
+          size: parsed.media.size,
+        };
+      }
+
+      const enc = encryptChatMessageV1(plaintextToEncrypt, myPrivateKey, peerPublicKey);
       outgoingText = JSON.stringify(enc);
+    } else if (!isDm) {
+      // Global messages:
+      // - keep: if it's a media envelope, preserve media and update caption
+      // - replace: upload new media and create a new envelope
+      // - remove: send plain text (caption only)
+      const raw = String(target.rawText ?? target.text ?? '');
+      const env = parseChatEnvelope(raw);
+
+      if (inlineEditAttachmentMode === 'replace' && pendingMediaRef.current) {
+        setInlineEditUploading(true);
+        try {
+          const uploaded = await uploadPendingMedia(pendingMediaRef.current);
+          outgoingText = JSON.stringify({ type: 'chat', text: nextCaption || undefined, media: uploaded });
+        } finally {
+          setInlineEditUploading(false);
+        }
+      } else if (inlineEditAttachmentMode === 'keep' && env?.media) {
+        outgoingText = JSON.stringify({ type: 'chat', text: nextCaption || undefined, media: env.media });
+      }
     }
 
     try {
@@ -2720,6 +2817,22 @@ export default function ChatScreen({
         })
       );
       const now = Date.now();
+      // Build optimistic local state:
+      // - For global media edits, media is derived from the envelope string, so rawText is enough.
+      // - For DM media edits, update decryptedText + media so UI renders immediately.
+      let optimisticDecryptedText: string | undefined = undefined;
+      let optimisticMedia: ChatMessage['media'] | undefined = undefined;
+      if (needsEncryption) {
+        if (inlineEditAttachmentMode === 'remove') {
+          optimisticDecryptedText = nextCaption;
+          optimisticMedia = undefined;
+        } else if (dmPlaintextSent) {
+          optimisticDecryptedText = dmPlaintextSent;
+          optimisticMedia = dmMediaSent;
+        } else {
+          optimisticDecryptedText = nextCaption;
+        }
+      }
       setMessages((prev) =>
         prev.map((m) =>
           m.id === targetId
@@ -2727,8 +2840,10 @@ export default function ChatScreen({
                 ...m,
                 rawText: outgoingText,
                 encrypted: parseEncrypted(outgoingText) ?? undefined,
-                decryptedText: needsEncryption ? nextText : m.decryptedText,
-                text: needsEncryption ? nextText : nextText,
+                decryptedText: needsEncryption ? optimisticDecryptedText : m.decryptedText,
+                media: needsEncryption ? optimisticMedia : m.media,
+                // Always show the edited caption in the UI (even for envelopes).
+                text: nextCaption,
                 editedAt: now,
               }
             : m
@@ -2741,12 +2856,17 @@ export default function ChatScreen({
   }, [
     inlineEditTargetId,
     inlineEditDraft,
+    inlineEditAttachmentMode,
+    inlineEditUploading,
     messages,
     cancelInlineEdit,
     activeConversationId,
     isDm,
     myPrivateKey,
     peerPublicKey,
+    uploadPendingMediaDmEncrypted,
+    uploadPendingMedia,
+    openInfo,
   ]);
 
   const sendDelete = React.useCallback(async () => {
@@ -3061,6 +3181,7 @@ export default function ChatScreen({
           data={messages}
           keyExtractor={(m) => m.id}
           inverted
+          keyboardShouldPersistTaps="handled"
           // Perf tuning (especially on Android):
           removeClippedSubviews={Platform.OS === 'android'}
           initialNumToRender={18}
@@ -3097,8 +3218,13 @@ export default function ChatScreen({
 
           const envelope =
             !item.encrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;
-          const captionText =
-            envelope && typeof envelope.text === 'string' ? envelope.text : item.text;
+          // Only treat it as a "media envelope" if it actually has media.
+          // (Otherwise a random JSON message could parse as an envelope and we'd hide the text.)
+          const mediaEnvelope = envelope?.media?.path ? envelope : null;
+          // If it's a media envelope, the caption is ONLY env.text (optional).
+          // Do NOT fall back to item.text, because for envelopes item.text often contains the full JSON.
+          const captionText = mediaEnvelope ? String(mediaEnvelope.text ?? '') : item.text;
+          const captionHasText = !!captionText && String(captionText).trim().length > 0;
           const isDeleted = typeof item.deletedAt === 'number' && Number.isFinite(item.deletedAt);
           const displayText = isDeleted ? 'This message has been deleted' : captionText;
           const isEdited = !isDeleted && typeof item.editedAt === 'number' && Number.isFinite(item.editedAt);
@@ -3108,7 +3234,7 @@ export default function ChatScreen({
                 .filter((r) => r.emoji && r.count > 0)
                 .sort((a, b) => b.count - a.count)
             : [];
-          const media = envelope?.media ?? item.media;
+          const media = mediaEnvelope?.media ?? item.media;
           const mediaUrl = media?.path ? mediaUrlByPath[media.path] : null;
           const mediaThumbUrl = media?.thumbPath ? mediaUrlByPath[media.thumbPath] : null;
           const dmThumbUri =
@@ -3144,6 +3270,15 @@ export default function ChatScreen({
             : `${metaPrefix}${formatted}${
             expiresIn != null ? ` · disappears in ${formatRemaining(expiresIn)}` : ''
           }`;
+          const showSendStatusInline =
+            isOutgoing &&
+            !seenLabel &&
+            item.localStatus !== 'failed' &&
+            item.id === latestOutgoingMessageId;
+          // If there is a caption, we want indicators on the bottom-right of the header bar
+          // (on the caption row), similar to normal text bubbles.
+          const showEditedInlineForCaption = isEdited && captionHasText;
+          const showEditedInlineNoCaption = isEdited && !captionHasText;
 
             return (           
               <Pressable
@@ -3193,33 +3328,190 @@ export default function ChatScreen({
                                 : styles.mediaHeaderIncoming,
                           ]}
                         >
-                          {metaLine ? (
-                          <Text
-                            style={[
-                              styles.mediaHeaderMeta,
-                              isOutgoing
-                                ? styles.mediaHeaderMetaOutgoing
-                                : isDark
-                                  ? styles.mediaHeaderMetaIncomingDark
-                                  : styles.mediaHeaderMetaIncoming,
-                            ]}
-                          >
-                            {metaLine}
-                          </Text>
-                          ) : null}
-                          {captionText?.length ? (
-                            <Text
-                              style={[
-                                styles.mediaHeaderCaption,
-                                isOutgoing
-                                  ? styles.mediaHeaderCaptionOutgoing
-                                  : isDark
-                                    ? styles.mediaHeaderCaptionIncomingDark
-                                    : styles.mediaHeaderCaptionIncoming,
-                              ]}
-                            >
-                              {captionText}
-                            </Text>
+                          <View style={styles.mediaHeaderTopRow}>
+                            <View style={styles.mediaHeaderTopLeft}>
+                              {metaLine ? (
+                                <Text
+                                  style={[
+                                    styles.mediaHeaderMeta,
+                                    isOutgoing
+                                      ? styles.mediaHeaderMetaOutgoing
+                                      : isDark
+                                        ? styles.mediaHeaderMetaIncomingDark
+                                        : styles.mediaHeaderMetaIncoming,
+                                  ]}
+                                >
+                                  {metaLine}
+                                </Text>
+                              ) : null}
+                            </View>
+
+                            {/* If there is no caption row, show send status on the meta row (right-aligned). */}
+                            {!captionHasText && (showEditedInlineNoCaption || showSendStatusInline) ? (
+                              <View style={styles.mediaHeaderTopRight}>
+                                {showEditedInlineNoCaption ? (
+                                  <Text
+                                    style={[
+                                      styles.editedLabel,
+                                      isOutgoing
+                                        ? (isDark ? styles.editedLabelOutgoingDark : styles.editedLabelOutgoing)
+                                        : (isDark ? styles.editedLabelIncomingDark : styles.editedLabelIncoming),
+                                    ]}
+                                  >
+                                    Edited
+                                  </Text>
+                                ) : null}
+                                {showSendStatusInline ? (
+                                  <Text
+                                    style={[
+                                      styles.sendStatusInline,
+                                      isOutgoing
+                                        ? (isDark ? styles.sendStatusInlineOutgoingDark : styles.sendStatusInlineOutgoing)
+                                        : (isDark ? styles.sendStatusInlineIncomingDark : styles.sendStatusInlineIncoming),
+                                    ]}
+                                  >
+                                    {item.localStatus === 'sending' ? '…' : '✓'}
+                                  </Text>
+                                ) : null}
+                              </View>
+                            ) : null}
+                          </View>
+                          {inlineEditTargetId && item.id === inlineEditTargetId && !isDeleted ? (
+                            <View style={styles.inlineEditWrap}>
+                              <TextInput
+                                style={[
+                                  styles.inlineEditInput,
+                                  isOutgoing ? styles.inlineEditInputOutgoing : styles.inlineEditInputIncoming,
+                                ]}
+                                value={inlineEditDraft}
+                                onChangeText={setInlineEditDraft}
+                                multiline
+                                autoFocus
+                                placeholder="Add a caption…"
+                                placeholderTextColor={isOutgoing ? 'rgba(255,255,255,0.75)' : isDark ? '#b7b7c2' : '#777'}
+                                editable={!inlineEditUploading}
+                                selectionColor={isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'}
+                                cursorColor={isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'}
+                              />
+                              {inlineEditAttachmentMode === 'remove' ? (
+                                <Text
+                                  style={[
+                                    styles.mediaEditHint,
+                                    isOutgoing ? styles.mediaEditHintOutgoing : isDark ? styles.mediaEditHintIncomingDark : styles.mediaEditHintIncoming,
+                                  ]}
+                                >
+                                  Attachment will be removed
+                                </Text>
+                              ) : inlineEditAttachmentMode === 'replace' && pendingMedia ? (
+                                <Text
+                                  style={[
+                                    styles.mediaEditHint,
+                                    isOutgoing ? styles.mediaEditHintOutgoing : isDark ? styles.mediaEditHintIncomingDark : styles.mediaEditHintIncoming,
+                                  ]}
+                                >
+                                  New attachment selected
+                                </Text>
+                              ) : null}
+                              <View style={styles.inlineEditActions}>
+                                <Pressable
+                                  onPress={() => void commitInlineEdit()}
+                                  disabled={inlineEditUploading}
+                                  style={({ pressed }) => [
+                                    styles.inlineEditBtn,
+                                    inlineEditUploading ? styles.btnDisabled : null,
+                                    pressed ? styles.inlineEditBtnPressed : null,
+                                  ]}
+                                >
+                                  {inlineEditUploading ? (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                      <Text
+                                        style={[
+                                          styles.inlineEditBtnText,
+                                          isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                        ]}
+                                      >
+                                        Uploading
+                                      </Text>
+                                      <AnimatedDots
+                                        color={isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#111' : '#111'}
+                                        size={16}
+                                      />
+                                    </View>
+                                  ) : (
+                                    <Text
+                                      style={[
+                                        styles.inlineEditBtnText,
+                                        isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                      ]}
+                                    >
+                                      Save
+                                    </Text>
+                                  )}
+                                </Pressable>
+                                <Pressable
+                                  onPress={cancelInlineEdit}
+                                  disabled={inlineEditUploading}
+                                  style={({ pressed }) => [
+                                    styles.inlineEditBtn,
+                                    inlineEditUploading ? styles.btnDisabled : null,
+                                    pressed ? styles.inlineEditBtnPressed : null,
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.inlineEditBtnText,
+                                      isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                    ]}
+                                  >
+                                    Cancel
+                                  </Text>
+                                </Pressable>
+                              </View>
+                            </View>
+                          ) : captionText?.length ? (
+                            <View style={styles.mediaHeaderCaptionRow}>
+                              <Text
+                                style={[
+                                  styles.mediaHeaderCaption,
+                                  isOutgoing
+                                    ? styles.mediaHeaderCaptionOutgoing
+                                    : isDark
+                                      ? styles.mediaHeaderCaptionIncomingDark
+                                      : styles.mediaHeaderCaptionIncoming,
+                                  styles.mediaHeaderCaptionFlex,
+                                ]}
+                              >
+                                {captionText}
+                              </Text>
+                              {showEditedInlineForCaption || showSendStatusInline ? (
+                                <View style={styles.mediaHeaderCaptionIndicators}>
+                                  {showEditedInlineForCaption ? (
+                                    <Text
+                                      style={[
+                                        styles.editedLabel,
+                                        isOutgoing
+                                          ? (isDark ? styles.editedLabelOutgoingDark : styles.editedLabelOutgoing)
+                                          : (isDark ? styles.editedLabelIncomingDark : styles.editedLabelIncoming),
+                                      ]}
+                                    >
+                                      Edited
+                                    </Text>
+                                  ) : null}
+                                  {showSendStatusInline ? (
+                                    <Text
+                                      style={[
+                                        styles.sendStatusInline,
+                                        isOutgoing
+                                          ? (isDark ? styles.sendStatusInlineOutgoingDark : styles.sendStatusInlineOutgoing)
+                                          : (isDark ? styles.sendStatusInlineIncomingDark : styles.sendStatusInlineIncoming),
+                                      ]}
+                                    >
+                                      {item.localStatus === 'sending' ? '…' : '✓'}
+                                    </Text>
+                                  ) : null}
+                                </View>
+                              ) : null}
+                            </View>
                           ) : null}
                         </View>
                         {media?.path ? (
@@ -3419,6 +3711,7 @@ export default function ChatScreen({
                                 onChangeText={setInlineEditDraft}
                                 multiline
                                 autoFocus
+                                editable={!inlineEditUploading}
                                 selectionColor={
                                   isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'
                                 }
@@ -3426,27 +3719,62 @@ export default function ChatScreen({
                                   isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'
                                 }
                               />
+                              {inlineEditAttachmentMode === 'replace' && pendingMedia ? (
+                                <Text
+                                  style={[
+                                    styles.mediaEditHint,
+                                    isOutgoing
+                                      ? styles.mediaEditHintOutgoing
+                                      : isDark
+                                        ? styles.mediaEditHintIncomingDark
+                                        : styles.mediaEditHintIncoming,
+                                  ]}
+                                >
+                                  Attachment will be added
+                                </Text>
+                              ) : null}
                               <View style={styles.inlineEditActions}>
                                 <Pressable
                                   onPress={() => void commitInlineEdit()}
+                                  disabled={inlineEditUploading}
                                   style={({ pressed }) => [
                                     styles.inlineEditBtn,
+                                    inlineEditUploading ? styles.btnDisabled : null,
                                     pressed ? styles.inlineEditBtnPressed : null,
                                   ]}
                                 >
-                                  <Text
-                                    style={[
-                                      styles.inlineEditBtnText,
-                                      isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
-                                    ]}
-                                  >
-                                    Save
-                                  </Text>
+                                  {inlineEditUploading ? (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                      <Text
+                                        style={[
+                                          styles.inlineEditBtnText,
+                                          isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                        ]}
+                                      >
+                                        Uploading
+                                      </Text>
+                                      <AnimatedDots
+                                        color={isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#111' : '#111'}
+                                        size={16}
+                                      />
+                                    </View>
+                                  ) : (
+                                    <Text
+                                      style={[
+                                        styles.inlineEditBtnText,
+                                        isOutgoing ? styles.inlineEditBtnTextOutgoing : styles.inlineEditBtnTextIncoming,
+                                      ]}
+                                    >
+                                      Save
+                                    </Text>
+                                  )}
                                 </Pressable>
                                 <Pressable
                                   onPress={cancelInlineEdit}
+                                  disabled={inlineEditUploading}
                                   style={({ pressed }) => [
                                     styles.inlineEditBtn,
+                                    inlineEditUploading ? styles.btnDisabled : null,
                                     pressed ? styles.inlineEditBtnPressed : null,
                                   ]}
                                 >
@@ -3582,7 +3910,25 @@ export default function ChatScreen({
           }}
           contentContainerStyle={styles.listContent}
         />
-        {pendingMedia ? (
+        {inlineEditTargetId ? (
+          <View style={[styles.editingBar, isDark ? styles.editingBarDark : null]}>
+            <Text style={[styles.editingBarText, isDark ? styles.editingBarTextDark : null]}>Editing message</Text>
+            <Pressable
+              onPress={cancelInlineEdit}
+              disabled={inlineEditUploading}
+              style={({ pressed }) => [
+                styles.editingBarCancelBtn,
+                isDark ? styles.editingBarCancelBtnDark : null,
+                inlineEditUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+                pressed ? { opacity: 0.85 } : null,
+              ]}
+            >
+              <Text style={[styles.editingBarCancelText, isDark ? styles.editingBarCancelTextDark : null]}>
+                Cancel
+              </Text>
+            </Pressable>
+          </View>
+        ) : pendingMedia ? (
           <Pressable
             style={[styles.attachmentPill, isDark ? styles.attachmentPillDark : null]}
             onPress={() => setPendingMedia(null)}
@@ -3607,10 +3953,10 @@ export default function ChatScreen({
             style={[
               styles.pickBtn,
               isDark ? styles.pickBtnDark : null,
-              isUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+              isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
             ]}
             onPress={handlePickMedia}
-            disabled={isUploading}
+            disabled={isUploading || !!inlineEditTargetId}
           >
             <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
           </Pressable>
@@ -3620,12 +3966,19 @@ export default function ChatScreen({
             }}
             key={`chat-input-${inputEpoch}`}
             style={[styles.input, isDark ? styles.inputDark : null]}
-            placeholder={pendingMedia ? 'Add a caption (optional)…' : 'Type a message'}
+            placeholder={
+              inlineEditTargetId
+                ? 'Finish editing above…'
+                : pendingMedia
+                  ? 'Add a caption (optional)…'
+                  : 'Type a message'
+            }
             placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
             selectionColor={isDark ? '#ffffff' : '#111'}
             cursorColor={isDark ? '#ffffff' : '#111'}
             value={input}
             onChangeText={onChangeInput}
+            editable={!inlineEditTargetId && !isUploading}
             onBlur={() => {
               if (isTypingRef.current) sendTyping(false);
             }}
@@ -3636,10 +3989,10 @@ export default function ChatScreen({
             style={[
               styles.sendBtn,
               isDark ? styles.sendBtnDark : null,
-              isUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+              isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
             ]}
             onPress={sendMessage}
-            disabled={isUploading}
+            disabled={isUploading || !!inlineEditTargetId}
           >
             <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>
               {isUploading ? (
@@ -3731,15 +4084,84 @@ export default function ChatScreen({
             {/* Message preview (Signal-style) */}
             {messageActionTarget ? (
               <View style={[styles.actionMenuPreviewRow, isDark ? styles.actionMenuPreviewRowDark : null]}>
-                <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
-                  <Text style={[styles.messageText, styles.messageTextOutgoing]}>
-                    {messageActionTarget.deletedAt
-                      ? 'This message has been deleted'
-                      : messageActionTarget.encrypted
-                        ? (messageActionTarget.decryptedText || ENCRYPTED_PLACEHOLDER)
-                        : (messageActionTarget.rawText ?? messageActionTarget.text)}
-                  </Text>
-                </View>
+                {(() => {
+                  const t = messageActionTarget;
+                  if (!t) return null;
+                  if (t.deletedAt) {
+                    return (
+                      <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
+                        <Text style={[styles.messageText, styles.messageTextOutgoing]}>This message has been deleted</Text>
+                      </View>
+                    );
+                  }
+
+                  let caption = '';
+                  let thumbUri: string | null = null;
+                  let kind: 'image' | 'video' | 'file' | null = null;
+                  let hasMedia = false;
+
+                  if (t.encrypted) {
+                    if (!t.decryptedText) {
+                      return (
+                        <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
+                          <Text style={[styles.messageText, styles.messageTextOutgoing]}>{ENCRYPTED_PLACEHOLDER}</Text>
+                        </View>
+                      );
+                    }
+                    const dmEnv = parseDmMediaEnvelope(String(t.decryptedText));
+                    if (dmEnv?.media?.path) {
+                      hasMedia = true;
+                      caption = String(dmEnv.caption || '');
+                      kind = (dmEnv.media.kind as any) || 'file';
+                      thumbUri =
+                        dmEnv.media.thumbPath && dmThumbUriByPath[dmEnv.media.thumbPath]
+                          ? dmThumbUriByPath[dmEnv.media.thumbPath]
+                          : null;
+                    } else {
+                      caption = String(t.decryptedText || '');
+                    }
+                  } else {
+                    const raw = String(t.rawText ?? t.text ?? '');
+                    const env = !isDm ? parseChatEnvelope(raw) : null;
+                    if (env?.media?.path) {
+                      hasMedia = true;
+                      caption = String(env.text || '');
+                      kind = (env.media.kind as any) || 'file';
+                      const key = String(env.media.thumbPath || env.media.path);
+                      thumbUri = mediaUrlByPath[key] ? mediaUrlByPath[key] : null;
+                    } else {
+                      caption = raw;
+                    }
+                  }
+
+                  if (!hasMedia) {
+                    return (
+                      <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
+                        <Text style={[styles.messageText, styles.messageTextOutgoing]}>{caption}</Text>
+                      </View>
+                    );
+                  }
+
+                  const label = kind === 'image' ? 'Photo' : kind === 'video' ? 'Video' : 'Attachment';
+                  return (
+                    <View style={styles.actionMenuMediaPreview}>
+                      <View style={styles.actionMenuMediaThumbWrap}>
+                        {thumbUri ? (
+                          <Image source={{ uri: thumbUri }} style={styles.actionMenuMediaThumb} resizeMode="cover" />
+                        ) : (
+                          <View style={styles.actionMenuMediaThumbPlaceholder}>
+                            <Text style={styles.actionMenuMediaThumbPlaceholderText}>{label}</Text>
+                          </View>
+                        )}
+                      </View>
+                      {caption.trim().length ? (
+                        <Text style={[styles.actionMenuMediaCaption, isDark ? styles.actionMenuMediaCaptionDark : null]}>
+                          {caption.trim()}
+                        </Text>
+                      ) : null}
+                    </View>
+                  );
+                })()}
               </View>
             ) : null}
 
@@ -3830,15 +4252,74 @@ export default function ChatScreen({
                     : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
                 const canEdit = isEncryptedOutgoing || isPlainOutgoing;
                 if (!canEdit) return null;
+                const hasMedia = (() => {
+                  if (t.deletedAt) return false;
+                  if (t.encrypted) {
+                    if (!t.decryptedText) return false;
+                    const dmEnv = parseDmMediaEnvelope(String(t.decryptedText));
+                    return !!dmEnv?.media?.path;
+                  }
+                  if (isDm) return false;
+                  const env = parseChatEnvelope(String(t.rawText ?? t.text ?? ''));
+                  return !!env?.media?.path;
+                })();
                 return (
-                  <Pressable
-                    onPress={() => {
-                      beginInlineEdit(t);
-                    }}
-                    style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
-                  >
-                    <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Edit</Text>
-                  </Pressable>
+                  <>
+                    {!hasMedia ? (
+                      <Pressable
+                        onPress={() => {
+                          setInlineEditAttachmentMode('replace');
+                          beginInlineEdit(t);
+                          handlePickMedia();
+                        }}
+                        style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                      >
+                        <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                          Add attachment
+                        </Text>
+                      </Pressable>
+                    ) : null}
+
+                    {hasMedia ? (
+                      <Pressable
+                        onPress={() => {
+                          setInlineEditAttachmentMode('replace');
+                          beginInlineEdit(t);
+                          handlePickMedia();
+                        }}
+                        style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                      >
+                        <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                          Replace attachment
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                    {hasMedia ? (
+                      <Pressable
+                        onPress={() => {
+                          setInlineEditAttachmentMode('remove');
+                          setPendingMedia(null);
+                          pendingMediaRef.current = null;
+                          beginInlineEdit(t);
+                        }}
+                        style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                      >
+                        <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                          Remove attachment
+                        </Text>
+                      </Pressable>
+                    ) : null}
+
+                    <Pressable
+                      onPress={() => {
+                        setInlineEditAttachmentMode('keep');
+                        beginInlineEdit(t);
+                      }}
+                      style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                    >
+                      <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Edit</Text>
+                    </Pressable>
+                  </>
                 );
               })()}
 
@@ -4282,7 +4763,7 @@ const styles = StyleSheet.create({
   sendStatusInlineIncoming: { color: '#555' }, // readable on light bubble
   sendStatusInlineIncomingDark: { color: '#a7a7b4' }, // readable on dark bubble
 
-  editedLabel: { marginLeft: 6, fontSize: 12, fontStyle: 'italic' },
+  editedLabel: { marginLeft: 6, fontSize: 12, fontStyle: 'italic', fontWeight: '400' },
   editedLabelOutgoing: { color: 'rgba(255,255,255,0.9)' },
   editedLabelOutgoingDark: { color: 'rgba(255,255,255,0.85)' },
   editedLabelIncoming: { color: '#555' },
@@ -4311,6 +4792,10 @@ const styles = StyleSheet.create({
   inlineEditBtnText: { fontWeight: '700' },
   inlineEditBtnTextIncoming: { color: '#111' },
   inlineEditBtnTextOutgoing: { color: '#fff' },
+  mediaEditHint: { marginTop: 6, fontSize: 12, fontWeight: '700' },
+  mediaEditHintIncoming: { color: '#555' },
+  mediaEditHintIncomingDark: { color: '#b7b7c2' },
+  mediaEditHintOutgoing: { color: 'rgba(255,255,255,0.85)' },
   messageMeta: { fontSize: 12, marginBottom: 1, fontWeight: '700' },
   messageMetaIncoming: { color: '#555' },
   messageMetaIncomingDark: { color: '#b7b7c2' },
@@ -4528,6 +5013,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: '#e6e6ef',
   },
+  editingBarCancelBtnDark: { backgroundColor: '#2a2a33' },
   editingBarCancelText: { color: '#111', fontWeight: '700' },
   editingBarCancelTextDark: { color: '#fff' },
   typingIndicatorRow: {
@@ -4613,6 +5099,20 @@ const styles = StyleSheet.create({
   actionMenuCardDark: { backgroundColor: '#14141a' },
   actionMenuPreviewRow: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#eee' },
   actionMenuPreviewRowDark: { borderBottomColor: '#2a2a33' },
+  actionMenuMediaPreview: { gap: 10 },
+  actionMenuMediaThumbWrap: { alignSelf: 'flex-start' },
+  actionMenuMediaThumb: { width: 96, height: 96, borderRadius: 12 },
+  actionMenuMediaThumbPlaceholder: {
+    width: 96,
+    height: 96,
+    borderRadius: 12,
+    backgroundColor: '#e9e9ee',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  actionMenuMediaThumbPlaceholderText: { color: '#555', fontWeight: '700' },
+  actionMenuMediaCaption: { color: '#222', lineHeight: 18 },
+  actionMenuMediaCaptionDark: { color: '#d7d7e0' },
   actionMenuOptions: { paddingVertical: 6 },
   reactionOverlay: {
     position: 'absolute',
@@ -4622,6 +5122,17 @@ const styles = StyleSheet.create({
   },
   reactionOverlayIncoming: { left: 10 },
   reactionOverlayOutgoing: { right: 10, flexDirection: 'row-reverse' },
+  mediaHeaderTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  mediaHeaderTopLeft: { flex: 1, paddingRight: 10 },
+  mediaHeaderTopRight: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
+  mediaHeaderCaptionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    marginTop: 4,
+  },
+  mediaHeaderCaptionFlex: { flex: 1, marginTop: 0 },
+  mediaHeaderCaptionIndicators: { flexDirection: 'row', alignItems: 'flex-end', marginLeft: 10, gap: 6 },
   reactionMiniChip: {
     borderRadius: 999,
     paddingHorizontal: 8,

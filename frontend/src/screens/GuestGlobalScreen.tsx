@@ -26,6 +26,7 @@ type GuestMessage = {
   user: string;
   text: string;
   createdAt: number;
+  editedAt?: number;
   reactions?: Record<string, { count: number; userSubs: string[] }>;
   reactionUsers?: Record<string, string>;
   media?: {
@@ -110,6 +111,7 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
       user,
       text,
       createdAt,
+      editedAt: typeof (it as any)?.editedAt === 'number' ? (it as any).editedAt : undefined,
       reactions: normalizeGuestReactions((it as any)?.reactions),
       reactionUsers:
         (it as any)?.reactionUsers && typeof (it as any).reactionUsers === 'object'
@@ -455,6 +457,8 @@ function GuestMessageRow({
   const hasMedia = !!item.media?.path;
   const ts = formatGuestTimestamp(item.createdAt);
   const metaLine = `${item.user}${ts ? ` · ${ts}` : ''}`;
+  const isEdited = typeof item.editedAt === 'number' && Number.isFinite(item.editedAt);
+  const captionHasText = !!item.text && item.text.trim().length > 0;
 
   const onThumbError = React.useCallback(async () => {
     // Common cases:
@@ -500,13 +504,31 @@ function GuestMessageRow({
             ]}
           >
             <View style={[styles.guestMediaHeader, isDark ? styles.guestMediaHeaderDark : null]}>
-              <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>
-                {metaLine}
-              </Text>
-              {item.text?.trim() ? (
-                <Text style={[styles.guestMediaCaption, isDark ? styles.guestMediaCaptionDark : null]}>
-                  {item.text}
-                </Text>
+              <View style={styles.guestMediaHeaderTopRow}>
+                <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>{metaLine}</Text>
+                {isEdited && !captionHasText ? (
+                  <Text style={[styles.guestEditedLabel, isDark ? styles.guestEditedLabelDark : null]}>Edited</Text>
+                ) : null}
+              </View>
+              {captionHasText ? (
+                <View style={styles.guestMediaCaptionRow}>
+                  <Text
+                    style={[
+                      styles.guestMediaCaption,
+                      isDark ? styles.guestMediaCaptionDark : null,
+                      styles.guestMediaCaptionFlex,
+                    ]}
+                  >
+                    {item.text}
+                  </Text>
+                  {isEdited ? (
+                    <View style={styles.guestMediaCaptionIndicators}>
+                      <Text style={[styles.guestEditedLabel, isDark ? styles.guestEditedLabelDark : null]}>
+                        Edited
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
               ) : null}
             </View>
 
@@ -581,7 +603,12 @@ function GuestMessageRow({
         <View style={[styles.bubble, isDark && styles.bubbleDark]}>
           <Text style={[styles.guestMetaLine, isDark ? styles.guestMetaLineDark : null]}>{metaLine}</Text>
           {item.text?.trim() ? (
-            <Text style={[styles.msgText, isDark && styles.msgTextDark]}>{item.text}</Text>
+            <View style={styles.guestTextRow}>
+              <Text style={[styles.msgText, isDark && styles.msgTextDark, styles.guestTextFlex]}>{item.text}</Text>
+              {isEdited ? (
+                <Text style={[styles.guestEditedInline, isDark ? styles.guestEditedLabelDark : null]}> Edited</Text>
+              ) : null}
+            </View>
           ) : null}
 
           {item.reactions ? (
@@ -749,6 +776,9 @@ const styles = StyleSheet.create({
   },
   guestReactionText: { color: '#111', fontWeight: '800', fontSize: 12 },
   guestReactionTextDark: { color: '#fff' },
+  guestTextRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' },
+  guestTextFlex: { flex: 1 },
+  guestEditedInline: { marginLeft: 6, fontSize: 12, fontStyle: 'italic', fontWeight: '400', color: '#555' },
   userText: {
     fontSize: 12,
     fontWeight: '800',
@@ -822,6 +852,12 @@ const styles = StyleSheet.create({
     color: '#111',
     lineHeight: 20,
   },
+  guestMediaHeaderTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  guestMediaCaptionRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: 4 },
+  guestMediaCaptionFlex: { flex: 1, marginTop: 0 },
+  guestMediaCaptionIndicators: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'flex-end', marginLeft: 10 },
+  guestEditedLabel: { fontSize: 12, fontStyle: 'italic', fontWeight: '400', color: '#555' },
+  guestEditedLabelDark: { color: '#a7a7b4' },
   guestMediaCaptionDark: {
     color: '#fff',
   },
