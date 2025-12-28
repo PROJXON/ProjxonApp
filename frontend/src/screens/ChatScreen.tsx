@@ -4775,9 +4775,20 @@ const styles = StyleSheet.create({
   messageBubbleIncomingDark: { backgroundColor: '#1c1c22' },
   messageBubbleOutgoing: { backgroundColor: '#1976d2' },
   messageBubbleEditing: { maxWidth: '96%', width: '96%' },
-  sendFailedText: { marginTop: 6, fontSize: 12, color: '#b00020', fontStyle: 'italic' },
+  // Retry hint needs to be readable on both light surfaces and the outgoing blue bubble.
+  sendFailedText: { marginTop: 6, fontSize: 12, color: '#8b0000', fontStyle: 'italic' },
   sendFailedTextDark: { color: '#ff6b6b' },
-  sendFailedTextAlignOutgoing: { textAlign: 'right' },
+  sendFailedTextAlignOutgoing: {
+    textAlign: 'right',
+    alignSelf: 'flex-end',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    overflow: 'hidden',
+    // Keep the "failed" cue red-ish, but readable on the outgoing blue bubble.
+    color: 'rgba(255,210,210,0.98)',
+  },
   messageTextRow: { flexDirection: 'row', alignItems: 'flex-end' },
   messageTextRowOutgoing: { justifyContent: 'flex-end' },
   messageTextFlex: { flexGrow: 1, flexShrink: 1 },
