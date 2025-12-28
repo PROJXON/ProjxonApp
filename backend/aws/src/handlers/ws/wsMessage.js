@@ -194,6 +194,62 @@ const parseDmRecipientSub = (conversationId, senderSub) => {
   return null;
 };
 
+const getUserDisplayNameBySub = async (userSub) => {
+  const usersTable = process.env.USERS_TABLE;
+  const sub = safeString(userSub);
+  if (!usersTable || !sub) return null;
+  try {
+    const resp = await ddb.send(
+      new GetCommand({
+        TableName: usersTable,
+        Key: { userSub: sub },
+        ProjectionExpression: 'displayName, usernameLower, userSub',
+      })
+    );
+    const it = resp?.Item;
+    if (!it) return null;
+    return String(it.displayName || it.usernameLower || it.userSub || '').trim() || null;
+  } catch (err) {
+    console.warn('getUserDisplayNameBySub failed', err);
+    return null;
+  }
+};
+
+const upsertConversationIndex = async ({
+  ownerSub,
+  conversationId,
+  peerSub,
+  peerDisplayName,
+  lastMessageAt,
+  lastSenderSub,
+  lastSenderDisplayName,
+}) => {
+  const table = process.env.CONVERSATIONS_TABLE;
+  const owner = safeString(ownerSub);
+  const convId = safeString(conversationId);
+  if (!table || !owner || !convId) return;
+
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { userSub: owner, conversationId: convId },
+        UpdateExpression:
+          'SET peerSub = :ps, peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd',
+        ExpressionAttributeValues: {
+          ':ps': safeString(peerSub) || undefined,
+          ':pd': safeString(peerDisplayName) || undefined,
+          ':lma': Number(lastMessageAt) || 0,
+          ':lss': safeString(lastSenderSub) || undefined,
+          ':lsd': safeString(lastSenderDisplayName) || undefined,
+        },
+      })
+    );
+  } catch (err) {
+    console.warn('upsertConversationIndex failed', err);
+  }
+};
+
 const markUnread = async (recipientSub, conversationId, sender) => {
   if (!process.env.UNREADS_TABLE) return;
   if (!recipientSub) return;
@@ -696,6 +752,32 @@ exports.handler = async (event) => {
         if (!dmRecipientSub) {
           dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
         }
+
+        // Conversation index (DM inbox list) for both participants.
+        // Best-effort: store a peer display name so new devices can render the chat list.
+        const recipientName =
+          (await getUserDisplayNameBySub(dmRecipientSub)) || safeString(dmRecipientSub) || 'Direct Message';
+        await Promise.all([
+          upsertConversationIndex({
+            ownerSub: senderSub,
+            conversationId,
+            peerSub: dmRecipientSub,
+            peerDisplayName: recipientName,
+            lastMessageAt: nowMs,
+            lastSenderSub: senderSub,
+            lastSenderDisplayName: senderDisplayName,
+          }),
+          upsertConversationIndex({
+            ownerSub: dmRecipientSub,
+            conversationId,
+            peerSub: senderSub,
+            peerDisplayName: senderDisplayName,
+            lastMessageAt: nowMs,
+            lastSenderSub: senderSub,
+            lastSenderDisplayName: senderDisplayName,
+          }),
+        ]);
+
         await markUnread(dmRecipientSub, conversationId, {
           userSub: senderSub,
           displayName: senderDisplayName,

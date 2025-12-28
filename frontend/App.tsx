@@ -45,6 +45,8 @@ import {
   setForegroundNotificationPolicy,
   unregisterDmPushNotifications,
 } from './utils/pushNotifications';
+import { HeaderMenuModal } from './src/components/HeaderMenuModal';
+import Feather from '@expo/vector-icons/Feather';
 
 import {
   generateKeypair,
@@ -67,46 +69,9 @@ try {
   // amplify_outputs.json not present yet; run `npx ampx sandbox` to generate it.
 }
 
-const SignOutButton = ({
-  style,
-  theme,
-  onSignedOut,
-}: {
-  style?: any;
-  theme: 'light' | 'dark';
-  onSignedOut?: () => void;
-}) => {
-  const { signOut } = useAuthenticator();
-  const isDark = theme === 'dark';
-
-  return (
-    <Pressable
-      onPress={async () => {
-        try {
-          // Clean up push token before auth is cleared, so another account on this device
-          // doesn't accidentally receive this user's DM notifications.
-          await unregisterDmPushNotifications();
-          await signOut();
-        } finally {
-          onSignedOut?.();
-        }
-      }}
-      style={({ pressed }) => [
-        styles.signOutPill,
-        isDark && styles.signOutPillDark,
-        pressed && { opacity: 0.85 },
-        style,
-      ]}
-      accessibilityRole="button"
-      accessibilityLabel="Sign out"
-    >
-      <Text style={[styles.signOutPillText, isDark && styles.signOutPillTextDark]}>Sign out</Text>
-    </Pressable>
-  );
-};
-
 const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const { user } = useAuthenticator();
+  const { signOut } = useAuthenticator();
   const [displayName, setDisplayName] = useState<string>('anon');
   const [passphrasePrompt, setPassphrasePrompt] = useState<{
     mode: 'setup' | 'restore';
@@ -421,9 +386,151 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   >(
     () => ({})
   );
+  // Local-only DM thread list (v1): used to power "Chats" inbox UI.
+  // Backed by AsyncStorage so it survives restarts (per-device is OK for now).
+  const [dmThreads, setDmThreads] = useState<Record<string, { peer: string; lastActivityAt: number }>>(() => ({}));
+  const [serverConversations, setServerConversations] = React.useState<
+    Array<{ conversationId: string; peerDisplayName?: string; peerSub?: string; lastMessageAt?: number }>
+  >([]);
+  const [chatsLoading, setChatsLoading] = React.useState<boolean>(false);
+  const [conversationsCacheAt, setConversationsCacheAt] = React.useState<number>(0);
   const isDmMode = conversationId !== 'global';
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const isDark = theme === 'dark';
+  const [menuOpen, setMenuOpen] = React.useState<boolean>(false);
+  const [chatsOpen, setChatsOpen] = React.useState<boolean>(false);
+
+  const upsertDmThread = React.useCallback((convId: string, peerName: string, lastActivityAt?: number) => {
+    const id = String(convId || '').trim();
+    if (!id || id === 'global') return;
+    const name = String(peerName || '').trim() || 'Direct Message';
+    const ts = Number.isFinite(Number(lastActivityAt)) ? Number(lastActivityAt) : Date.now();
+    setDmThreads((prev) => {
+      const existing = prev[id];
+      const next = { ...prev };
+      next[id] = {
+        peer: name || existing?.peer || 'Direct Message',
+        lastActivityAt: Math.max(ts, existing?.lastActivityAt || 0),
+      };
+      return next;
+    });
+  }, []);
+
+  const dmThreadsList = React.useMemo(() => {
+    const entries = Object.entries(dmThreads)
+      .map(([convId, info]) => ({
+        conversationId: convId,
+        peer: info.peer,
+        lastActivityAt: info.lastActivityAt || 0,
+        unreadCount: unreadDmMap[convId]?.count || 0,
+      }))
+      .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+    return entries;
+  }, [dmThreads, unreadDmMap]);
+
+  const fetchConversations = React.useCallback(async (): Promise<void> => {
+    if (!API_URL) return;
+    try {
+      setChatsLoading(true);
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) return;
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/conversations?limit=100`, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      const convos = Array.isArray(json?.conversations) ? json.conversations : [];
+      const parsed = convos
+        .map((c: any) => ({
+          conversationId: String(c?.conversationId || ''),
+          peerDisplayName: c?.peerDisplayName ? String(c.peerDisplayName) : undefined,
+          peerSub: c?.peerSub ? String(c.peerSub) : undefined,
+          lastMessageAt: Number(c?.lastMessageAt ?? 0),
+        }))
+        .filter((c: any) => c.conversationId);
+      setServerConversations(parsed);
+      setConversationsCacheAt(Date.now());
+      try {
+        await AsyncStorage.setItem(
+          'conversations:cache:v1',
+          JSON.stringify({ at: Date.now(), conversations: parsed })
+        );
+      } catch {
+        // ignore
+      }
+    } catch {
+      // ignore
+    } finally {
+      setChatsLoading(false);
+    }
+  }, [API_URL]);
+
+  const deleteConversationFromList = React.useCallback(
+    async (conversationIdToDelete: string) => {
+      const convId = String(conversationIdToDelete || '').trim();
+      if (!convId || !API_URL) return;
+      const ok = await promptConfirm(
+        'Remove chat?',
+        'This removes the selected chat from your Chats list. If they message you again, it will reappear.\n\nThis does not delete message history.',
+        { confirmText: 'Remove', cancelText: 'Cancel', destructive: true }
+      );
+      if (!ok) return;
+
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/conversations/delete`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ conversationId: convId }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          console.warn('deleteConversation failed', res.status, text);
+          return;
+        }
+      } catch (err) {
+        console.warn('deleteConversation error', err);
+        return;
+      }
+
+      // Optimistic local cleanup
+      setServerConversations((prev) => prev.filter((c) => c.conversationId !== convId));
+      setDmThreads((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+      setUnreadDmMap((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+    },
+    [API_URL, promptConfirm]
+  );
+
+  const chatsList = React.useMemo(() => {
+    const mapUnread = unreadDmMap;
+    if (serverConversations.length) {
+      return serverConversations
+        .map((c) => ({
+          conversationId: c.conversationId,
+          peer: c.peerDisplayName || mapUnread[c.conversationId]?.user || 'Direct Message',
+          lastActivityAt: Number(c.lastMessageAt || 0),
+          unreadCount: mapUnread[c.conversationId]?.count || 0,
+        }))
+        .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+    }
+    return dmThreadsList;
+  }, [dmThreadsList, serverConversations, unreadDmMap]);
 
   React.useEffect(() => {
     (async () => {
@@ -445,6 +552,73 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       }
     })();
   }, [theme]);
+
+  // Load persisted DM threads (best-effort).
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('dm:threads:v1');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!mounted) return;
+        if (parsed && typeof parsed === 'object') {
+          setDmThreads(() => parsed);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Persist DM threads (best-effort).
+  React.useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem('dm:threads:v1', JSON.stringify(dmThreads));
+      } catch {
+        // ignore
+      }
+    })();
+  }, [dmThreads]);
+
+  // Refresh conversation list when opening the Chats modal.
+  React.useEffect(() => {
+    if (!chatsOpen) return;
+    // Cache strategy:
+    // - Show whatever we already have immediately (state or persisted cache).
+    // - Refresh in background only if stale.
+    const STALE_MS = 60_000;
+    // IMPORTANT: don't refetch in a loop when the server returns 0 conversations.
+    // Use the last fetch timestamp (even if empty) to gate refreshes.
+    if (conversationsCacheAt && Date.now() - conversationsCacheAt < STALE_MS) return;
+    void fetchConversations();
+  }, [chatsOpen, fetchConversations, conversationsCacheAt]);
+
+  // Load cached conversations on boot so Chats opens instantly.
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('conversations:cache:v1');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const convos = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
+        const at = Number(parsed?.at ?? 0);
+        if (!mounted) return;
+        if (convos.length) setServerConversations(convos);
+        if (Number.isFinite(at) && at > 0) setConversationsCacheAt(at);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const startDM = async () => {
       const trimmed = peerInput.trim();
@@ -512,6 +686,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       const id = `dm#${a}#${b}`;
       setPeer(canonical);
       setConversationId(id);
+      upsertDmThread(id, canonical, Date.now());
       setSearchOpen(false);
       setPeerInput('');
       setSearchError(null);
@@ -532,11 +707,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       if (cached?.user) setPeer(cached.user);
       else if (targetConversationId === 'global') setPeer(null);
       else setPeer('Direct Message');
+      if (targetConversationId !== 'global') {
+        upsertDmThread(
+          targetConversationId,
+          cached?.user || peer || 'Direct Message',
+          Date.now()
+        );
+      }
       setSearchOpen(false);
       setPeerInput('');
       setSearchError(null);
     },
-    [unreadDmMap]
+    [unreadDmMap, upsertDmThread, peer]
   );
 
   // Handle taps on OS notifications to jump into the DM.
@@ -584,8 +766,11 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         };
         return next;
       });
+      if (newConversationId && newConversationId !== 'global') {
+        upsertDmThread(newConversationId, sender || 'Direct Message', Date.now());
+      }
     },
-    [conversationId]
+    [conversationId, upsertDmThread]
   );
 
   React.useEffect(() => {
@@ -622,13 +807,15 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           const senderSub = it.senderSub ? String(it.senderSub) : undefined;
           const count = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
           next[convId] = { user: sender, senderSub, count: Math.max(1, Math.floor(count)) };
+          const lastAt = Number(it.lastMessageCreatedAt || 0);
+          upsertDmThread(convId, sender, Number.isFinite(lastAt) && lastAt > 0 ? lastAt : Date.now());
         }
         setUnreadDmMap((prev) => ({ ...next, ...prev }));
       } catch {
         // ignore
       }
     })();
-  }, [API_URL, user]);
+  }, [API_URL, user, upsertDmThread]);
 
   const promptVisible = !!passphrasePrompt;
   const promptLabel =
@@ -697,21 +884,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         </View>
 
         <View style={styles.rightControls}>
-          <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
-            <Text style={[styles.themeToggleText, isDark && styles.themeToggleTextDark]}>
-              {isDark ? 'Dark' : 'Light'}
-            </Text>
-            <Switch
-              value={isDark}
-              onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
-              trackColor={{
-                false: '#d1d1d6',
-                true: '#d1d1d6',
-              }}
-              thumbColor={isDark ? '#2a2a33' : '#ffffff'}
-            />
-          </View>
-          <SignOutButton theme={theme} onSignedOut={onSignedOut} />
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            style={({ pressed }) => [
+              styles.menuIconBtn,
+              isDark && styles.menuIconBtnDark,
+              pressed && { opacity: 0.85 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Open menu"
+          >
+            <Feather name="menu" size={18} color={isDark ? '#fff' : '#111'} />
+          </Pressable>
         </View>
       </View>
 
@@ -792,6 +976,136 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
   return (
     <View style={[styles.appContent, isDark ? styles.appContentDark : null]}>
+      <HeaderMenuModal
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        title={undefined}
+        isDark={isDark}
+        cardWidth={160}
+        headerRight={
+          <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
+            <Feather name={isDark ? 'moon' : 'sun'} size={16} color={isDark ? '#fff' : '#111'} />
+            <Switch
+              value={isDark}
+              onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
+              trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+              thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+            />
+          </View>
+        }
+        items={[
+          {
+            key: 'chats',
+            label: 'Chats',
+            onPress: () => {
+              setMenuOpen(false);
+              setChatsOpen(true);
+            },
+          },
+          {
+            key: 'blocked',
+            label: 'Blocklist',
+            onPress: () => {
+              setMenuOpen(false);
+              // Placeholder until blocking ships.
+              console.log('Blocked users coming soon');
+            },
+          },
+          {
+            key: 'signout',
+            label: 'Sign out',
+            onPress: async () => {
+              setMenuOpen(false);
+              try {
+                await unregisterDmPushNotifications();
+                await signOut();
+              } finally {
+                onSignedOut?.();
+              }
+            },
+          },
+        ]}
+      />
+
+      <Modal visible={chatsOpen} transparent animationType="fade" onRequestClose={() => setChatsOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setChatsOpen(false)} />
+          <View style={[styles.chatsCard, isDark ? styles.chatsCardDark : null]}>
+            <View style={styles.chatsTopRow}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Chats</Text>
+              <Pressable
+                style={[styles.chatsCloseBtn, isDark ? styles.chatsCloseBtnDark : null]}
+                onPress={() => setChatsOpen(false)}
+              >
+                <Text style={[styles.chatsCloseText, isDark ? styles.chatsCloseTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+            <ScrollView style={styles.chatsScroll}>
+              {chatsLoading ? (
+                <View style={styles.chatsLoadingRow}>
+                  <Text
+                    style={[
+                      styles.modalHelperText,
+                      isDark ? styles.modalHelperTextDark : null,
+                      styles.chatsLoadingText,
+                    ]}
+                  >
+                    Loading
+                  </Text>
+                  <View style={styles.chatsLoadingDotsWrap}>
+                    <AnimatedDots color={isDark ? '#ffffff' : '#111'} size={18} />
+                  </View>
+                </View>
+              ) : chatsList.length ? (
+                chatsList.map((t) => (
+                  <Pressable
+                    key={`chat:${t.conversationId}`}
+                    style={({ pressed }) => [
+                      styles.chatRow,
+                      isDark ? styles.chatRowDark : null,
+                      pressed ? { opacity: 0.9 } : null,
+                    ]}
+                    onPress={() => {
+                      setChatsOpen(false);
+                      goToConversation(t.conversationId);
+                    }}
+                  >
+                    <View style={styles.chatRowLeft}>
+                      <Text style={[styles.chatRowName, isDark ? styles.chatRowNameDark : null]} numberOfLines={1}>
+                        {t.peer || 'Direct Message'}
+                      </Text>
+                      {t.unreadCount > 0 ? <View style={styles.unreadDot} /> : null}
+                    </View>
+                    <View style={styles.chatRowRight}>
+                      {t.unreadCount > 0 ? (
+                        <Text style={[styles.chatRowCount, isDark ? styles.chatRowCountDark : null]}>
+                          {t.unreadCount}
+                        </Text>
+                      ) : null}
+                      <Pressable
+                        onPress={() => void deleteConversationFromList(t.conversationId)}
+                        style={({ pressed }) => [
+                          styles.chatDeleteBtn,
+                          isDark ? styles.chatDeleteBtnDark : null,
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Remove chat"
+                      >
+                        <Feather name="trash-2" size={16} color={isDark ? '#fff' : '#111'} />
+                      </Pressable>
+                    </View>
+                  </Pressable>
+                ))
+              ) : (
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+                  No active chats
+                </Text>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
         <Modal visible={!!uiPrompt} transparent animationType="fade">
           <View style={styles.modalOverlay}>
             <View style={[styles.modalContent, isDark ? styles.modalContentDark : null]}>
@@ -1639,6 +1953,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
   },
+  themeToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e3e3e3',
+  },
+  themeToggleDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  menuIconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e3e3e3',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuIconBtnDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
   segment: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1707,29 +2050,6 @@ const styles = StyleSheet.create({
     color: '#111',
   },
   signOutPillTextDark: {
-    color: '#fff',
-  },
-  themeToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 10,
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#e3e3e3',
-  },
-  themeToggleDark: {
-    backgroundColor: '#14141a',
-    borderColor: '#2a2a33',
-  },
-  themeToggleText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#111',
-  },
-  themeToggleTextDark: {
     color: '#fff',
   },
   searchRow: {
@@ -1817,7 +2137,8 @@ const styles = StyleSheet.create({
   },
   unreadHintBold: {
     fontWeight: '700',
-    color: '#1976d2',
+    // Keep unread sender highlight neutral in light mode (avoid bright blue).
+    color: '#111',
   },
   unreadHintBoldDark: {
     color: '#fff',
@@ -1907,11 +2228,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: '#1a73e8',
+    // Neutral "tool button" style (avoid blue default buttons in light mode).
+    borderColor: '#ddd',
   },
   modalButtonDark: {
-    backgroundColor: '#1c1c22',
-    borderColor: '#2a2a33',
+    backgroundColor: '#2a2a33',
+    borderColor: 'transparent',
+    borderWidth: 0,
   },
   modalButtonPrimary: {
     backgroundColor: '#1a73e8',
@@ -1930,12 +2253,12 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   modalButtonText: {
-    color: '#1a73e8',
-    fontWeight: '600',
+    color: '#111',
+    fontWeight: '800',
     textAlign: 'center',
   },
   modalButtonTextDark: {
-    color: '#d7d7e0',
+    color: '#fff',
   },
   modalButtonPrimaryText: {
     color: '#fff',
@@ -1943,4 +2266,64 @@ const styles = StyleSheet.create({
   modalButtonDangerText: {
     color: '#fff',
   },
+  chatsCard: {
+    width: '92%',
+    maxWidth: 520,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    maxHeight: '70%',
+  },
+  chatsCardDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
+  },
+  chatsTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  chatsCloseBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  chatsCloseBtnDark: { backgroundColor: '#2a2a33', borderWidth: 0, borderColor: 'transparent' },
+  chatsCloseText: { color: '#111', fontWeight: '800' },
+  chatsCloseTextDark: { color: '#fff' },
+  chatsScroll: { maxHeight: 420, marginTop: 8 },
+  chatsLoadingRow: { flexDirection: 'row', alignItems: 'baseline', gap: 4, paddingVertical: 6, paddingHorizontal: 2 },
+  chatsLoadingText: { lineHeight: 18 },
+  chatsLoadingDotsWrap: { marginBottom: 1 },
+  chatRow: {
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  chatRowDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
+  chatRowLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
+  chatRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  chatRowName: { fontWeight: '800', color: '#111', flexShrink: 1 },
+  chatRowNameDark: { color: '#fff' },
+  chatRowCount: { fontWeight: '900', color: '#1976d2' },
+  chatRowCountDark: { color: '#fff' },
+  chatDeleteBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatDeleteBtnDark: { backgroundColor: '#2a2a33', borderWidth: 0, borderColor: 'transparent' },
 });

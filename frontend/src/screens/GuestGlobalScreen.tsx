@@ -21,6 +21,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { API_URL } from '../config/env';
 import { getUrl } from 'aws-amplify/storage';
 import { VideoView, useVideoPlayer } from 'expo-video';
+import Feather from '@expo/vector-icons/Feather';
+import { HeaderMenuModal } from '../components/HeaderMenuModal';
 
 type GuestMessage = {
   id: string;
@@ -182,6 +184,7 @@ export default function GuestGlobalScreen({
   const ONBOARDING_VERSION = 'v1';
   const ONBOARDING_KEY = `onboardingSeen:${ONBOARDING_VERSION}`;
   const [onboardingOpen, setOnboardingOpen] = React.useState<boolean>(false);
+  const [menuOpen, setMenuOpen] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     (async () => {
@@ -349,10 +352,30 @@ export default function GuestGlobalScreen({
       <View style={styles.headerRow}>
         <Text style={[styles.headerTitle, isDark && styles.headerTitleDark]}>Global</Text>
         <View style={styles.headerRight}>
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            style={({ pressed }) => [
+              styles.menuIconBtn,
+              isDark && styles.menuIconBtnDark,
+              pressed && { opacity: 0.85 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Open menu"
+          >
+            <Feather name="menu" size={18} color={isDark ? '#fff' : '#111'} />
+          </Pressable>
+        </View>
+      </View>
+
+      <HeaderMenuModal
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        title={undefined}
+        isDark={isDark}
+        cardWidth={160}
+        headerRight={
           <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
-            <Text style={[styles.themeToggleText, isDark && styles.themeToggleTextDark]}>
-              {isDark ? 'Dark' : 'Light'}
-            </Text>
+            <Feather name={isDark ? 'moon' : 'sun'} size={16} color={isDark ? '#fff' : '#111'} />
             <Switch
               value={isDark}
               onValueChange={(v) => setTheme(v ? 'dark' : 'light')}
@@ -360,34 +383,26 @@ export default function GuestGlobalScreen({
               thumbColor={isDark ? '#2a2a33' : '#ffffff'}
             />
           </View>
-          <Pressable
-            onPress={() => setOnboardingOpen(true)}
-            style={({ pressed }) => [
-              styles.signInPill,
-              isDark && styles.signInPillDark,
-              pressed && { opacity: 0.85 },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="About Projxon"
-          >
-            <Text style={[styles.signInPillText, isDark && styles.signInPillTextDark]}>About</Text>
-          </Pressable>
-          <Pressable
-            onPress={onSignIn}
-            style={({ pressed }) => [
-              styles.signInPill,
-              isDark && styles.signInPillDark,
-              pressed && { opacity: 0.85 },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Sign in"
-          >
-            <Text style={[styles.signInPillText, isDark && styles.signInPillTextDark]}>
-              Sign in
-            </Text>
-          </Pressable>
-        </View>
-      </View>
+        }
+        items={[
+          {
+            key: 'about',
+            label: 'About',
+            onPress: () => {
+              setMenuOpen(false);
+              setOnboardingOpen(true);
+            },
+          },
+          {
+            key: 'signin',
+            label: 'Sign in',
+            onPress: () => {
+              setMenuOpen(false);
+              onSignIn();
+            },
+          },
+        ]}
+      />
 
       {error ? (
         <Text style={[styles.errorText, isDark && styles.errorTextDark]} numberOfLines={3}>
@@ -836,13 +851,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#14141a',
     borderColor: '#2a2a33',
   },
-  themeToggleText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#111',
+  menuIconBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e3e3e3',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  themeToggleTextDark: {
-    color: '#fff',
+  menuIconBtnDark: {
+    backgroundColor: '#14141a',
+    borderColor: '#2a2a33',
   },
   signInPill: {
     paddingHorizontal: 12,
