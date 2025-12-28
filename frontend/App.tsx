@@ -466,6 +466,57 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     }
   }, [API_URL]);
 
+  const deleteConversationFromList = React.useCallback(
+    async (conversationIdToDelete: string) => {
+      const convId = String(conversationIdToDelete || '').trim();
+      if (!convId || !API_URL) return;
+      const ok = await promptConfirm(
+        'Remove chat?',
+        'This removes the selected chat from your Chats list. If they message you again, it will reappear.\n\nThis does not delete message history.',
+        { confirmText: 'Remove', cancelText: 'Cancel', destructive: true }
+      );
+      if (!ok) return;
+
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/conversations/delete`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ conversationId: convId }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          console.warn('deleteConversation failed', res.status, text);
+          return;
+        }
+      } catch (err) {
+        console.warn('deleteConversation error', err);
+        return;
+      }
+
+      // Optimistic local cleanup
+      setServerConversations((prev) => prev.filter((c) => c.conversationId !== convId));
+      setDmThreads((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+      setUnreadDmMap((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+    },
+    [API_URL, promptConfirm]
+  );
+
   const chatsList = React.useMemo(() => {
     const mapUnread = unreadDmMap;
     if (serverConversations.length) {
@@ -541,9 +592,11 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     // - Show whatever we already have immediately (state or persisted cache).
     // - Refresh in background only if stale.
     const STALE_MS = 60_000;
-    if (serverConversations.length && Date.now() - conversationsCacheAt < STALE_MS) return;
+    // IMPORTANT: don't refetch in a loop when the server returns 0 conversations.
+    // Use the last fetch timestamp (even if empty) to gate refreshes.
+    if (conversationsCacheAt && Date.now() - conversationsCacheAt < STALE_MS) return;
     void fetchConversations();
-  }, [chatsOpen, fetchConversations, serverConversations.length, conversationsCacheAt]);
+  }, [chatsOpen, fetchConversations, conversationsCacheAt]);
 
   // Load cached conversations on boot so Chats opens instantly.
   React.useEffect(() => {
@@ -990,8 +1043,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             <ScrollView style={styles.chatsScroll}>
               {chatsLoading ? (
                 <View style={styles.chatsLoadingRow}>
-                  <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>Loading</Text>
-                  <AnimatedDots color={isDark ? '#ffffff' : '#111'} size={18} />
+                  <Text
+                    style={[
+                      styles.modalHelperText,
+                      isDark ? styles.modalHelperTextDark : null,
+                      styles.chatsLoadingText,
+                    ]}
+                  >
+                    Loading
+                  </Text>
+                  <View style={styles.chatsLoadingDotsWrap}>
+                    <AnimatedDots color={isDark ? '#ffffff' : '#111'} size={18} />
+                  </View>
                 </View>
               ) : chatsList.length ? (
                 chatsList.map((t) => (
@@ -1013,16 +1076,30 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                       </Text>
                       {t.unreadCount > 0 ? <View style={styles.unreadDot} /> : null}
                     </View>
-                    {t.unreadCount > 0 ? (
-                      <Text style={[styles.chatRowCount, isDark ? styles.chatRowCountDark : null]}>
-                        {t.unreadCount}
-                      </Text>
-                    ) : null}
+                    <View style={styles.chatRowRight}>
+                      {t.unreadCount > 0 ? (
+                        <Text style={[styles.chatRowCount, isDark ? styles.chatRowCountDark : null]}>
+                          {t.unreadCount}
+                        </Text>
+                      ) : null}
+                      <Pressable
+                        onPress={() => void deleteConversationFromList(t.conversationId)}
+                        style={({ pressed }) => [
+                          styles.chatDeleteBtn,
+                          isDark ? styles.chatDeleteBtnDark : null,
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Remove chat"
+                      >
+                        <Feather name="trash-2" size={16} color={isDark ? '#fff' : '#111'} />
+                      </Pressable>
+                    </View>
                   </Pressable>
                 ))
               ) : (
                 <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
-                  No chats yet. Start a DM to see it here.
+                  No active chats
                 </Text>
               )}
             </ScrollView>
@@ -2060,7 +2137,8 @@ const styles = StyleSheet.create({
   },
   unreadHintBold: {
     fontWeight: '700',
-    color: '#1976d2',
+    // Keep unread sender highlight neutral in light mode (avoid bright blue).
+    color: '#111',
   },
   unreadHintBoldDark: {
     color: '#fff',
@@ -2150,11 +2228,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: '#1a73e8',
+    // Neutral "tool button" style (avoid blue default buttons in light mode).
+    borderColor: '#ddd',
   },
   modalButtonDark: {
-    backgroundColor: '#1c1c22',
-    borderColor: '#2a2a33',
+    backgroundColor: '#2a2a33',
+    borderColor: 'transparent',
+    borderWidth: 0,
   },
   modalButtonPrimary: {
     backgroundColor: '#1a73e8',
@@ -2173,12 +2253,12 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   modalButtonText: {
-    color: '#1a73e8',
-    fontWeight: '600',
+    color: '#111',
+    fontWeight: '800',
     textAlign: 'center',
   },
   modalButtonTextDark: {
-    color: '#d7d7e0',
+    color: '#fff',
   },
   modalButtonPrimaryText: {
     color: '#fff',
@@ -2213,7 +2293,9 @@ const styles = StyleSheet.create({
   chatsCloseText: { color: '#111', fontWeight: '800' },
   chatsCloseTextDark: { color: '#fff' },
   chatsScroll: { maxHeight: 420, marginTop: 8 },
-  chatsLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 6, paddingHorizontal: 2 },
+  chatsLoadingRow: { flexDirection: 'row', alignItems: 'baseline', gap: 4, paddingVertical: 6, paddingHorizontal: 2 },
+  chatsLoadingText: { lineHeight: 18 },
+  chatsLoadingDotsWrap: { marginBottom: 1 },
   chatRow: {
     paddingVertical: 10,
     paddingHorizontal: 10,
@@ -2228,8 +2310,20 @@ const styles = StyleSheet.create({
   },
   chatRowDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
   chatRowLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
+  chatRowRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   chatRowName: { fontWeight: '800', color: '#111', flexShrink: 1 },
   chatRowNameDark: { color: '#fff' },
   chatRowCount: { fontWeight: '900', color: '#1976d2' },
   chatRowCountDark: { color: '#fff' },
+  chatDeleteBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatDeleteBtnDark: { backgroundColor: '#2a2a33', borderWidth: 0, borderColor: 'transparent' },
 });
