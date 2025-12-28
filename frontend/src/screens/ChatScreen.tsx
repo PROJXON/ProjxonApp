@@ -2973,6 +2973,22 @@ export default function ChatScreen({
     setReactionPickerOpen(true);
   }, []);
 
+  const reactionInfoSubsSorted = React.useMemo(() => {
+    const subs = Array.isArray(reactionInfoSubs) ? reactionInfoSubs.slice() : [];
+    const me = myUserId || '';
+    const labelFor = (sub: string) =>
+      sub === me ? 'You' : nameBySub[sub] || `${String(sub).slice(0, 6)}…${String(sub).slice(-4)}`;
+
+    subs.sort((a, b) => {
+      const aIsMe = !!me && a === me;
+      const bIsMe = !!me && b === me;
+      if (aIsMe && !bIsMe) return -1;
+      if (!aIsMe && bIsMe) return 1;
+      return labelFor(a).toLowerCase().localeCompare(labelFor(b).toLowerCase());
+    });
+    return subs;
+  }, [reactionInfoSubs, myUserId, nameBySub]);
+
   const closeReactionPicker = React.useCallback(() => {
     setReactionPickerOpen(false);
     setReactionPickerTarget(null);
@@ -3307,17 +3323,17 @@ export default function ChatScreen({
                         isOutgoing ? styles.mediaMsgOutgoing : styles.mediaMsgIncoming,
                       ]}
                     >
-                      <View
-                        style={[
-                          styles.mediaCard,
-                          isOutgoing
-                            ? styles.mediaCardOutgoing
-                            : isDark
-                              ? styles.mediaCardIncomingDark
-                              : styles.mediaCardIncoming,
-                          { width: capped.w },
-                        ]}
-                      >
+                      <View style={[styles.mediaCardOuter, { width: capped.w }]}>
+                        <View
+                          style={[
+                            styles.mediaCard,
+                            isOutgoing
+                              ? styles.mediaCardOutgoing
+                              : isDark
+                                ? styles.mediaCardIncomingDark
+                                : styles.mediaCardIncoming,
+                          ]}
+                        >
                         <View
                           style={[
                             styles.mediaHeader,
@@ -3617,45 +3633,43 @@ export default function ChatScreen({
                           )
                         ) : null}
 
-                        {reactionEntriesVisible.length ? (
-                          <View
-                            style={[
-                              styles.reactionOverlay,
-                              isOutgoing ? styles.reactionOverlayOutgoing : styles.reactionOverlayIncoming,
-                            ]}
-                            pointerEvents="box-none"
-                          >
-                            {reactionEntriesVisible.slice(0, 3).map((r, idx) => {
-                              const mine = myUserId ? r.userSubs.includes(myUserId) : false;
-                              return (
-                                <Pressable
-                                  key={`ov:${item.id}:${r.emoji}`}
-                                  onPress={() => void openReactionInfo(item, r.emoji, r.userSubs)}
-                                  onLongPress={() => sendReaction(item, r.emoji)}
-                                  disabled={!canReact}
-                                  style={({ pressed }) => [
-                                    styles.reactionMiniChip,
-                                    isDark ? styles.reactionMiniChipDark : null,
-                                    mine ? (isDark ? styles.reactionMiniChipMineDark : styles.reactionMiniChipMine) : null,
-                                    idx ? styles.reactionMiniChipStacked : null,
-                                    pressed ? { opacity: 0.85 } : null,
-                                  ]}
-                                >
-                                  <Text
-                                    style={[
-                                      styles.reactionMiniText,
-                                      isDark ? styles.reactionMiniTextDark : null,
-                                    ]}
-                                  >
-                                    {r.emoji}
-                                    {r.count > 1 ? ` ${r.count}` : ''}
-                                  </Text>
-                                </Pressable>
-                              );
-                            })}
-                          </View>
-                        ) : null}
                       </View>
+
+                      {/* Reactions should float outside the rounded media card (don't get clipped). */}
+                      {reactionEntriesVisible.length ? (
+                        <View
+                          style={[
+                            styles.reactionOverlay,
+                            isOutgoing ? styles.reactionOverlayOutgoing : styles.reactionOverlayIncoming,
+                          ]}
+                          pointerEvents="box-none"
+                        >
+                          {reactionEntriesVisible.slice(0, 3).map((r, idx) => {
+                            const mine = myUserId ? r.userSubs.includes(myUserId) : false;
+                            return (
+                              <Pressable
+                                key={`ov:${item.id}:${r.emoji}`}
+                                onPress={() => void openReactionInfo(item, r.emoji, r.userSubs)}
+                                onLongPress={() => sendReaction(item, r.emoji)}
+                                disabled={!canReact}
+                                style={({ pressed }) => [
+                                  styles.reactionMiniChip,
+                                  isDark ? styles.reactionMiniChipDark : null,
+                                  mine ? (isDark ? styles.reactionMiniChipMineDark : styles.reactionMiniChipMine) : null,
+                                  idx ? styles.reactionMiniChipStacked : null,
+                                  pressed ? { opacity: 0.85 } : null,
+                                ]}
+                              >
+                                <Text style={[styles.reactionMiniText, isDark ? styles.reactionMiniTextDark : null]}>
+                                  {r.emoji}
+                                  {r.count > 1 ? ` ${r.count}` : ''}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
 
                       {seenLabel ? (
                         <Text
@@ -4453,8 +4467,8 @@ export default function ChatScreen({
               Reactions {reactionInfoEmoji ? `· ${reactionInfoEmoji}` : ''}
             </Text>
             <ScrollView style={styles.summaryScroll}>
-              {reactionInfoSubs.length ? (
-                reactionInfoSubs.map((sub) => {
+              {reactionInfoSubsSorted.length ? (
+                reactionInfoSubsSorted.map((sub) => {
                   const isMe = !!myUserId && sub === myUserId;
                   const label = isMe
                     ? 'You'
@@ -4475,26 +4489,28 @@ export default function ChatScreen({
                       accessibilityRole={isMe ? 'button' : undefined}
                       accessibilityLabel={isMe ? 'Remove reaction' : undefined}
                     >
-                      <Text
-                        style={[
-                          styles.summaryText,
-                          isDark ? styles.summaryTextDark : null,
-                          isMe ? { fontWeight: '800' } : null,
-                        ]}
-                      >
-                        {label}
-                      </Text>
-                      {isMe ? (
+                      <View style={styles.reactionInfoRow}>
                         <Text
                           style={[
                             styles.summaryText,
                             isDark ? styles.summaryTextDark : null,
-                            { opacity: isDark ? 0.85 : 0.7, fontSize: 12, marginTop: 2, fontWeight: '700' },
+                            isMe ? { fontWeight: '800' } : null,
                           ]}
                         >
-                          Tap to remove
+                          {label}
                         </Text>
-                      ) : null}
+                        {isMe ? (
+                          <Text
+                            style={[
+                              styles.summaryText,
+                              isDark ? styles.summaryTextDark : null,
+                              styles.reactionInfoRemoveHint,
+                            ]}
+                          >
+                            Tap to remove
+                          </Text>
+                        ) : null}
+                      </View>
                     </Pressable>
                   );
                 })
@@ -4893,6 +4909,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
   },
+  // Outer wrapper to allow reaction chips to float outside the clipped (rounded) card.
+  mediaCardOuter: { position: 'relative', overflow: 'visible' },
   mediaCardIncoming: { backgroundColor: '#f1f1f1' },
   mediaCardIncomingDark: { backgroundColor: '#1c1c22' },
   // Outgoing media uses "contain" sometimes → avoid blue letterbox edges by using neutral bg.
@@ -5136,13 +5154,18 @@ const styles = StyleSheet.create({
   actionMenuMediaCaption: { color: '#222', lineHeight: 18 },
   actionMenuMediaCaptionDark: { color: '#d7d7e0' },
   actionMenuOptions: { paddingVertical: 6 },
+  reactionInfoRow: { flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap' },
+  reactionInfoRemoveHint: { opacity: 0.75, fontSize: 12, fontWeight: '700', fontStyle: 'italic', marginLeft: 8 },
   reactionOverlay: {
     position: 'absolute',
     bottom: -12,
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 0,
   },
-  reactionOverlayIncoming: { left: 10 },
+  // Always anchor reaction chips to the right edge (incoming + outgoing),
+  // so they line up consistently with the sender-side layout.
+  reactionOverlayIncoming: { right: 10 },
   reactionOverlayOutgoing: { right: 10, flexDirection: 'row-reverse' },
   mediaHeaderTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   mediaHeaderTopLeft: { flex: 1, paddingRight: 10 },
@@ -5157,8 +5180,8 @@ const styles = StyleSheet.create({
   mediaHeaderCaptionIndicators: { flexDirection: 'row', alignItems: 'flex-end', marginLeft: 10, gap: 6 },
   reactionMiniChip: {
     borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
     backgroundColor: '#fff',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#e3e3e3',
@@ -5168,8 +5191,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
+  // Keep reaction chips consistent: no overlapping/stacking.
   reactionMiniChipStacked: {
-    marginLeft: -10,
+    marginLeft: 0,
   },
   reactionMiniChipDark: {
     backgroundColor: '#1c1c22',
