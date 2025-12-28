@@ -37,6 +37,25 @@ exports.handler = async (event) => {
         editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
         deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
         deletedBySub: it.deletedBySub ? String(it.deletedBySub) : undefined,
+        reactions: it.reactions
+          ? Object.fromEntries(
+              Object.entries(it.reactions).map(([emoji, setVal]) => {
+                const subs =
+                  setVal && typeof setVal === 'object' && setVal instanceof Set
+                    ? Array.from(setVal).map(String)
+                    : Array.isArray(setVal)
+                    ? setVal.map(String)
+                    : [];
+                return [emoji, { count: subs.length, userSubs: subs }];
+              })
+            )
+          : undefined,
+        reactionUsers:
+          it.reactionUsers && typeof it.reactionUsers === 'object'
+            ? Object.fromEntries(
+                Object.entries(it.reactionUsers).map(([sub, name]) => [String(sub), String(name)])
+              )
+            : undefined,
         ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
         expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
       }));
