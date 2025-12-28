@@ -419,6 +419,11 @@ export default function ChatScreen({
   const [summaryOpen, setSummaryOpen] = React.useState(false);
   const [summaryText, setSummaryText] = React.useState<string>('');
   const [summaryLoading, setSummaryLoading] = React.useState(false);
+  const [helperOpen, setHelperOpen] = React.useState(false);
+  const [helperInstruction, setHelperInstruction] = React.useState<string>('');
+  const [helperLoading, setHelperLoading] = React.useState<boolean>(false);
+  const [helperAnswer, setHelperAnswer] = React.useState<string>('');
+  const [helperSuggestions, setHelperSuggestions] = React.useState<string[]>([]);
   const [isUploading, setIsUploading] = React.useState(false);
   const [pendingMedia, setPendingMedia] = React.useState<{
     uri: string;
@@ -2533,6 +2538,23 @@ export default function ChatScreen({
     setInfoOpen(true);
   }, []);
 
+  // Some dev builds may not have expo-clipboard compiled in yet.
+  // Lazy-load so the app doesn't crash; show a friendly modal instead.
+  const copyToClipboard = React.useCallback(
+    async (text: string) => {
+      try {
+        const Clipboard = await import('expo-clipboard');
+        await Clipboard.setStringAsync(text);
+      } catch {
+        openInfo(
+          'Copy unavailable',
+          'Your current build does not include clipboard support yet. Rebuild the dev client to enable Copy.'
+        );
+      }
+    },
+    [openInfo]
+  );
+
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
       if (msg.deletedAt) return;
@@ -3113,6 +3135,85 @@ export default function ChatScreen({
     }
   }, [messages, activeConversationId, peer]);
 
+  const openAiHelper = React.useCallback(() => {
+    setHelperOpen(true);
+    setHelperLoading(false);
+    setHelperAnswer('');
+    setHelperSuggestions([]);
+    setHelperInstruction('');
+  }, []);
+
+  const submitAiHelper = React.useCallback(async () => {
+    if (!API_URL) {
+      openInfo('AI not configured', 'API_URL is not configured.');
+      return;
+    }
+    if (helperLoading) return;
+    const instruction = helperInstruction.trim();
+    if (!instruction) {
+      openInfo('Ask a question', 'Type what you want help with first.');
+      return;
+    }
+
+    try {
+      setHelperLoading(true);
+      setHelperAnswer('');
+      setHelperSuggestions([]);
+
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) throw new Error('Not authenticated');
+
+      // messages[] is newest-first (FlatList inverted), so take the most recent 50 and send oldest-first.
+      const recent = messages.slice(0, 50).slice().reverse();
+      const transcript = recent
+        .map((m) => {
+          // Only send plaintext. If message is still encrypted, skip it.
+          const raw = m.decryptedText ?? (m.encrypted ? '' : (m.rawText ?? m.text));
+          const text = raw.length > 500 ? `${raw.slice(0, 500)}…` : raw;
+          return text
+            ? {
+                user: m.user ?? 'anon',
+                text,
+                createdAt: m.createdAt,
+              }
+            : null;
+        })
+        .filter(Boolean);
+
+      const resp = await fetch(`${API_URL.replace(/\/$/, '')}/ai/helper`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          conversationId: activeConversationId,
+          peer: peer ?? null,
+          instruction,
+          messages: transcript,
+        }),
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(`AI helper failed (${resp.status}): ${text || 'no body'}`);
+      }
+      const data = await resp.json().catch(() => ({}));
+      const answer = String((data as any).answer ?? '').trim();
+      const suggestions = Array.isArray((data as any).suggestions)
+        ? (data as any).suggestions.map((s: any) => String(s ?? '').trim()).filter(Boolean).slice(0, 6)
+        : [];
+
+      setHelperAnswer(answer);
+      setHelperSuggestions(suggestions);
+    } catch (e: any) {
+      openInfo('AI helper failed', e?.message ?? 'Unknown error');
+    } finally {
+      setHelperLoading(false);
+    }
+  }, [API_URL, helperInstruction, messages, activeConversationId, peer, openInfo]);
+
   return (
     <SafeAreaView
       style={[styles.safe, isDark ? styles.safeDark : null]}
@@ -3137,7 +3238,19 @@ export default function ChatScreen({
               </Text>
             </Pressable>
           </View>
-          <Text style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null]}>{`Welcome ${displayName}!`}</Text>
+          <View style={styles.headerSubRow}>
+            <Text style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null]} numberOfLines={1}>
+              {`Welcome ${displayName}!`}
+            </Text>
+            <Pressable
+              style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
+              onPress={openAiHelper}
+            >
+              <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
+                AI Helper
+              </Text>
+            </Pressable>
+          </View>
           {isDm ? (
             <View style={styles.decryptRow}>
               <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
@@ -4064,6 +4177,113 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={helperOpen} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>AI Helper</Text>
+
+            <TextInput
+              value={helperInstruction}
+              onChangeText={setHelperInstruction}
+              placeholder="How do you want to respond to this message?"
+              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+              style={[styles.helperInput, isDark ? styles.helperInputDark : null]}
+              editable={!helperLoading}
+              multiline
+            />
+            <Text style={[styles.helperHint, isDark ? styles.helperHintDark : null]}>
+              Tip: include the word “response” in your request if you want reply options.
+            </Text>
+
+            {helperLoading ? (
+              <View style={styles.summaryLoadingRow}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
+                    Thinking
+                  </Text>
+                  <AnimatedDots color={isDark ? '#d7d7e0' : '#555'} size={18} />
+                </View>
+              </View>
+            ) : null}
+
+            {!helperLoading && (helperAnswer.length || helperSuggestions.length) ? (
+              <ScrollView style={styles.summaryScroll}>
+                {helperAnswer.length ? (
+                  <View style={styles.helperBlock}>
+                    <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Answer</Text>
+                    <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>{helperAnswer}</Text>
+                  </View>
+                ) : null}
+
+                {helperSuggestions.length ? (
+                  <View style={styles.helperBlock}>
+                    <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Reply options</Text>
+                    <View style={{ gap: 10 }}>
+                      {helperSuggestions.map((s, idx) => (
+                        <View
+                          key={`sugg:${idx}`}
+                          style={[styles.helperSuggestionBubble, isDark ? styles.helperSuggestionBubbleDark : null]}
+                        >
+                          <Text style={[styles.helperSuggestionText, isDark ? styles.summaryTextDark : null]}>
+                            {s}
+                          </Text>
+                          <View style={styles.helperSuggestionActions}>
+                            <Pressable
+                              style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                              onPress={() => void copyToClipboard(s)}
+                            >
+                              <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Copy</Text>
+                            </Pressable>
+                            <Pressable
+                              style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                              onPress={() => {
+                                setInput(s);
+                                setHelperOpen(false);
+                              }}
+                            >
+                              <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Use</Text>
+                            </Pressable>
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+              </ScrollView>
+            ) : null}
+
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[
+                  styles.toolBtn,
+                  isDark ? styles.toolBtnDark : null,
+                  helperLoading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+                ]}
+                disabled={helperLoading}
+                onPress={submitAiHelper}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Ask
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => {
+                  setHelperOpen(false);
+                  setHelperInstruction('');
+                  setHelperAnswer('');
+                  setHelperSuggestions([]);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Close
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={messageActionOpen} transparent animationType="fade">
         <View style={styles.actionMenuOverlay}>
           <Pressable style={StyleSheet.absoluteFill} onPress={closeMessageActions} />
@@ -4677,6 +4897,13 @@ const styles = StyleSheet.create({
   titleDark: { color: '#fff' },
   welcomeText: { fontSize: 14, color: '#555', marginTop: 4, fontWeight: '700' },
   welcomeTextDark: { color: '#b7b7c2' },
+  headerSubRow: {
+    marginTop: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
   statusTextDark: { color: '#a7a7b4' },
@@ -4735,6 +4962,7 @@ const styles = StyleSheet.create({
   },
   summarizeBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
   summarizeBtnTextDark: { color: '#fff' },
+  headerTools: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },
   // kept for other modals using the same visual language
   toolBtn: {
     paddingHorizontal: 12,
@@ -5132,10 +5360,43 @@ const styles = StyleSheet.create({
   summaryLoadingText: { color: '#555', fontWeight: '600' },
   summaryScroll: { maxHeight: 420 },
   summaryText: { color: '#222', lineHeight: 20 },
-  summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12 },
+  summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12, gap: 10 },
   summaryModalDark: { backgroundColor: '#14141a' },
   summaryTitleDark: { color: '#fff' },
   summaryTextDark: { color: '#d7d7e0' },
+  helperInput: {
+    minHeight: 44,
+    maxHeight: 140,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    backgroundColor: '#fafafa',
+    color: '#111',
+  },
+  helperInputDark: {
+    borderColor: '#2a2a33',
+    backgroundColor: '#1c1c22',
+    color: '#fff',
+  },
+  helperHint: { marginTop: 8, fontSize: 12, color: '#666', fontWeight: '600' },
+  helperHintDark: { color: '#a7a7b4' },
+  helperBlock: { marginTop: 10 },
+  helperSectionTitle: { fontSize: 13, fontWeight: '800', marginBottom: 6, color: '#111' },
+  helperSuggestionBubble: {
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: '#f4f4f4',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e7e7ea',
+  },
+  helperSuggestionBubbleDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  helperSuggestionText: { color: '#222', lineHeight: 20 },
+  helperSuggestionActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 },
   actionMenuOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)' },
   actionMenuCard: {
     backgroundColor: '#fff',
