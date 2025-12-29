@@ -7,8 +7,15 @@ function normalizeHexColor(input) {
   const s = typeof input === 'string' ? input.trim() : '';
   if (!s) return null;
   const withHash = s.startsWith('#') ? s : `#${s}`;
-  if (!/^#[0-9a-fA-F]{6}$/.test(withHash)) return null;
-  return withHash.toUpperCase();
+  // Accept both #RRGGBB and shorthand #RGB, normalize to #RRGGBB uppercase.
+  if (/^#[0-9a-fA-F]{6}$/.test(withHash)) return withHash.toUpperCase();
+  if (/^#[0-9a-fA-F]{3}$/.test(withHash)) {
+    const r = withHash[1];
+    const g = withHash[2];
+    const b = withHash[3];
+    return `#${r}${r}${g}${g}${b}${b}`.toUpperCase();
+  }
+  return null;
 }
 
 exports.handler = async (event) => {
@@ -61,11 +68,17 @@ exports.handler = async (event) => {
       removes.push('avatarImagePath');
     } else if (typeof imgRaw === 'string') {
       const path = String(imgRaw).trim();
-      // Prevent arbitrary bucket reads; avatars are expected to live under public/avatars/.
-      if (path && !path.startsWith('public/avatars/')) {
+      // Prevent arbitrary bucket reads; avatars are expected to live under one of these prefixes.
+      // NOTE: We prefer uploads/global/avatars/* because Amplify Storage policies already grant
+      // guest+authenticated read access to uploads/global/*.
+      const allowedPrefixes = ['uploads/global/avatars/', 'public/avatars/'];
+      const ok = !path || allowedPrefixes.some((pfx) => path.startsWith(pfx));
+      if (!ok) {
         return {
           statusCode: 400,
-          body: JSON.stringify({ message: 'imagePath must start with public/avatars/' }),
+          body: JSON.stringify({
+            message: `imagePath must start with ${allowedPrefixes.join(' or ')}`,
+          }),
         };
       }
       updates.push('avatarImagePath = :ip');

@@ -433,8 +433,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       try {
         const { url } = await getUrl({ path: myAvatar.imagePath });
         if (!cancelled) setMyAvatar((prev) => ({ ...prev, imageUri: url.toString() }));
-      } catch {
-        // ignore (best-effort)
+      } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.log('avatar preview getUrl failed', myAvatar?.imagePath, e?.message || String(e));
       }
     })();
     return () => {
@@ -1404,11 +1405,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                       return;
                     }
                     const result = await ImagePicker.launchImageLibraryAsync({
-                      // Newer expo-image-picker prefers `MediaType` (array), but some versions only ship `MediaTypeOptions`.
-                      // Use runtime detection to avoid warnings while keeping TS happy.
-                      mediaTypes: ((ImagePicker as any).MediaType?.Images
-                        ? [(ImagePicker as any).MediaType.Images]
-                        : ImagePicker.MediaTypeOptions.Images) as any,
+                      mediaTypes: [ImagePicker.MediaType.Images] as any,
                       allowsEditing: true, // built-in crop UI w/ zoom
                       aspect: [1, 1],
                       quality: 0.9,
@@ -1460,7 +1457,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                         { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
                       );
                       const blob = await (await fetch(normalized.uri)).blob();
-                      const path = `public/avatars/${myUserSub}/${Date.now()}.jpg`;
+                      // Store avatars under uploads/global/* so both authenticated users and guests
+                      // can resolve them via Amplify Storage permissions (and later behind CloudFront).
+                      const path = `uploads/global/avatars/${myUserSub}/${Date.now()}.jpg`;
                       await uploadData({ path, data: blob, options: { contentType: 'image/jpeg' } }).result;
                       nextImagePath = path;
                       setPendingAvatarImageUri(null);

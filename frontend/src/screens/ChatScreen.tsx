@@ -666,8 +666,7 @@ export default function ChatScreen({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        // MediaTypeOptions is deprecated in SDK 54+. Use MediaType (or array) instead.
-        mediaTypes: ['images', 'videos'],
+        mediaTypes: [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] as any,
         quality: 1,
       });
 
@@ -705,7 +704,7 @@ export default function ChatScreen({
       }
 
       const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['images', 'videos'],
+        mediaTypes: [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] as any,
         quality: 1,
         allowsEditing: false,
       });
@@ -813,7 +812,7 @@ export default function ChatScreen({
       // Keep uploads under that prefix so authenticated users can PUT.
       const baseKey = `${Date.now()}-${safeName}`;
       const path = `uploads/global/${baseKey}`;
-      const thumbPath = `uploads/global/thumbs/${baseKey}.jpg`;
+      const thumbPath = `uploads/global/thumbs/${baseKey}.webp`;
 
       await uploadData({
         path,
@@ -831,17 +830,17 @@ export default function ChatScreen({
           const thumb = await ImageManipulator.manipulateAsync(
             media.uri,
             [{ resize: { width: THUMB_MAX_DIM } }],
-            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.JPEG }
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
           );
           const thumbRes = await fetch(thumb.uri);
           const thumbBlob = await thumbRes.blob();
           await uploadData({
             path: thumbPath,
             data: thumbBlob,
-            options: { contentType: 'image/jpeg' },
+            options: { contentType: 'image/webp' },
           }).result;
           uploadedThumbPath = thumbPath;
-          uploadedThumbContentType = 'image/jpeg';
+          uploadedThumbContentType = 'image/webp';
         } catch {
           // ignore thumb failures; fall back to original
         }
@@ -851,15 +850,21 @@ export default function ChatScreen({
             time: 500,
             quality: THUMB_JPEG_QUALITY,
           });
-          const thumbRes = await fetch(uri);
+          // Convert the generated video thumbnail to webp for smaller/faster previews.
+          const converted = await ImageManipulator.manipulateAsync(
+            uri,
+            [{ resize: { width: THUMB_MAX_DIM } }],
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
+          );
+          const thumbRes = await fetch(converted.uri);
           const thumbBlob = await thumbRes.blob();
           await uploadData({
             path: thumbPath,
             data: thumbBlob,
-            options: { contentType: 'image/jpeg' },
+            options: { contentType: 'image/webp' },
           }).result;
           uploadedThumbPath = thumbPath;
-          uploadedThumbContentType = 'image/jpeg';
+          uploadedThumbContentType = 'image/webp';
         } catch {
           // ignore thumb failures; fall back to video preview
         }
@@ -952,7 +957,7 @@ export default function ChatScreen({
           const thumb = await ImageManipulator.manipulateAsync(
             media.uri,
             [{ resize: { width: THUMB_MAX_DIM } }],
-            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.JPEG }
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
           );
           thumbUri = thumb.uri;
         } else if (media.kind === 'video') {
@@ -960,21 +965,27 @@ export default function ChatScreen({
             time: 500,
             quality: THUMB_JPEG_QUALITY,
           });
-          thumbUri = uri;
+          // Convert to webp for smaller encrypted preview blobs.
+          const converted = await ImageManipulator.manipulateAsync(
+            uri,
+            [{ resize: { width: THUMB_MAX_DIM } }],
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
+          );
+          thumbUri = converted.uri;
         }
 
         if (thumbUri) {
           const tBytes = await readUriBytes(thumbUri);
           const tIv = new Uint8Array(getRandomBytes(12));
           const tCipher = gcm(fileKey, tIv).encrypt(tBytes);
-          thumbPath = `uploads/dm/${conversationKey}/thumbs/${uploadId}.jpg.enc`;
+          thumbPath = `uploads/dm/${conversationKey}/thumbs/${uploadId}.webp.enc`;
           await uploadData({
             path: thumbPath,
             data: tCipher,
             options: { contentType: 'application/octet-stream' },
           }).result;
           thumbIvHex = bytesToHex(tIv);
-          thumbContentType = 'image/jpeg';
+          thumbContentType = 'image/webp';
         }
       } catch {
         // ignore thumb failures
@@ -1117,9 +1128,10 @@ export default function ChatScreen({
     };
   }, [isDm, messages, mediaUrlByPath, storageSessionReady]);
 
-  // Lazily resolve avatar image URLs (public paths under public/avatars/*).
+  // Lazily resolve avatar image URLs (public-ish paths like uploads/global/avatars/*).
   React.useEffect(() => {
-    if (!storageSessionReady) return;
+    // Avatars are intended to be broadly visible (guests see them too). If identity credentials
+    // are temporarily unavailable, getUrl() may throw; we still want to retry on future renders.
     let cancelled = false;
     const needed: string[] = [];
 
@@ -1148,8 +1160,9 @@ export default function ChatScreen({
               const { url } = await getUrl({ path });
               pairs.push([path, url.toString()]);
             }
-          } catch {
-            // ignore
+          } catch (e) {
+            // eslint-disable-next-line no-console
+            console.log('avatar getUrl failed', path, e?.message || String(e));
           }
         }
         if (!cancelled && pairs.length) {
@@ -1507,7 +1520,9 @@ export default function ChatScreen({
       const plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
 
       const b64 = fromByteArray(plainThumbBytes);
-      const ct = env.media.thumbContentType || 'image/jpeg';
+      const ct =
+        env.media.thumbContentType ||
+        (String(env.media.thumbPath || '').includes('.webp') ? 'image/webp' : 'image/jpeg');
       const dataUri = `data:${ct};base64,${b64}`;
       setDmThumbUriByPath((prev) => ({ ...prev, [cacheKey]: dataUri }));
 
