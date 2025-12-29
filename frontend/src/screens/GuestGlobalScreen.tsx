@@ -23,10 +23,15 @@ import { getUrl } from 'aws-amplify/storage';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import Feather from '@expo/vector-icons/Feather';
 import { HeaderMenuModal } from '../components/HeaderMenuModal';
+import { AvatarBubble } from '../components/AvatarBubble';
 
 type GuestMessage = {
   id: string;
   user: string;
+  userSub?: string;
+  avatarBgColor?: string;
+  avatarTextColor?: string;
+  avatarImagePath?: string;
   text: string;
   createdAt: number;
   editedAt?: number;
@@ -102,6 +107,7 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
         ? String(it.messageId)
         : String(createdAt);
     const user = typeof it?.user === 'string' ? it.user : 'anon';
+    const userSub = typeof it?.userSub === 'string' ? String(it.userSub) : undefined;
     const deletedAt = typeof it?.deletedAt === 'number' ? it.deletedAt : undefined;
     if (deletedAt) continue;
     const rawText = typeof it?.text === 'string' ? it.text : '';
@@ -112,6 +118,10 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
     out.push({
       id: messageId,
       user,
+      userSub,
+      avatarBgColor: typeof (it as any)?.avatarBgColor === 'string' ? String((it as any).avatarBgColor) : undefined,
+      avatarTextColor: typeof (it as any)?.avatarTextColor === 'string' ? String((it as any).avatarTextColor) : undefined,
+      avatarImagePath: typeof (it as any)?.avatarImagePath === 'string' ? String((it as any).avatarImagePath) : undefined,
       text,
       createdAt,
       editedAt: typeof (it as any)?.editedAt === 'number' ? (it as any).editedAt : undefined,
@@ -237,6 +247,21 @@ export default function GuestGlobalScreen({
   const [refreshing, setRefreshing] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
   const [urlByPath, setUrlByPath] = React.useState<Record<string, string>>({});
+  // How quickly we’ll re-check guest profile avatars for updates (tradeoff: freshness vs API calls).
+  const AVATAR_PROFILE_TTL_MS = 60_000;
+  const [avatarProfileBySub, setAvatarProfileBySub] = React.useState<
+    Record<
+      string,
+      {
+        displayName?: string;
+        avatarBgColor?: string;
+        avatarTextColor?: string;
+        avatarImagePath?: string;
+        fetchedAt?: number;
+      }
+    >
+  >({});
+  const inFlightAvatarProfileRef = React.useRef<Set<string>>(new Set());
   const [reactionInfoOpen, setReactionInfoOpen] = React.useState<boolean>(false);
   const [reactionInfoEmoji, setReactionInfoEmoji] = React.useState<string>('');
   const [reactionInfoSubs, setReactionInfoSubs] = React.useState<string[]>([]);
@@ -261,6 +286,88 @@ export default function GuestGlobalScreen({
     },
     [urlByPath]
   );
+
+  // Guest profile-lite fetch (public endpoint) so avatars update for old messages.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!API_URL) return;
+      const base = API_URL.replace(/\/$/, '');
+      const missing: string[] = [];
+      const now = Date.now();
+      for (const m of messages) {
+        const sub = m.userSub ? String(m.userSub) : '';
+        if (!sub) continue;
+        const existing = avatarProfileBySub[sub];
+        const stale =
+          !existing ||
+          typeof existing.fetchedAt !== 'number' ||
+          !Number.isFinite(existing.fetchedAt) ||
+          now - existing.fetchedAt > AVATAR_PROFILE_TTL_MS;
+        if (!stale) continue;
+        if (inFlightAvatarProfileRef.current.has(sub)) continue;
+        missing.push(sub);
+      }
+      if (!missing.length) return;
+      const unique = Array.from(new Set(missing)).slice(0, 25);
+      unique.forEach((s) => inFlightAvatarProfileRef.current.add(s));
+      try {
+        if (cancelled) return;
+        const resp = await fetch(`${base}/public/users/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subs: unique }),
+        });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const users = Array.isArray(json?.users) ? json.users : [];
+        if (!users.length) return;
+        setAvatarProfileBySub((prev) => {
+          const next = { ...prev };
+          for (const u of users) {
+            const sub = typeof u?.sub === 'string' ? String(u.sub).trim() : '';
+            if (!sub) continue;
+            next[sub] = {
+              displayName: typeof u.displayName === 'string' ? String(u.displayName) : undefined,
+              avatarBgColor: typeof u.avatarBgColor === 'string' ? String(u.avatarBgColor) : undefined,
+              avatarTextColor: typeof u.avatarTextColor === 'string' ? String(u.avatarTextColor) : undefined,
+              avatarImagePath: typeof u.avatarImagePath === 'string' ? String(u.avatarImagePath) : undefined,
+              fetchedAt: now,
+            };
+          }
+          return next;
+        });
+      } finally {
+        unique.forEach((s) => inFlightAvatarProfileRef.current.delete(s));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, avatarProfileBySub]);
+
+  // Prefetch avatar image URLs (best-effort).
+  React.useEffect(() => {
+    let cancelled = false;
+    const needed: string[] = [];
+    for (const prof of Object.values(avatarProfileBySub)) {
+      const p = prof?.avatarImagePath;
+      if (!p) continue;
+      if (urlByPath[p]) continue;
+      needed.push(p);
+    }
+    if (!needed.length) return;
+    const unique = Array.from(new Set(needed));
+    (async () => {
+      for (const p of unique) {
+        if (cancelled) return;
+        await resolvePathUrl(p);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [avatarProfileBySub, urlByPath, resolvePathUrl]);
 
   const openReactionInfo = React.useCallback(
     (emoji: string, subs: string[], namesBySub?: Record<string, string>) => {
@@ -429,15 +536,33 @@ export default function GuestGlobalScreen({
             tintColor={isDark ? '#ffffff' : '#111'}
           />
         }
-        renderItem={({ item }) => (
-          <GuestMessageRow
-            item={item}
-            isDark={isDark}
-            resolvePathUrl={resolvePathUrl}
-            onOpenReactionInfo={openReactionInfo}
-            onOpenViewer={openViewer}
-          />
-        )}
+        renderItem={({ item, index }) => {
+          const AVATAR_SIZE = 44;
+          const AVATAR_GAP = 8;
+          const senderKey = (item.userSub && String(item.userSub)) || item.user;
+          const next = messages[index + 1];
+          const nextSenderKey = next ? ((next.userSub && String(next.userSub)) || next.user) : '';
+          const showAvatar = !next || nextSenderKey !== senderKey;
+          const AVATAR_GUTTER = showAvatar ? AVATAR_SIZE + AVATAR_GAP : 0;
+          const prof = item.userSub ? avatarProfileBySub[String(item.userSub)] : undefined;
+          const avatarImageUri = prof?.avatarImagePath ? urlByPath[String(prof.avatarImagePath)] : undefined;
+          return (
+            <GuestMessageRow
+              item={item}
+              isDark={isDark}
+              resolvePathUrl={resolvePathUrl}
+              onOpenReactionInfo={openReactionInfo}
+              onOpenViewer={openViewer}
+              avatarSize={AVATAR_SIZE}
+              avatarGutter={AVATAR_GUTTER}
+              avatarSeed={senderKey}
+              avatarImageUri={avatarImageUri}
+              avatarBgColor={prof?.avatarBgColor ?? item.avatarBgColor}
+              avatarTextColor={prof?.avatarTextColor ?? item.avatarTextColor}
+              showAvatar={showAvatar}
+            />
+          );
+        }}
       />
 
       {/* Bottom bar CTA (like the chat input row), so messages never render behind it */}
@@ -577,13 +702,28 @@ function GuestMessageRow({
   resolvePathUrl,
   onOpenReactionInfo,
   onOpenViewer,
+  avatarSize,
+  avatarGutter,
+  avatarSeed,
+  avatarImageUri,
+  avatarBgColor,
+  avatarTextColor,
+  showAvatar,
 }: {
   item: GuestMessage;
   isDark: boolean;
   resolvePathUrl: (path: string) => Promise<string | null>;
   onOpenReactionInfo: (emoji: string, subs: string[], namesBySub?: Record<string, string>) => void;
   onOpenViewer: (media: GuestMessage['media']) => void;
+  avatarSize: number;
+  avatarGutter: number;
+  avatarSeed: string;
+  avatarImageUri?: string;
+  avatarBgColor?: string;
+  avatarTextColor?: string;
+  showAvatar: boolean;
 }) {
+  const AVATAR_TOP_OFFSET = 4;
   const { width: windowWidth } = useWindowDimensions();
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
   const [usedFullUrl, setUsedFullUrl] = React.useState<boolean>(false);
@@ -655,7 +795,7 @@ function GuestMessageRow({
   // Match ChatScreen-ish thumbnail sizing: capped max size, preserve aspect ratio, no crop.
   const CHAT_MEDIA_MAX_HEIGHT = 240;
   const CHAT_MEDIA_MAX_WIDTH_FRACTION = 0.86;
-  const maxW = Math.max(220, Math.floor(windowWidth * CHAT_MEDIA_MAX_WIDTH_FRACTION));
+  const maxW = Math.max(220, Math.floor((windowWidth - Math.max(0, avatarGutter)) * CHAT_MEDIA_MAX_WIDTH_FRACTION));
   const maxH = CHAT_MEDIA_MAX_HEIGHT;
   const aspect = typeof thumbAspect === 'number' ? thumbAspect : 1;
   const capped = (() => {
@@ -668,6 +808,18 @@ function GuestMessageRow({
 
   return (
     <View style={[styles.msgRow]}>
+      {showAvatar ? (
+        <View style={[styles.avatarGutter, { width: avatarSize, marginTop: AVATAR_TOP_OFFSET }]}>
+          <AvatarBubble
+            size={avatarSize}
+            seed={avatarSeed}
+            label={item.user}
+            backgroundColor={avatarBgColor}
+            textColor={avatarTextColor}
+            imageUri={avatarImageUri}
+          />
+        </View>
+      ) : null}
       {hasMedia ? (
         <View style={[styles.guestMediaCardOuter, { width: capped.w }]}>
           <View style={[styles.guestMediaCard, isDark ? styles.guestMediaCardDark : null]}>
@@ -898,7 +1050,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
   },
   listContent: {
-    paddingHorizontal: 12,
+    paddingHorizontal: 6,
     // Inverted list: include symmetric padding so the newest message doesn't hug the bottom bar.
     paddingTop: 12,
     paddingBottom: 12,
@@ -906,7 +1058,10 @@ const styles = StyleSheet.create({
   msgRow: {
     paddingVertical: 4,
     alignItems: 'flex-start',
+    flexDirection: 'row',
   },
+  avatarGutter: { marginRight: 8 },
+  avatarSpacer: { opacity: 0 },
   guestBubbleOuter: { alignSelf: 'flex-start', position: 'relative', overflow: 'visible', maxWidth: '92%' },
   bubble: {
     maxWidth: '92%',

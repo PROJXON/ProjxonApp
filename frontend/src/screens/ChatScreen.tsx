@@ -23,6 +23,7 @@ import {
   View,
 } from 'react-native';
 import { AnimatedDots } from '../components/AnimatedDots';
+import { AvatarBubble } from '../components/AvatarBubble';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
@@ -190,6 +191,9 @@ type ChatMessage = {
   userLower?: string;
   // Stable identity key for comparisons (Cognito sub). Prefer this over display strings for logic.
   userSub?: string;
+  avatarBgColor?: string;
+  avatarTextColor?: string;
+  avatarImagePath?: string;
   text: string;
   rawText?: string;
   encrypted?: EncryptedChatPayloadV1;
@@ -349,6 +353,10 @@ export default function ChatScreen({
     () => messages.filter((m) => !(m.userSub && blockedSubsSet.has(String(m.userSub)))),
     [messages, blockedSubsSet]
   );
+  const AVATAR_SIZE = 44;
+  const AVATAR_GAP = 8;
+  const AVATAR_GUTTER = AVATAR_SIZE + AVATAR_GAP;
+  const AVATAR_TOP_OFFSET = 4;
   const [input, setInput] = React.useState<string>('');
   const inputRef = React.useRef<string>('');
   const textInputRef = React.useRef<TextInput | null>(null);
@@ -442,9 +450,28 @@ export default function ChatScreen({
   const pendingMediaRef = React.useRef<typeof pendingMedia>(null);
   const [mediaUrlByPath, setMediaUrlByPath] = React.useState<Record<string, string>>({});
   const inFlightMediaUrlRef = React.useRef<Set<string>>(new Set());
+  const [avatarUrlByPath, setAvatarUrlByPath] = React.useState<Record<string, string>>({});
+  const inFlightAvatarUrlRef = React.useRef<Set<string>>(new Set());
   const [storageSessionReady, setStorageSessionReady] = React.useState<boolean>(false);
   const [imageAspectByPath, setImageAspectByPath] = React.useState<Record<string, number>>({});
   const inFlightImageSizeRef = React.useRef<Set<string>>(new Set());
+  // When we receive a message from a sender, refresh their avatar profile (throttled),
+  // so profile changes propagate quickly without global polling.
+  const AVATAR_REFETCH_ON_MESSAGE_COOLDOWN_MS = 15_000;
+  const lastAvatarRefetchAtBySubRef = React.useRef<Record<string, number>>({});
+  const [avatarProfileBySub, setAvatarProfileBySub] = React.useState<
+    Record<
+      string,
+      {
+        displayName?: string;
+        avatarBgColor?: string;
+        avatarTextColor?: string;
+        avatarImagePath?: string;
+        fetchedAt?: number;
+      }
+    >
+  >({});
+  const inFlightAvatarProfileRef = React.useRef<Set<string>>(new Set());
   const [viewerOpen, setViewerOpen] = React.useState(false);
   const [viewerMedia, setViewerMedia] = React.useState<{
     url: string;
@@ -460,6 +487,17 @@ export default function ChatScreen({
   React.useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
+
+  // When switching conversations, invalidate avatar profile cache so we re-fetch
+  // profile-lite data for the people in the newly visible message list.
+  // Without this, a user who changed their avatar but hasn't sent a new message
+  // could remain "stuck" until they speak again.
+  React.useEffect(() => {
+    setAvatarProfileBySub({});
+    setAvatarUrlByPath({});
+    inFlightAvatarProfileRef.current = new Set();
+    inFlightAvatarUrlRef.current = new Set();
+  }, [activeConversationId]);
   React.useEffect(() => {
     displayNameRef.current = displayName;
   }, [displayName]);
@@ -467,6 +505,61 @@ export default function ChatScreen({
   React.useEffect(() => {
     inputRef.current = input;
   }, [input]);
+
+  // Profile-driven avatars (Option A): cache avatar settings by userSub so profile changes update old messages.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!API_URL) return;
+      const base = API_URL.replace(/\/$/, '');
+      const missing: string[] = [];
+      for (const m of messages) {
+        const sub = m.userSub ? String(m.userSub) : '';
+        if (!sub) continue;
+        if (avatarProfileBySub[sub]) continue;
+        if (inFlightAvatarProfileRef.current.has(sub)) continue;
+        missing.push(sub);
+      }
+      if (!missing.length) return;
+      const unique = Array.from(new Set(missing)).slice(0, 25); // keep bursts small
+      unique.forEach((s) => inFlightAvatarProfileRef.current.add(s));
+
+      try {
+        if (cancelled) return;
+        // Use the public batch endpoint (avatar fields only) to avoid N+1 requests.
+        const resp = await fetch(`${base}/public/users/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subs: unique }),
+        });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const users = Array.isArray(json?.users) ? json.users : [];
+        if (!users.length) return;
+        const now = Date.now();
+        setAvatarProfileBySub((prev) => {
+          const next = { ...prev };
+          for (const u of users) {
+            const sub = typeof u?.sub === 'string' ? String(u.sub).trim() : '';
+            if (!sub) continue;
+            next[sub] = {
+              displayName: typeof u.displayName === 'string' ? String(u.displayName) : undefined,
+              avatarBgColor: typeof u.avatarBgColor === 'string' ? String(u.avatarBgColor) : undefined,
+              avatarTextColor: typeof u.avatarTextColor === 'string' ? String(u.avatarTextColor) : undefined,
+              avatarImagePath: typeof u.avatarImagePath === 'string' ? String(u.avatarImagePath) : undefined,
+              fetchedAt: now,
+            };
+          }
+          return next;
+        });
+      } finally {
+        unique.forEach((s) => inFlightAvatarProfileRef.current.delete(s));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [API_URL, messages, avatarProfileBySub]);
 
   React.useEffect(() => {
     pendingMediaRef.current = pendingMedia;
@@ -511,8 +604,12 @@ export default function ChatScreen({
   }, []);
 
   const getCappedMediaSize = React.useCallback(
-    (aspect: number | undefined) => {
-      const maxW = Math.max(220, Math.floor(windowWidth * CHAT_MEDIA_MAX_WIDTH_FRACTION));
+    (aspect: number | undefined, availableWidth?: number) => {
+      const w0 =
+        typeof availableWidth === 'number' && Number.isFinite(availableWidth) && availableWidth > 0
+          ? availableWidth
+          : windowWidth;
+      const maxW = Math.max(220, Math.floor(w0 * CHAT_MEDIA_MAX_WIDTH_FRACTION));
       const maxH = CHAT_MEDIA_MAX_HEIGHT;
       const a = typeof aspect === 'number' && Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
       // start with max width
@@ -1019,6 +1116,59 @@ export default function ChatScreen({
       for (const p of uniqueNeeded) inFlightMediaUrlRef.current.delete(p);
     };
   }, [isDm, messages, mediaUrlByPath, storageSessionReady]);
+
+  // Lazily resolve avatar image URLs (public paths under public/avatars/*).
+  React.useEffect(() => {
+    if (!storageSessionReady) return;
+    let cancelled = false;
+    const needed: string[] = [];
+
+    for (const prof of Object.values(avatarProfileBySub)) {
+      const path = prof?.avatarImagePath;
+      if (!path) continue;
+      if (avatarUrlByPath[path]) continue;
+      if (inFlightAvatarUrlRef.current.has(path)) continue;
+      needed.push(path);
+    }
+
+    if (!needed.length) return;
+    const uniqueNeeded = Array.from(new Set(needed));
+    uniqueNeeded.forEach((p) => inFlightAvatarUrlRef.current.add(p));
+
+    (async () => {
+      const pairs: Array<[string, string]> = [];
+      try {
+        for (const path of uniqueNeeded) {
+          try {
+            try {
+              const { url } = await getUrl({ path });
+              pairs.push([path, url.toString()]);
+            } catch {
+              await new Promise((r) => setTimeout(r, 300));
+              const { url } = await getUrl({ path });
+              pairs.push([path, url.toString()]);
+            }
+          } catch {
+            // ignore
+          }
+        }
+        if (!cancelled && pairs.length) {
+          setAvatarUrlByPath((prev) => {
+            const next = { ...prev };
+            for (const [p, u] of pairs) next[p] = u;
+            return next;
+          });
+        }
+      } finally {
+        for (const p of uniqueNeeded) inFlightAvatarUrlRef.current.delete(p);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      for (const p of uniqueNeeded) inFlightAvatarUrlRef.current.delete(p);
+    };
+  }, [avatarProfileBySub, avatarUrlByPath, storageSessionReady]);
 
   // Lazily fetch image aspect ratios so thumbnails can render without letterboxing (and thus can be truly rounded).
   React.useEffect(() => {
@@ -2019,6 +2169,23 @@ export default function ChatScreen({
               : 'global';
           if (incomingConv !== activeConv) return;
 
+          // If this sender has changed their avatar recently, invalidate our cached profile
+          // so we refetch promptly and old messages update without waiting for TTL.
+          const senderSubForAvatar = typeof payload.userSub === 'string' ? String(payload.userSub).trim() : '';
+          if (senderSubForAvatar) {
+            const now = Date.now();
+            const last = lastAvatarRefetchAtBySubRef.current[senderSubForAvatar] || 0;
+            if (now - last >= AVATAR_REFETCH_ON_MESSAGE_COOLDOWN_MS) {
+              lastAvatarRefetchAtBySubRef.current[senderSubForAvatar] = now;
+              setAvatarProfileBySub((prev) => {
+                if (!prev[senderSubForAvatar]) return prev;
+                const next = { ...prev };
+                delete next[senderSubForAvatar];
+                return next;
+              });
+            }
+          }
+
           const rawText = String(payload.text);
           const encrypted = parseEncrypted(rawText);
           const createdAt = Number(payload.createdAt || Date.now());
@@ -2036,6 +2203,11 @@ export default function ChatScreen({
                 : typeof payload.user === 'string'
                   ? normalizeUser(payload.user)
                   : undefined,
+            avatarBgColor: typeof (payload as any).avatarBgColor === 'string' ? String((payload as any).avatarBgColor) : undefined,
+            avatarTextColor:
+              typeof (payload as any).avatarTextColor === 'string' ? String((payload as any).avatarTextColor) : undefined,
+            avatarImagePath:
+              typeof (payload as any).avatarImagePath === 'string' ? String((payload as any).avatarImagePath) : undefined,
             reactions: normalizeReactions((payload as any)?.reactions),
             rawText,
             encrypted: encrypted ?? undefined,
@@ -2178,6 +2350,9 @@ export default function ChatScreen({
                 typeof it.userLower === 'string'
                   ? normalizeUser(it.userLower)
                   : normalizeUser(String(it.user ?? 'anon')),
+              avatarBgColor: typeof it.avatarBgColor === 'string' ? String(it.avatarBgColor) : undefined,
+              avatarTextColor: typeof it.avatarTextColor === 'string' ? String(it.avatarTextColor) : undefined,
+              avatarImagePath: typeof it.avatarImagePath === 'string' ? String(it.avatarImagePath) : undefined,
               editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
               deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
               deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
@@ -3327,7 +3502,7 @@ export default function ChatScreen({
           maxToRenderPerBatch={12}
           updateCellsBatchingPeriod={50}
           windowSize={7}
-          renderItem={({ item }) => {
+          renderItem={({ item, index }) => {
             const timestamp = new Date(item.createdAt);
             const now = new Date();
             const isToday =
@@ -3398,7 +3573,23 @@ export default function ChatScreen({
             mediaLooksImage || mediaLooksVideo ? (media?.thumbPath || media?.path) : undefined;
           const thumbAspect =
             thumbKeyPath && imageAspectByPath[thumbKeyPath] ? imageAspectByPath[thumbKeyPath] : undefined;
-          const capped = getCappedMediaSize(thumbAspect);
+          const senderKey =
+            (item.userSub && String(item.userSub)) ||
+            (item.userLower && String(item.userLower)) ||
+            normalizeUser(item.user ?? 'anon');
+          const next = visibleMessages[index + 1];
+          const nextSenderKey = next
+            ? (next.userSub && String(next.userSub)) ||
+              (next.userLower && String(next.userLower)) ||
+              normalizeUser(next.user ?? 'anon')
+            : '';
+          const showAvatarForIncoming = !isOutgoing && (!next || nextSenderKey !== senderKey);
+          const prof = item.userSub ? avatarProfileBySub[String(item.userSub)] : undefined;
+          const avatarImageUri =
+            prof?.avatarImagePath ? avatarUrlByPath[String(prof.avatarImagePath)] : undefined;
+
+          const rowGutter = !isOutgoing && showAvatarForIncoming ? AVATAR_GUTTER : 0;
+          const capped = getCappedMediaSize(thumbAspect, isOutgoing ? windowWidth : windowWidth - rowGutter);
           const hideMetaUntilDecrypted = !!item.encrypted && !item.decryptedText;
           const canReact = !isDeleted && (!item.encrypted || !!item.decryptedText);
           const reactionEntriesVisible = canReact ? reactionEntries : [];
@@ -3439,6 +3630,18 @@ export default function ChatScreen({
                     isOutgoing ? styles.messageRowOutgoing : styles.messageRowIncoming,
                   ]}
                 >
+                  {!isOutgoing && showAvatarForIncoming ? (
+                    <View style={[styles.avatarGutter, { width: AVATAR_SIZE, marginTop: AVATAR_TOP_OFFSET }]}>
+                      <AvatarBubble
+                        size={AVATAR_SIZE}
+                        seed={senderKey}
+                        label={item.user ?? 'anon'}
+                        backgroundColor={prof?.avatarBgColor ?? item.avatarBgColor}
+                        textColor={prof?.avatarTextColor ?? item.avatarTextColor}
+                        imageUri={avatarImageUri}
+                      />
+                    </View>
+                  ) : null}
                   {hasMedia && !isDeleted ? (
                     <View
                       style={[
@@ -4158,10 +4361,10 @@ export default function ChatScreen({
             <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Summary</Text>
             {summaryLoading ? (
               <View style={styles.summaryLoadingRow}>
-                <ActivityIndicator />
                 <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
-                  Summarizing…
+                  Summarizing
                 </Text>
+                <AnimatedDots color={isDark ? '#d7d7e0' : '#555'} size={18} />
               </View>
             ) : (
               <ScrollView style={styles.summaryScroll}>
@@ -4993,16 +5196,20 @@ const styles = StyleSheet.create({
   err: { color: '#b00020' },
   error: { color: '#b00020', marginTop: 6 },
   errorDark: { color: '#ff6b6b' },
-  listContent: { padding: 12 },
+  listContent: { paddingVertical: 12, paddingHorizontal: 6 },
   messageRow: {
     marginBottom: 8,
     flexDirection: 'row',
+    alignItems: 'flex-start',
   },
   messageRowIncoming: { justifyContent: 'flex-start' },
   messageRowOutgoing: { justifyContent: 'flex-end' },
+  avatarGutter: { marginRight: 8 },
+  avatarSpacer: { opacity: 0 },
   messageBubble: {
     // Match guest screen behavior: allow bubbles to grow wider so long text wraps naturally.
     maxWidth: '92%',
+    flexShrink: 1,
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 16,

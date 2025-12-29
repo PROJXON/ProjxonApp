@@ -19,6 +19,8 @@ import ChatScreen from './src/screens/ChatScreen';
 import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
 import { AnimatedDots } from './src/components/AnimatedDots';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 
 import { Amplify } from "aws-amplify";
 import {
@@ -39,6 +41,7 @@ import {
 import { useFieldValues } from '@aws-amplify/ui-react-native/src/Authenticator/hooks';
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { fetchAuthSession } from '@aws-amplify/auth';
+import { getUrl, uploadData } from 'aws-amplify/storage';
 import { API_URL } from './src/config/env';
 import {
   registerForDmPushNotifications,
@@ -46,6 +49,7 @@ import {
   unregisterDmPushNotifications,
 } from './utils/pushNotifications';
 import { HeaderMenuModal } from './src/components/HeaderMenuModal';
+import { AVATAR_DEFAULT_COLORS, AvatarBubble, pickDefaultAvatarColor } from './src/components/AvatarBubble';
 import Feather from '@expo/vector-icons/Feather';
 
 import {
@@ -73,6 +77,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const { user } = useAuthenticator();
   const { signOut } = useAuthenticator();
   const [displayName, setDisplayName] = useState<string>('anon');
+  const [myUserSub, setMyUserSub] = React.useState<string | null>(null);
+  const [avatarOpen, setAvatarOpen] = React.useState<boolean>(false);
+  const [avatarSaving, setAvatarSaving] = React.useState<boolean>(false);
+  const [avatarError, setAvatarError] = React.useState<string | null>(null);
+  const [myAvatar, setMyAvatar] = React.useState<{
+    bgColor?: string;
+    textColor?: string;
+    imagePath?: string;
+    imageUri?: string; // cached preview URL (not persisted)
+  }>(() => ({ textColor: '#fff' }));
+  const [pendingAvatarImageUri, setPendingAvatarImageUri] = React.useState<string | null>(null);
+  const [pendingAvatarRemoveImage, setPendingAvatarRemoveImage] = React.useState<boolean>(false);
   const [passphrasePrompt, setPassphrasePrompt] = useState<{
     mode: 'setup' | 'restore';
     resolve: (value: string) => void;
@@ -243,6 +259,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           (user as any)?.username ||
           'anon';
         const userId = attrs.sub as string;
+        if (mounted) setMyUserSub(userId);
         if (mounted) setDisplayName(name);
 
         let keyPair = await loadKeyPair(userId);
@@ -349,6 +366,111 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       mounted = false;
     };
   }, [user]);
+
+  // Load avatar settings per signed-in user (AsyncStorage cache; best-effort server fetch for cross-device).
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!myUserSub) return;
+      const key = `avatar:v1:${myUserSub}`;
+      try {
+        const raw = await AsyncStorage.getItem(key);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (!cancelled && parsed && typeof parsed === 'object') {
+            setMyAvatar((prev) => ({
+              ...prev,
+              bgColor: typeof parsed.bgColor === 'string' ? parsed.bgColor : prev.bgColor,
+              textColor: typeof parsed.textColor === 'string' ? parsed.textColor : prev.textColor,
+              imagePath: typeof parsed.imagePath === 'string' ? parsed.imagePath : prev.imagePath,
+              imageUri: undefined,
+            }));
+          }
+        }
+
+        // Always do a best-effort server fetch too, even if we have cache, so changes
+        // made on another device (or after a backend write) show up without reinstalling.
+        if (!API_URL) return;
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const resp = await fetch(`${API_URL.replace(/\/$/, '')}/users?sub=${encodeURIComponent(myUserSub)}`, {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (!resp.ok) return;
+        const u = await resp.json();
+        if (!cancelled && u && typeof u === 'object') {
+          const next = {
+            bgColor: typeof u.avatarBgColor === 'string' ? u.avatarBgColor : undefined,
+            textColor: typeof u.avatarTextColor === 'string' ? u.avatarTextColor : undefined,
+            imagePath: typeof u.avatarImagePath === 'string' ? u.avatarImagePath : undefined,
+          };
+          setMyAvatar((prev) => ({
+            ...prev,
+            bgColor: typeof next.bgColor === 'string' ? next.bgColor : prev.bgColor,
+            textColor: typeof next.textColor === 'string' ? next.textColor : prev.textColor,
+            imagePath: typeof next.imagePath === 'string' ? next.imagePath : prev.imagePath,
+            imageUri: undefined,
+          }));
+          // Keep the local cache in sync with what the server says.
+          await AsyncStorage.setItem(key, JSON.stringify(next)).catch(() => {});
+        }
+      } catch (e) {
+        console.log('avatar cache load failed', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [myUserSub]);
+
+  // Resolve a preview URL for the current avatar image (if any).
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!myAvatar?.imagePath) return;
+      if (myAvatar.imageUri) return;
+      try {
+        const { url } = await getUrl({ path: myAvatar.imagePath });
+        if (!cancelled) setMyAvatar((prev) => ({ ...prev, imageUri: url.toString() }));
+      } catch {
+        // ignore (best-effort)
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [myAvatar?.imagePath, myAvatar?.imageUri]);
+
+  const saveAvatarToStorageAndServer = React.useCallback(
+    async (next: { bgColor?: string; textColor?: string; imagePath?: string }) => {
+      if (!myUserSub) return;
+      const key = `avatar:v1:${myUserSub}`;
+      await AsyncStorage.setItem(key, JSON.stringify(next));
+
+      if (!API_URL) return;
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) return;
+      const resp = await fetch(`${API_URL.replace(/\/$/, '')}/users/profile`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        let msg = `Avatar save failed (${resp.status})`;
+        try {
+          const parsed = JSON.parse(text || '{}');
+          if (parsed?.message) msg = String(parsed.message);
+        } catch {
+          if (text.trim()) msg = `${msg}: ${text.trim()}`;
+        }
+        throw new Error(msg);
+      }
+    },
+    [myUserSub]
+  );
 
   // Best-effort: register DM push token after login (Signal-like: sender name only, no message preview).
   React.useEffect(() => {
@@ -1158,6 +1280,16 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             },
           },
           {
+            key: 'avatar',
+            label: 'Avatar',
+            onPress: () => {
+              setMenuOpen(false);
+              setAvatarError(null);
+              setPendingAvatarImageUri(null);
+              setAvatarOpen(true);
+            },
+          },
+          {
             key: 'blocked',
             label: 'Blocklist',
             onPress: () => {
@@ -1180,6 +1312,208 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           },
         ]}
       />
+
+      <Modal visible={avatarOpen} transparent animationType="fade" onRequestClose={() => setAvatarOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setAvatarOpen(false)} />
+          <View style={[styles.profileCard, isDark ? styles.profileCardDark : null]}>
+            <View style={styles.chatsTopRow}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Avatar</Text>
+            </View>
+
+            <View style={styles.profilePreviewRow}>
+              <AvatarBubble
+                seed={myUserSub || displayName}
+                label={displayName}
+                size={44}
+                backgroundColor={myAvatar.bgColor || pickDefaultAvatarColor(myUserSub || displayName)}
+                textColor={myAvatar.textColor || '#fff'}
+                imageUri={pendingAvatarImageUri || myAvatar.imageUri}
+              />
+              <View style={styles.profilePreviewMeta}>
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+                  Pick colors or upload a photo (you can zoom/crop).
+                </Text>
+              </View>
+            </View>
+
+            {avatarError ? (
+              <Text style={[styles.errorText, isDark && styles.errorTextDark]}>{avatarError}</Text>
+            ) : null}
+
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
+              Bubble color
+            </Text>
+            <View style={styles.avatarPaletteRow}>
+              {AVATAR_DEFAULT_COLORS.map((c) => {
+                const selected = (myAvatar.bgColor || '') === c;
+                return (
+                  <Pressable
+                    key={`bg:${c}`}
+                    onPress={() => setMyAvatar((prev) => ({ ...prev, bgColor: c }))}
+                    style={[
+                      styles.avatarColorDot,
+                      { backgroundColor: c },
+                      selected ? (isDark ? styles.avatarColorDotSelectedDark : styles.avatarColorDotSelected) : null,
+                    ]}
+                  />
+                );
+              })}
+            </View>
+
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
+              Text color
+            </Text>
+            <View style={styles.avatarTextColorRow}>
+              <Pressable
+                onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#fff' }))}
+                style={[
+                  styles.avatarTextColorBtn,
+                  isDark ? styles.avatarTextColorBtnDark : null,
+                  (myAvatar.textColor || '#fff') === '#fff'
+                    ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
+                    : null,
+                ]}
+              >
+                <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>White</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#111' }))}
+                style={[
+                  styles.avatarTextColorBtn,
+                  isDark ? styles.avatarTextColorBtnDark : null,
+                  (myAvatar.textColor || '#fff') === '#111'
+                    ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
+                    : null,
+                ]}
+              >
+                <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>Black</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.profileActionsRow}>
+              <Pressable
+                style={({ pressed }) => [styles.toolBtn, isDark && styles.toolBtnDark, pressed && { opacity: 0.92 }]}
+                onPress={async () => {
+                  try {
+                    setAvatarError(null);
+                    setPendingAvatarRemoveImage(false);
+                    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                    if (!perm.granted) {
+                      setAvatarError('Please allow photo library access to choose an avatar.');
+                      return;
+                    }
+                    const result = await ImagePicker.launchImageLibraryAsync({
+                      // Newer expo-image-picker prefers `MediaType` (array), but some versions only ship `MediaTypeOptions`.
+                      // Use runtime detection to avoid warnings while keeping TS happy.
+                      mediaTypes: ((ImagePicker as any).MediaType?.Images
+                        ? [(ImagePicker as any).MediaType.Images]
+                        : ImagePicker.MediaTypeOptions.Images) as any,
+                      allowsEditing: true, // built-in crop UI w/ zoom
+                      aspect: [1, 1],
+                      quality: 0.9,
+                    });
+                    if (result.canceled) return;
+                    const uri = result.assets?.[0]?.uri;
+                    if (!uri) return;
+                    setPendingAvatarImageUri(uri);
+                  } catch (e: any) {
+                    setAvatarError(e?.message || 'Could not pick image.');
+                  }
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Upload photo</Text>
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [styles.toolBtn, isDark && styles.toolBtnDark, pressed && { opacity: 0.92 }]}
+                onPress={() => {
+                  setPendingAvatarImageUri(null);
+                  setPendingAvatarRemoveImage(true);
+                  setMyAvatar((prev) => ({ ...prev, imagePath: undefined, imageUri: undefined }));
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Remove photo</Text>
+              </Pressable>
+            </View>
+
+            <View style={[styles.modalButtons, { marginTop: 10 }]}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  isDark ? styles.modalButtonDark : null,
+                  pressed ? { opacity: 0.92 } : null,
+                ]}
+                onPress={async () => {
+                  if (!myUserSub) return;
+                  setAvatarSaving(true);
+                  setAvatarError(null);
+                  try {
+                    let nextImagePath = myAvatar.imagePath;
+
+                    if (pendingAvatarImageUri) {
+                      // Normalize to a square JPEG (256x256) after user crop.
+                      const normalized = await ImageManipulator.manipulateAsync(
+                        pendingAvatarImageUri,
+                        [{ resize: { width: 256, height: 256 } }],
+                        { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
+                      );
+                      const blob = await (await fetch(normalized.uri)).blob();
+                      const path = `public/avatars/${myUserSub}/${Date.now()}.jpg`;
+                      await uploadData({ path, data: blob, options: { contentType: 'image/jpeg' } }).result;
+                      nextImagePath = path;
+                      setPendingAvatarImageUri(null);
+                      setPendingAvatarRemoveImage(false);
+                    }
+
+                    const next = {
+                      bgColor: myAvatar.bgColor,
+                      textColor: myAvatar.textColor || '#fff',
+                      // IMPORTANT:
+                      // - undefined => omit key => "no change" server-side
+                      // - ''        => explicit clear (updateProfile.js removes avatarImagePath)
+                      imagePath: pendingAvatarRemoveImage ? '' : nextImagePath,
+                    };
+
+                    // Update local state first so UI feels instant.
+                    setMyAvatar((prev) => ({ ...prev, ...next, imageUri: undefined }));
+                    await saveAvatarToStorageAndServer(next);
+                    setAvatarOpen(false);
+                  } catch (e: any) {
+                    setAvatarError(e?.message || 'Failed to save avatar.');
+                  } finally {
+                    setAvatarSaving(false);
+                  }
+                }}
+                disabled={avatarSaving}
+              >
+                {avatarSaving ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                    <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Saving</Text>
+                    <AnimatedDots color={isDark ? '#fff' : '#111'} size={18} />
+                  </View>
+                ) : (
+                  <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Save</Text>
+                )}
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  isDark ? styles.modalButtonDark : null,
+                  pressed ? { opacity: 0.92 } : null,
+                ]}
+                onPress={() => setAvatarOpen(false)}
+                disabled={avatarSaving}
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={chatsOpen} transparent animationType="fade" onRequestClose={() => setChatsOpen(false)}>
         <View style={styles.modalOverlay}>
@@ -1933,7 +2267,7 @@ export default function App(): React.JSX.Element {
             borderWidth: 1,
             borderColor: isDark ? '#2a2a33' : '#e3e3e3',
             backgroundColor: isDark ? '#1c1c22' : '#fff',
-            paddingHorizontal: 12,
+            paddingHorizontal: 8,
           },
           field: {
             color: isDark ? '#fff' : '#111',
@@ -2545,6 +2879,61 @@ const styles = StyleSheet.create({
     backgroundColor: '#14141a',
     borderColor: '#2a2a33',
   },
+  profileCard: {
+    width: '92%',
+    maxWidth: 520,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    maxHeight: '70%',
+  },
+  profileCardDark: { backgroundColor: '#14141a', borderColor: '#2a2a33' },
+  profilePreviewRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6 },
+  profilePreviewMeta: { flex: 1 },
+  profileSectionTitle: { marginTop: 10, marginBottom: 6, fontWeight: '900' },
+  avatarPaletteRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
+  avatarColorDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,0,0,0.25)',
+  },
+  avatarColorDotSelected: { borderWidth: 2, borderColor: '#111', transform: [{ scale: 1.05 }] },
+  avatarColorDotSelectedDark: { borderWidth: 2, borderColor: '#fff', transform: [{ scale: 1.05 }] },
+  avatarTextColorRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  avatarTextColorBtn: {
+    height: 36,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarTextColorBtnDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
+  avatarTextColorBtnSelected: { borderWidth: 2, borderColor: '#111' },
+  avatarTextColorBtnSelectedDark: { borderWidth: 2, borderColor: '#fff' },
+  avatarTextColorLabel: { fontWeight: '800', color: '#111' },
+  avatarTextColorLabelDark: { color: '#fff' },
+  profileActionsRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
+  toolBtn: {
+    flex: 1,
+    height: 40,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#f2f2f7',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e3e3e3',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toolBtnDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
+  toolBtnText: { fontWeight: '800', color: '#111' },
+  toolBtnTextDark: { color: '#fff' },
   chatsTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   chatsCloseBtn: {
     paddingHorizontal: 12,
