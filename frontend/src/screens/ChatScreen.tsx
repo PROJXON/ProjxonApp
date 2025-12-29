@@ -478,6 +478,7 @@ export default function ChatScreen({
     kind: 'image' | 'video' | 'file';
     fileName?: string;
   } | null>(null);
+  const [attachOpen, setAttachOpen] = React.useState<boolean>(false);
   const activeConversationId = React.useMemo(
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
@@ -666,7 +667,8 @@ export default function ChatScreen({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] as any,
+        // Use the string union to stay compatible across expo-image-picker typings.
+        mediaTypes: ['images', 'videos'] as any,
         quality: 1,
       });
 
@@ -704,7 +706,7 @@ export default function ChatScreen({
       }
 
       const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] as any,
+        mediaTypes: ['images', 'videos'] as any,
         quality: 1,
         allowsEditing: false,
       });
@@ -775,13 +777,8 @@ export default function ChatScreen({
         return;
       }
     }
-    Alert.alert('Attach', 'Choose a source', [
-      { text: 'Photos / Videos', onPress: () => void pickFromLibrary() },
-      { text: 'Camera (photo or video)', onPress: () => void captureFromCamera() },
-      { text: 'File (GIF, etc.)', onPress: () => void pickDocument() },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
-  }, [isDm, myPrivateKey, peerPublicKey, pickFromLibrary, captureFromCamera, pickDocument]);
+    setAttachOpen(true);
+  }, [isDm, myPrivateKey, peerPublicKey]);
 
   const uploadPendingMedia = React.useCallback(
     async (
@@ -1162,7 +1159,7 @@ export default function ChatScreen({
             }
           } catch (e) {
             // eslint-disable-next-line no-console
-            console.log('avatar getUrl failed', path, e?.message || String(e));
+            console.log('avatar getUrl failed', path, (e as any)?.message || String(e));
           }
         }
         if (!cancelled && pairs.length) {
@@ -4405,6 +4402,59 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={attachOpen} transparent animationType="fade" onRequestClose={() => setAttachOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setAttachOpen(false)} />
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Attach</Text>
+            <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
+              Choose a source
+            </Text>
+
+            <View style={{ gap: 10, marginTop: 12 }}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => {
+                  setAttachOpen(false);
+                  setTimeout(() => void pickFromLibrary(), 0);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Photos / Videos</Text>
+              </Pressable>
+
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => {
+                  setAttachOpen(false);
+                  setTimeout(() => void captureFromCamera(), 0);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Camera</Text>
+              </Pressable>
+
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => {
+                  setAttachOpen(false);
+                  setTimeout(() => void pickDocument(), 0);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>File (GIF, etc.)</Text>
+              </Pressable>
+            </View>
+
+            <View style={[styles.summaryButtons, { marginTop: 12 }]}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setAttachOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={helperOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
@@ -5586,7 +5636,8 @@ const styles = StyleSheet.create({
   summaryModal: {
     width: '88%',
     maxHeight: '80%',
-    backgroundColor: '#fff',
+    // Match light-mode surface used elsewhere in the app (avoid stark white).
+    backgroundColor: '#f2f2f7',
     borderRadius: 12,
     padding: 16,
   },
