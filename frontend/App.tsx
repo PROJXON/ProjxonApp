@@ -1333,7 +1333,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
               />
               <View style={styles.profilePreviewMeta}>
                 <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
-                  Pick colors or upload a photo (you can zoom/crop).
+                  Pick colors or upload a photo (you can zoom/crop)
                 </Text>
               </View>
             </View>
@@ -1342,55 +1342,63 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
               <Text style={[styles.errorText, isDark && styles.errorTextDark]}>{avatarError}</Text>
             ) : null}
 
-            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
-              Bubble color
-            </Text>
-            <View style={styles.avatarPaletteRow}>
-              {AVATAR_DEFAULT_COLORS.map((c) => {
-                const selected = (myAvatar.bgColor || '') === c;
-                return (
-                  <Pressable
-                    key={`bg:${c}`}
-                    onPress={() => setMyAvatar((prev) => ({ ...prev, bgColor: c }))}
-                    style={[
-                      styles.avatarColorDot,
-                      { backgroundColor: c },
-                      selected ? (isDark ? styles.avatarColorDotSelectedDark : styles.avatarColorDotSelected) : null,
-                    ]}
-                  />
-                );
-              })}
-            </View>
+            {pendingAvatarImageUri || myAvatar.imageUri ? (
+              <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, { marginTop: 6 }]}>
+                Photo avatar enabled - remove the photo to edit bubble/text colors
+              </Text>
+            ) : (
+              <>
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
+                  Bubble color
+                </Text>
+                <View style={styles.avatarPaletteRow}>
+                  {AVATAR_DEFAULT_COLORS.map((c) => {
+                    const selected = (myAvatar.bgColor || '') === c;
+                    return (
+                      <Pressable
+                        key={`bg:${c}`}
+                        onPress={() => setMyAvatar((prev) => ({ ...prev, bgColor: c }))}
+                        style={[
+                          styles.avatarColorDot,
+                          { backgroundColor: c },
+                          selected ? (isDark ? styles.avatarColorDotSelectedDark : styles.avatarColorDotSelected) : null,
+                        ]}
+                      />
+                    );
+                  })}
+                </View>
 
-            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
-              Text color
-            </Text>
-            <View style={styles.avatarTextColorRow}>
-              <Pressable
-                onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#fff' }))}
-                style={[
-                  styles.avatarTextColorBtn,
-                  isDark ? styles.avatarTextColorBtnDark : null,
-                  (myAvatar.textColor || '#fff') === '#fff'
-                    ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
-                    : null,
-                ]}
-              >
-                <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>White</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#111' }))}
-                style={[
-                  styles.avatarTextColorBtn,
-                  isDark ? styles.avatarTextColorBtnDark : null,
-                  (myAvatar.textColor || '#fff') === '#111'
-                    ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
-                    : null,
-                ]}
-              >
-                <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>Black</Text>
-              </Pressable>
-            </View>
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
+                  Text color
+                </Text>
+                <View style={styles.avatarTextColorRow}>
+                  <Pressable
+                    onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#fff' }))}
+                    style={[
+                      styles.avatarTextColorBtn,
+                      isDark ? styles.avatarTextColorBtnDark : null,
+                      (myAvatar.textColor || '#fff') === '#fff'
+                        ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
+                        : null,
+                    ]}
+                  >
+                    <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>White</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#111' }))}
+                    style={[
+                      styles.avatarTextColorBtn,
+                      isDark ? styles.avatarTextColorBtnDark : null,
+                      (myAvatar.textColor || '#fff') === '#111'
+                        ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
+                        : null,
+                    ]}
+                  >
+                    <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>Black</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
 
             <View style={styles.profileActionsRow}>
               <Pressable
@@ -1405,7 +1413,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                       return;
                     }
                     const result = await ImagePicker.launchImageLibraryAsync({
-                      mediaTypes: [ImagePicker.MediaType.Images] as any,
+                      // Avoid deprecated MediaTypeOptions while staying compatible with older typings.
+                      mediaTypes: ['images'] as any,
                       allowsEditing: true, // built-in crop UI w/ zoom
                       aspect: [1, 1],
                       quality: 0.9,
