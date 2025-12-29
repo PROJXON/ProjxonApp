@@ -42,11 +42,15 @@ exports.handler = async (event) => {
       }
       return {
         statusCode: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
         body: JSON.stringify({
           sub: String(it.userSub),
           displayName: String(it.displayName || it.usernameLower || 'anon'),
           usernameLower: String(it.usernameLower || '').trim() || undefined,
           public_key: it.currentPublicKey ? String(it.currentPublicKey) : undefined,
+          avatarBgColor: it.avatarBgColor ? String(it.avatarBgColor) : undefined,
+          avatarTextColor: it.avatarTextColor ? String(it.avatarTextColor) : undefined,
+          avatarImagePath: it.avatarImagePath ? String(it.avatarImagePath) : undefined,
         }),
       };
     }
@@ -66,11 +70,15 @@ exports.handler = async (event) => {
     }
     return {
       statusCode: 200,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
       body: JSON.stringify({
         sub: String(it.userSub),
         displayName: String(it.displayName || it.usernameLower || 'anon'),
         usernameLower: String(it.usernameLower || usernameLower),
         public_key: it.currentPublicKey ? String(it.currentPublicKey) : undefined,
+        avatarBgColor: it.avatarBgColor ? String(it.avatarBgColor) : undefined,
+        avatarTextColor: it.avatarTextColor ? String(it.avatarTextColor) : undefined,
+        avatarImagePath: it.avatarImagePath ? String(it.avatarImagePath) : undefined,
       }),
     };
   } catch (err) {

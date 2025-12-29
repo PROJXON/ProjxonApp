@@ -23,6 +23,18 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
   - **Query**: `conversationId` (must be `global`), `limit` (default 50, max 200)
   - **Notes**: intended for guest/portfolio preview
 
+- **GET `/public/users`** → `http/getPublicUser.js`
+  - **Auth**: **Public** (no authorizer)
+  - **Query**: `sub` (required)
+  - **Returns**: `{ sub, displayName, avatarBgColor?, avatarTextColor?, avatarImagePath? }`
+  - **Notes**: guest-safe “profile-lite” endpoint for avatar rendering
+
+- **POST `/public/users/batch`** → `http/getPublicUsersBatch.js`
+  - **Auth**: **Public** (no authorizer)
+  - **Body**: `{ subs: string[] }` (max 100)
+  - **Returns**: `{ users: [{ sub, displayName, avatarBgColor?, avatarTextColor?, avatarImagePath? }] }`
+  - **Notes**: batch version of `/public/users` to reduce request count in busy global chats
+
 - **GET `/reads`** → `http/getReads.js`
   - **Auth**: JWT
   - **Query**: `conversationId` (required)
@@ -46,12 +58,17 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
 - **GET `/users`** → `http/getUser.js`
   - **Auth**: JWT (current frontend expects this)
   - **Query**: `username` (case-insensitive) **or** `sub`
-  - **Returns**: `{ sub, displayName, usernameLower?, public_key? }`
+  - **Returns**: `{ sub, displayName, usernameLower?, public_key?, avatarBgColor?, avatarTextColor?, avatarImagePath? }`
 
 - **POST `/users/public-key`** → `http/attachPublicKey.js`
   - **Auth**: JWT
   - **Body**: `{ publicKey: string }`
   - **Notes**: stores `currentPublicKey` + `displayName` into the Users table (source of truth)
+
+- **POST `/users/profile`** → `http/updateProfile.js`
+  - **Auth**: JWT
+  - **Body**: `{ bgColor?, textColor?, imagePath? }`
+  - **Notes**: updates user avatar preferences (colors + optional public avatar image path)
 
 - **GET `/users/recovery`** → `http/getRecovery.js`
   - **Auth**: JWT
