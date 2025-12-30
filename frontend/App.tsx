@@ -79,6 +79,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const { signOut } = useAuthenticator();
   const [displayName, setDisplayName] = useState<string>('anon');
   const [myUserSub, setMyUserSub] = React.useState<string | null>(null);
+  // Bump this whenever we change/recover/reset keys so ChatScreen reloads them from storage.
+  const [keyEpoch, setKeyEpoch] = React.useState<number>(0);
   const [avatarOpen, setAvatarOpen] = React.useState<boolean>(false);
   const [avatarSaving, setAvatarSaving] = React.useState<boolean>(false);
   const [avatarError, setAvatarError] = React.useState<string | null>(null);
@@ -97,6 +99,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   } | null>(null);
   const [passphraseInput, setPassphraseInput] = useState('');
   const [hasRecoveryBlob, setHasRecoveryBlob] = useState(false);
+  const [recoveryLocked, setRecoveryLocked] = React.useState<boolean>(false);
   const [processing, setProcessing] = useState(false);
   const [uiPrompt, setUiPrompt] = useState<
     | null
@@ -163,12 +166,23 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const handlePromptCancel = async () => {
     if (!passphrasePrompt) return;
     const isSetup = passphrasePrompt.mode === 'setup';
+    if (!isSetup) {
+      // Restore flow: allow the user to explicitly reset recovery (new keys) or cancel and try again later.
+      const okReset = await promptConfirm(
+        'Forgot your recovery passphrase?',
+        "If you reset recovery, you’ll create a new keypair and recovery passphrase on this device.\n\nOld encrypted direct messages may become unrecoverable.\n\nIf you might remember it later, cancel and you’ll be prompted again the next time you sign in.",
+        { confirmText: 'Reset recovery', cancelText: 'Try again later', destructive: true }
+      );
+      closePrompt();
+      passphrasePrompt.reject(new Error(okReset ? 'Recovery reset requested' : 'Prompt cancelled'));
+      return;
+    }
+
+    // Setup flow: user is choosing to skip creating a recovery passphrase.
     const ok = await promptConfirm(
-      'Cancel recovery passphrase',
-      isSetup
-        ? "Are you sure? If you don't set a recovery passphrase, you won't be able to decrypt older messages if you switch devices or need recovery later.\n\nWe do NOT store your passphrase, so make sure you remember it."
-        : "Are you sure? If you don't enter your recovery passphrase, you won't be able to decrypt older messages on this device.\n\nYou can try again if you remember it.",
-      { confirmText: 'Yes, cancel', cancelText: 'Go back', destructive: true }
+      'Skip recovery setup?',
+      "If you don't set a recovery passphrase, you won't be able to restore older encrypted messages if you switch devices.\n\nWe do NOT store your passphrase, so make sure you remember it.",
+      { confirmText: 'Skip for now', cancelText: 'Go back', destructive: true }
     );
     if (!ok) return;
     closePrompt();
@@ -251,6 +265,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
         // reset per-user UI state on sign-in changes
         setHasRecoveryBlob(false);
+        setRecoveryLocked(false);
         setProcessing(false);
 
         const attrs = await fetchUserAttributes();
@@ -276,6 +291,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             await uploadPublicKey(token, derivedPublicKey);
           }
         }
+        // Fetch recovery blob only when we don't already have a local keypair.
+        let recoveryBlobExists = false;
+        let resetRecoveryRequested = false;
         if (!keyPair) {
           const token = (await fetchAuthSession()).tokens?.idToken?.toString();
           console.log('token', token);
@@ -284,6 +302,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           });
 
           if (recoveryResp.ok) {
+            recoveryBlobExists = true;
             setHasRecoveryBlob(true);
             try {
               const blob: BackupBlob = await recoveryResp.json();
@@ -294,6 +313,11 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   passphrase = await promptPassphrase('restore');
                 } catch (err) {
                   if (err instanceof Error && err.message === 'Prompt cancelled') {
+                    closePrompt();
+                    break;
+                  }
+                  if (err instanceof Error && err.message === 'Recovery reset requested') {
+                    resetRecoveryRequested = true;
                     closePrompt();
                     break;
                   }
@@ -312,6 +336,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                     publicKey: derivedPublicKey,
                   };
                   await storeKeyPair(userId, keyPair);
+                  setKeyEpoch((v) => v + 1);
                   // Ensure Cognito has the matching public key so other devices encrypt to the right key.
                   await uploadPublicKey(token, derivedPublicKey);
                   recovered = true;
@@ -339,9 +364,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           }
         }
 
+        // If a recovery blob exists but the user cancelled recovery, keep them "locked".
+        // We should prompt again next login (and provide settings actions to retry/reset).
+        if (!keyPair && recoveryBlobExists && !resetRecoveryRequested) {
+          if (mounted) setRecoveryLocked(true);
+          return;
+        }
+
+        // If no recovery blob exists OR user explicitly requested a reset, generate a new keypair.
         if (!keyPair) {
           const newKeyPair = await generateKeypair();
           await storeKeyPair(userId, newKeyPair);
+          setKeyEpoch((v) => v + 1);
           const token = (await fetchAuthSession()).tokens?.idToken?.toString();
           // Publish the public key immediately so other users/devices can encrypt to us,
           // even if the user cancels recovery setup.
@@ -524,6 +558,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const [menuOpen, setMenuOpen] = React.useState<boolean>(false);
   const [chatsOpen, setChatsOpen] = React.useState<boolean>(false);
   const [blocklistOpen, setBlocklistOpen] = React.useState<boolean>(false);
+  const [recoveryOpen, setRecoveryOpen] = React.useState<boolean>(false);
   const [blocklistLoading, setBlocklistLoading] = React.useState<boolean>(false);
   const [blockUsername, setBlockUsername] = React.useState<string>('');
   const [blockError, setBlockError] = React.useState<string | null>(null);
@@ -533,6 +568,129 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const [blocklistCacheAt, setBlocklistCacheAt] = React.useState<number>(0);
 
   const blockedSubs = React.useMemo(() => blockedUsers.map((b) => b.blockedSub).filter(Boolean), [blockedUsers]);
+
+  const getIdToken = React.useCallback(async (): Promise<string | null> => {
+    try {
+      const token = (await fetchAuthSession()).tokens?.idToken?.toString();
+      return token || null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const fetchRecoveryBlob = React.useCallback(
+    async (token: string): Promise<BackupBlob | null> => {
+      const resp = await fetch(`${API_URL.replace(/\/$/, '')}/users/recovery`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (resp.status === 404) return null;
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(`Failed to fetch recovery blob (${resp.status}) ${text}`.trim());
+      }
+      return (await resp.json()) as BackupBlob;
+    },
+    [API_URL]
+  );
+
+  const enterRecoveryPassphrase = React.useCallback(async () => {
+    if (!myUserSub) return;
+    const token = await getIdToken();
+    if (!token) {
+      await promptAlert('Not signed in', 'Missing auth token.');
+      return;
+    }
+    const blob = await fetchRecoveryBlob(token);
+    if (!blob) {
+      await promptAlert('No recovery backup', 'No recovery backup was found for your account.');
+      return;
+    }
+
+    // Keep prompting until success or user cancels.
+    while (true) {
+      let passphrase: string;
+      try {
+        passphrase = await promptPassphrase('restore');
+      } catch (err) {
+        if (err instanceof Error && err.message === 'Recovery reset requested') {
+          await resetRecovery();
+        }
+        return;
+      }
+      try {
+        const restoredPrivateKey = await decryptPrivateKey(blob, passphrase);
+        const derivedPublicKey = derivePublicKey(restoredPrivateKey);
+        await storeKeyPair(myUserSub, { privateKey: restoredPrivateKey, publicKey: derivedPublicKey });
+        setKeyEpoch((v) => v + 1);
+        await uploadPublicKey(token, derivedPublicKey);
+        setHasRecoveryBlob(true);
+        setRecoveryLocked(false);
+        await promptAlert('Recovery unlocked', 'Your recovery passphrase has been accepted.');
+        return;
+      } catch (e) {
+        await promptAlert('Incorrect passphrase', 'You have entered an incorrect passphrase. Try again.');
+      } finally {
+        closePrompt();
+      }
+    }
+  }, [myUserSub, getIdToken, fetchRecoveryBlob]);
+
+  const changeRecoveryPassphrase = React.useCallback(async () => {
+    if (!myUserSub) return;
+    const token = await getIdToken();
+    if (!token) {
+      await promptAlert('Not signed in', 'Missing auth token.');
+      return;
+    }
+    const kp = await loadKeyPair(myUserSub);
+    if (!kp?.privateKey) {
+      await promptAlert(
+        'Recovery locked',
+        'You need to enter your existing recovery passphrase on this device before you can change it.'
+      );
+      return;
+    }
+    try {
+      const nextPass = await promptPassphrase('setup');
+      await uploadRecoveryBlob(token, kp.privateKey, nextPass);
+      setHasRecoveryBlob(true);
+      await promptAlert('Passphrase updated', 'Your recovery passphrase has been updated.');
+    } catch {
+      // cancelled
+    } finally {
+      closePrompt();
+    }
+  }, [myUserSub, getIdToken]);
+
+  const resetRecovery = React.useCallback(async () => {
+    if (!myUserSub) return;
+    const ok = await promptConfirm(
+      'Reset recovery?',
+      'This will generate a new keypair and recovery passphrase on this device.\n\nOld encrypted direct messages may become unrecoverable.',
+      { confirmText: 'Reset', cancelText: 'Cancel', destructive: true }
+    );
+    if (!ok) return;
+    const token = await getIdToken();
+    if (!token) {
+      await promptAlert('Not signed in', 'Missing auth token.');
+      return;
+    }
+    const newKeyPair = await generateKeypair();
+    await storeKeyPair(myUserSub, newKeyPair);
+    setKeyEpoch((v) => v + 1);
+    await uploadPublicKey(token, newKeyPair.publicKey);
+    try {
+      const nextPass = await promptPassphrase('setup');
+      await uploadRecoveryBlob(token, newKeyPair.privateKey, nextPass);
+      setHasRecoveryBlob(true);
+      setRecoveryLocked(false);
+      await promptAlert('Recovery reset', 'A new recovery passphrase has been set.');
+    } catch {
+      // cancelled setup
+    } finally {
+      closePrompt();
+    }
+  }, [myUserSub, getIdToken]);
 
   const upsertDmThread = React.useCallback((convId: string, peerName: string, lastActivityAt?: number) => {
     const id = String(convId || '').trim();
@@ -1292,6 +1450,14 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             },
           },
           {
+            key: 'recovery',
+            label: 'Recovery',
+            onPress: () => {
+              setMenuOpen(false);
+              setRecoveryOpen(true);
+            },
+          },
+          {
             key: 'blocked',
             label: 'Blocklist',
             onPress: () => {
@@ -1518,6 +1684,79 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 disabled={avatarSaving}
               >
                 <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={recoveryOpen} transparent animationType="fade" onRequestClose={() => setRecoveryOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setRecoveryOpen(false)} />
+          <View style={[styles.profileCard, isDark ? styles.profileCardDark : null]}>
+            <View style={styles.chatsTopRow}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Recovery</Text>
+            </View>
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+              {recoveryLocked
+                ? 'Recovery is locked on this device. Enter your passphrase to decrypt older messages, or reset recovery if you no longer remember it.'
+                : hasRecoveryBlob
+                  ? 'Your account has a recovery backup. You can change your recovery passphrase here.'
+                  : 'No recovery backup is currently set for this account.'}
+            </Text>
+
+            <View style={styles.recoveryActionList}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  styles.modalButtonCta,
+                  isDark ? styles.modalButtonCtaDark : null,
+                  pressed && { opacity: 0.9 },
+                ]}
+                onPress={async () => {
+                  setRecoveryOpen(false);
+                  await enterRecoveryPassphrase();
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Enter recovery passphrase"
+              >
+                <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>Enter passphrase</Text>
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  isDark ? styles.modalButtonDark : null,
+                  pressed && { opacity: 0.9 },
+                ]}
+                onPress={async () => {
+                  setRecoveryOpen(false);
+                  await changeRecoveryPassphrase();
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Change recovery passphrase"
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                  Change passphrase
+                </Text>
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  isDark ? styles.modalButtonDark : null,
+                  pressed && { opacity: 0.9 },
+                ]}
+                onPress={async () => {
+                  setRecoveryOpen(false);
+                  await resetRecovery();
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Reset recovery"
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                  Reset recovery (old messages unrecoverable)
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -1791,42 +2030,41 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 editable={!processing}
               />
               <View style={styles.modalButtons}>
+                {/*
+                  Disable submit until user enters a passphrase (avoid accidental empty submits).
+                  Also avoids showing "Incorrect passphrase" alerts due to empty input.
+                */}
                 <Pressable
-                  style={[styles.modalButton, processing && { opacity: 0.45 }]}
+                  style={[
+                    styles.modalButton,
+                    styles.modalButtonCta,
+                    isDark ? styles.modalButtonCtaDark : null,
+                    (processing || !passphraseInput.trim()) && { opacity: 0.45 },
+                  ]}
+                  onPress={handlePromptSubmit}
+                  disabled={processing || !passphraseInput.trim()}
+                  >
+                    {processing ? (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                        <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>
+                          {passphrasePrompt?.mode === 'restore' ? 'Decrypting' : 'Encrypting backup'}
+                        </Text>
+                        <AnimatedDots color="#fff" size={18} />
+                      </View>
+                    ) : (
+                      <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>
+                        Submit
+                      </Text>
+                    )}
+                </Pressable>
+                <Pressable
+                  style={[styles.modalButton, isDark ? styles.modalButtonDark : null, processing && { opacity: 0.45 }]}
                   onPress={() => void handlePromptCancel()}
                   disabled={processing}
                 >
                   <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
                     Cancel
                   </Text>
-                </Pressable>
-                <Pressable
-                  style={[
-                    styles.modalButton,
-                    styles.modalButtonPrimary,
-                    processing && { opacity: 0.45 },
-                  ]}
-                  onPress={handlePromptSubmit}
-                  disabled={processing}
-                  >
-                    {processing ? (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
-                        <Text style={{ color: '#fff', fontWeight: '700', textAlign: 'center' }}>
-                          {passphrasePrompt?.mode === 'restore' ? 'Decrypting' : 'Encrypting backup'}
-                        </Text>
-                        <AnimatedDots color="#fff" size={18} />
-                      </View>
-                    ) : (
-                      <Text
-                        style={{
-                          color: '#fff',
-                          fontWeight: '600',
-                          textAlign: 'center',
-                        }}
-                      >
-                        Submit
-                      </Text>
-                    )}
                 </Pressable>
               </View>
             </View>
@@ -1841,6 +2079,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           headerTop={headerTop}
           theme={theme}
           blockedUserSubs={blockedSubs}
+          keyEpoch={keyEpoch}
         />
       </View>
     </View>
@@ -2260,7 +2499,10 @@ export default function App(): React.JSX.Element {
         button: () => ({
           container: {
             borderRadius: 12,
-            height: 44,
+            // Avoid text clipping on Android devices (varies with font scale / OEM fonts).
+            minHeight: 44,
+            paddingVertical: 12,
+            paddingHorizontal: 12,
             alignItems: 'center' as const,
             justifyContent: 'center' as const,
           },
@@ -2274,11 +2516,17 @@ export default function App(): React.JSX.Element {
             borderColor: isDark ? '#2a2a33' : '#e3e3e3',
           },
           pressed: { opacity: 0.9 },
-          text: { fontWeight: '800' as const, fontSize: 15 },
+          // Give descenders (e.g. "g") enough vertical room across devices.
+          text: { fontWeight: '800' as const, fontSize: 15, lineHeight: 20 },
           textPrimary: { color: '#fff' },
           textDefault: { color: isDark ? '#fff' : '#111' },
           containerLink: { backgroundColor: 'transparent' },
-          textLink: { color: isDark ? '#fff' : '#111', fontWeight: '800' as const },
+          textLink: {
+            color: isDark ? '#fff' : '#111',
+            fontWeight: '800' as const,
+            fontSize: 15,
+            lineHeight: 20,
+          },
         }),
         textField: () => ({
           label: { color: isDark ? '#d7d7e0' : '#444', fontWeight: '700' as const },
@@ -2862,12 +3110,22 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
     borderWidth: 0,
   },
+  // Primary button for generic in-app alerts/confirmations (avoid bright blue; match app theme).
   modalButtonPrimary: {
-    backgroundColor: '#1a73e8',
+    backgroundColor: '#111',
     borderColor: 'transparent',
   },
   modalButtonPrimaryDark: {
-    backgroundColor: '#1976d2',
+    backgroundColor: '#2a2a33',
+    borderColor: 'transparent',
+  },
+  // CTA button for our in-app prompts (avoid bright blue in light mode).
+  modalButtonCta: {
+    backgroundColor: '#111',
+    borderColor: 'transparent',
+  },
+  modalButtonCtaDark: {
+    backgroundColor: '#2a2a33',
     borderColor: 'transparent',
   },
   modalButtonDanger: {
@@ -2888,6 +3146,14 @@ const styles = StyleSheet.create({
   },
   modalButtonPrimaryText: {
     color: '#fff',
+  },
+  modalButtonCtaText: {
+    color: '#fff',
+  },
+  recoveryActionList: {
+    marginTop: 12,
+    gap: 10,
+    alignSelf: 'stretch',
   },
   modalButtonDangerText: {
     color: '#fff',

@@ -82,6 +82,9 @@ export type EncryptedChatPayloadV1 = {
   iv: string; // hex (12 bytes)
   ciphertext: string; // hex (ciphertext + authTag)
   senderPublicKey: string; // hex (uncompressed or compressed)
+  // New (optional): store the recipient public key used during encryption.
+  // This makes old *sent* messages decryptable even if the peer rotates keys later.
+  recipientPublicKey?: string; // hex
 };
 
 const deriveBackupKey = (passphrase: string, salt: Uint8Array) =>
@@ -160,6 +163,7 @@ export const encryptChatMessageV1 = (
     iv: bytesToHex(iv),
     ciphertext: bytesToHex(encrypted),
     senderPublicKey,
+    recipientPublicKey: recipientPublicKeyHex,
   };
 };
 

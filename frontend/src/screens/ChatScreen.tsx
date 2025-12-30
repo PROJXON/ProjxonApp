@@ -183,6 +183,8 @@ type ChatScreenProps = {
   headerTop?: React.ReactNode;
   theme?: 'light' | 'dark';
   blockedUserSubs?: string[];
+  // Bump this when keys are generated/recovered/reset so ChatScreen reloads them from storage.
+  keyEpoch?: number;
 };
 
 type ChatMessage = {
@@ -344,6 +346,7 @@ export default function ChatScreen({
   headerTop,
   theme = 'light',
   blockedUserSubs = [],
+  keyEpoch,
 }: ChatScreenProps): React.JSX.Element {
   const isDark = theme === 'dark';
   const insets = useSafeAreaInsets();
@@ -1447,7 +1450,8 @@ export default function ChatScreen({
         obj.alg === 'secp256k1-ecdh+aes-256-gcm' &&
         typeof obj.iv === 'string' &&
         typeof obj.ciphertext === 'string' &&
-        typeof obj.senderPublicKey === 'string'
+        typeof obj.senderPublicKey === 'string' &&
+        (typeof obj.recipientPublicKey === 'undefined' || typeof obj.recipientPublicKey === 'string')
       ) {
         return obj as EncryptedChatPayloadV1;
       }
@@ -1464,10 +1468,11 @@ export default function ChatScreen({
 
       const isFromMe = !!myPublicKey && msg.encrypted.senderPublicKey === myPublicKey;
       const primaryTheirPub = isFromMe
-        ? (peerPublicKey ?? msg.encrypted.senderPublicKey)
+        ? (msg.encrypted.recipientPublicKey ?? peerPublicKey)
         : msg.encrypted.senderPublicKey;
 
       try {
+        if (!primaryTheirPub) throw new Error("Can't decrypt (missing peer key).");
         return decryptChatMessageV1(msg.encrypted, myPrivateKey, primaryTheirPub);
       } catch (e) {
         if (peerPublicKey && peerPublicKey !== primaryTheirPub) {
@@ -1484,7 +1489,7 @@ export default function ChatScreen({
       if (!msg.encrypted) throw new Error('Not encrypted');
       if (!myPrivateKey) throw new Error('Missing your private key on this device.');
       const isFromMe = !!myPublicKey && msg.encrypted.senderPublicKey === myPublicKey;
-      const theirPub = isFromMe ? peerPublicKey : msg.encrypted.senderPublicKey;
+      const theirPub = isFromMe ? (msg.encrypted.recipientPublicKey ?? peerPublicKey) : msg.encrypted.senderPublicKey;
       if (!theirPub) throw new Error("Can't derive DM media key (missing peer key).");
       return deriveChatKeyBytesV1(myPrivateKey, theirPub);
     },
@@ -1695,7 +1700,7 @@ export default function ChatScreen({
         // ignore
       }
     })();
-  }, [user]);
+  }, [user, keyEpoch, refreshMyKeys]);
 
   // If ChatScreen mounts before App.tsx finishes generating/storing keys, retry a few times.
   React.useEffect(() => {
@@ -1724,7 +1729,7 @@ export default function ChatScreen({
     return () => {
       cancelled = true;
     };
-  }, [myUserId, myPrivateKey]);
+  }, [myUserId, myPrivateKey, keyEpoch]);
 
   // Auto-decrypt pass: whenever enabled and keys are ready, decrypt any encrypted messages once.
   React.useEffect(() => {
