@@ -17,7 +17,7 @@ import {
   View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../config/env';
 import { getUrl } from 'aws-amplify/storage';
 import { VideoView, useVideoPlayer } from 'expo-video';
@@ -185,6 +185,7 @@ export default function GuestGlobalScreen({
 }: {
   onSignIn: () => void;
 }): React.JSX.Element {
+  const insets = useSafeAreaInsets();
   const [theme, setTheme] = React.useState<'light' | 'dark'>('light');
   const isDark = theme === 'dark';
 
@@ -455,7 +456,7 @@ export default function GuestGlobalScreen({
 
   return (
     // App.tsx already applies the top safe area. Avoid double top inset here (dead space).
-    <SafeAreaView style={[styles.container, isDark && styles.containerDark]} edges={['left', 'right', 'bottom']}>
+    <SafeAreaView style={[styles.container, isDark && styles.containerDark]} edges={['left', 'right']}>
       <View style={styles.headerRow}>
         <Text style={[styles.headerTitle, isDark && styles.headerTitleDark]}>Global</Text>
         <View style={styles.headerRight}>
@@ -566,21 +567,30 @@ export default function GuestGlobalScreen({
       />
 
       {/* Bottom bar CTA (like the chat input row), so messages never render behind it */}
-      <View style={[styles.bottomBar, isDark && styles.bottomBarDark]}>
-        <Pressable
-          onPress={onSignIn}
-          style={({ pressed }) => [
-            styles.bottomBarCta,
-            isDark && styles.bottomBarCtaDark,
-            pressed && { opacity: 0.9 },
-          ]}
-          accessibilityRole="button"
-          accessibilityLabel="Sign in to chat"
-        >
-          <Text style={[styles.bottomBarCtaText, isDark && styles.bottomBarCtaTextDark]}>
-            Sign in to Chat
-          </Text>
-        </Pressable>
+      <View
+        style={[
+          styles.bottomBar,
+          isDark && styles.bottomBarDark,
+          // Fill the safe area with the bar background, but keep the inner content vertically centered.
+          { paddingBottom: insets.bottom },
+        ]}
+      >
+        <View style={styles.bottomBarInner}>
+          <Pressable
+            onPress={onSignIn}
+            style={({ pressed }) => [
+              styles.bottomBarCta,
+              isDark && styles.bottomBarCtaDark,
+              pressed && { opacity: 0.9 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Sign in to chat"
+          >
+            <Text style={[styles.bottomBarCtaText, isDark && styles.bottomBarCtaTextDark]}>
+              Sign in to Chat
+            </Text>
+          </Pressable>
+        </View>
       </View>
 
       <Modal visible={reactionInfoOpen} transparent animationType="fade">
@@ -1231,12 +1241,14 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   bottomBar: {
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#e3e3e3',
     backgroundColor: '#f2f2f7',
+  },
+  bottomBarInner: {
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 8,
   },
   bottomBarDark: {
     backgroundColor: '#1c1c22',

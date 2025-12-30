@@ -24,7 +24,7 @@ import {
 } from 'react-native';
 import { AnimatedDots } from '../components/AnimatedDots';
 import { AvatarBubble } from '../components/AvatarBubble';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WS_URL, API_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
 // const WS_URL = "wss://ws.ifelse.io"
@@ -346,6 +346,7 @@ export default function ChatScreen({
   blockedUserSubs = [],
 }: ChatScreenProps): React.JSX.Element {
   const isDark = theme === 'dark';
+  const insets = useSafeAreaInsets();
   const { user } = useAuthenticator();
   const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
@@ -3405,7 +3406,7 @@ export default function ChatScreen({
   return (
     <SafeAreaView
       style={[styles.safe, isDark ? styles.safeDark : null]}
-      edges={['left', 'right', 'bottom']}
+      edges={['left', 'right']}
     >
       <KeyboardAvoidingView
         style={styles.container}
@@ -4299,63 +4300,72 @@ export default function ChatScreen({
           </View>
         ) : null}
         {/* Inline edit happens inside the bubble (Signal-style). */}
-        <View style={[styles.inputRow, isDark ? styles.inputRowDark : null]}>
-          <Pressable
-            style={[
-              styles.pickBtn,
-              isDark ? styles.pickBtnDark : null,
-              isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
-            ]}
-            onPress={handlePickMedia}
-            disabled={isUploading || !!inlineEditTargetId}
-          >
-            <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
-          </Pressable>
-          <TextInput
-            ref={(r) => {
-              textInputRef.current = r;
-            }}
-            key={`chat-input-${inputEpoch}`}
-            style={[styles.input, isDark ? styles.inputDark : null]}
-            placeholder={
-              inlineEditTargetId
-                ? 'Finish editing above…'
-                : pendingMedia
-                  ? 'Add a caption (optional)…'
-                  : 'Type a message'
-            }
-            placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
-            selectionColor={isDark ? '#ffffff' : '#111'}
-            cursorColor={isDark ? '#ffffff' : '#111'}
-            value={input}
-            onChangeText={onChangeInput}
-            editable={!inlineEditTargetId && !isUploading}
-            onBlur={() => {
-              if (isTypingRef.current) sendTyping(false);
-            }}
-            onSubmitEditing={sendMessage}
-            returnKeyType="send"
-          />
-          <Pressable
-            style={[
-              styles.sendBtn,
-              isDark ? styles.sendBtnDark : null,
-              isUploading
-                ? (isDark ? styles.sendBtnUploadingDark : styles.sendBtnUploading)
-                : (inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null),
-            ]}
-            onPress={sendMessage}
-            disabled={isUploading || !!inlineEditTargetId}
-          >
-            {isUploading ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
-                <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
-                <AnimatedDots color="#fff" size={18} />
-              </View>
-            ) : (
-              <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>Send</Text>
-            )}
-          </Pressable>
+        <View
+          style={[
+            styles.inputRow,
+            isDark ? styles.inputRowDark : null,
+            // Fill the safe area with the bar background, but keep the inner content vertically centered.
+            { paddingBottom: insets.bottom },
+          ]}
+        >
+          <View style={styles.inputRowInner}>
+            <Pressable
+              style={[
+                styles.pickBtn,
+                isDark ? styles.pickBtnDark : null,
+                isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+              ]}
+              onPress={handlePickMedia}
+              disabled={isUploading || !!inlineEditTargetId}
+            >
+              <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
+            </Pressable>
+            <TextInput
+              ref={(r) => {
+                textInputRef.current = r;
+              }}
+              key={`chat-input-${inputEpoch}`}
+              style={[styles.input, isDark ? styles.inputDark : null]}
+              placeholder={
+                inlineEditTargetId
+                  ? 'Finish editing above…'
+                  : pendingMedia
+                    ? 'Add a caption (optional)…'
+                    : 'Type a message'
+              }
+              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+              selectionColor={isDark ? '#ffffff' : '#111'}
+              cursorColor={isDark ? '#ffffff' : '#111'}
+              value={input}
+              onChangeText={onChangeInput}
+              editable={!inlineEditTargetId && !isUploading}
+              onBlur={() => {
+                if (isTypingRef.current) sendTyping(false);
+              }}
+              onSubmitEditing={sendMessage}
+              returnKeyType="send"
+            />
+            <Pressable
+              style={[
+                styles.sendBtn,
+                isDark ? styles.sendBtnDark : null,
+                isUploading
+                  ? (isDark ? styles.sendBtnUploadingDark : styles.sendBtnUploading)
+                  : (inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null),
+              ]}
+              onPress={sendMessage}
+              disabled={isUploading || !!inlineEditTargetId}
+            >
+              {isUploading ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                  <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
+                  <AnimatedDots color="#fff" size={18} />
+                </View>
+              ) : (
+                <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>Send</Text>
+              )}
+            </Pressable>
+          </View>
         </View>
       </KeyboardAvoidingView>
       <Modal visible={summaryOpen} transparent animationType="fade">
@@ -5509,11 +5519,15 @@ const styles = StyleSheet.create({
   // so use a readable light-mode color.
   seenTextOutgoingOnLightSurface: { color: '#1976d2' },
   inputRow: {
-    flexDirection: 'row',
-    padding: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#e3e3e3',
     backgroundColor: '#f2f2f7',
+  },
+  inputRowInner: {
+    flexDirection: 'row',
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 8,
   },
   inputRowDark: {
     backgroundColor: '#1c1c22',

@@ -1,29 +1,30 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "PROJXON",
+    "slug": "PROJXNO",
     "version": "1.0.0",
     "orientation": "default",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/icons/splash-icon-light.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
         "NSCameraUsageDescription": "We use your camera to capture photos and videos to attach to messages.",
         "NSMicrophoneUsageDescription": "We use your microphone when recording video attachments.",
         "NSPhotoLibraryUsageDescription": "We use your photo library to pick media to attach to messages."
+      },
+      "icon": {
+        "dark": "./assets/icons/ios-dark.png",
+        "light": "./assets/icons/ios-light.png",
+        "tinted": "./assets/icons/ios-tinted.png"
       }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "foregroundImage": "./assets/icons/adaptive-android-icon.png",
+        "monochromeImage": "./assets/icons/adaptive-android-icon.png",
+        "backgroundImage": "./assets/icons/android-background.png"
       },
       "edgeToEdgeEnabled": true,
       "package": "com.anonymous.frontend",
@@ -37,9 +38,25 @@
     },
     "extra": {
       "WS_URL": "wss://a6ersp1gab.execute-api.us-east-2.amazonaws.com/production",
-      "API_URL": "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
+      "API_URL": "https://828bp5ailc.execute-api.us-east-2.amazonaws.com",
+      "eas": {
+        "projectId": "f977cc9c-dc31-445e-9184-a892e4c08cf1"
+      }
     },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/icons/splash-icon-light.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff",
+          "dark": {
+            "image": "./assets/icons/splash-icon-dark.png",
+            "backgroundColor": "#1c1c22"
+          }
+        }
+      ],
       "expo-secure-store",
       "expo-camera",
       "expo-video",
