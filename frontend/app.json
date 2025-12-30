@@ -3,7 +3,7 @@
     "name": "frontend",
     "slug": "frontend",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
@@ -13,7 +13,12 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "We use your camera to capture photos and videos to attach to messages.",
+        "NSMicrophoneUsageDescription": "We use your microphone when recording video attachments.",
+        "NSPhotoLibraryUsageDescription": "We use your photo library to pick media to attach to messages."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -21,7 +26,11 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.frontend"
+      "package": "com.anonymous.frontend",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -32,6 +41,7 @@
     },
     "plugins": [
       "expo-secure-store",
+      "expo-camera",
       "expo-video",
       "expo-notifications"
     ]

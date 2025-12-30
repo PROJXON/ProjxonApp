@@ -21,6 +21,7 @@ import { AnimatedDots } from './src/components/AnimatedDots';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as ScreenOrientation from 'expo-screen-orientation';
 
 import { Amplify } from "aws-amplify";
 import {
@@ -2122,6 +2123,17 @@ export default function App(): React.JSX.Element {
   const [uiTheme, setUiTheme] = React.useState<'light' | 'dark'>('light');
   const isDark = uiTheme === 'dark';
 
+  // Keep the app portrait by default, but allow camera UI to temporarily unlock orientation.
+  React.useEffect(() => {
+    (async () => {
+      try {
+        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
+
   // (Removed) We previously tried setting global TextInput defaultProps for caret color,
   // but on Android it can be ignored/overridden. We now inject caret colors directly into
   // Amplify Authenticator fields via `components` overrides.
@@ -2876,7 +2888,8 @@ const styles = StyleSheet.create({
   chatsCard: {
     width: '92%',
     maxWidth: 520,
-    backgroundColor: '#fff',
+    // Match the app's light-mode surface (avoid stark white).
+    backgroundColor: '#f2f2f7',
     borderRadius: 16,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -2890,7 +2903,8 @@ const styles = StyleSheet.create({
   profileCard: {
     width: '92%',
     maxWidth: 520,
-    backgroundColor: '#fff',
+    // Match the app's light-mode surface (avoid stark white).
+    backgroundColor: '#f2f2f7',
     borderRadius: 16,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -2992,7 +3006,8 @@ const styles = StyleSheet.create({
   blocksCard: {
     width: '92%',
     maxWidth: 520,
-    backgroundColor: '#fff',
+    // Match the app's light-mode surface (avoid stark white).
+    backgroundColor: '#f2f2f7',
     borderRadius: 16,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,

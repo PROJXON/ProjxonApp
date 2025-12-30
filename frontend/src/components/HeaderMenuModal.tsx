@@ -127,6 +127,7 @@ export function HeaderMenuModal({
                     if (it.disabled) return;
                     it.onPress?.();
                   }}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                   style={({ pressed }) => [
                     styles.row,
                     styles.rowBtn,
@@ -187,8 +188,8 @@ const styles = StyleSheet.create({
   },
   headerRightSlot: { flexDirection: 'row', alignItems: 'center' },
   closeIconBtn: {
-    width: 38,
-    height: 38,
+    width: 44,
+    height: 44,
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
@@ -201,11 +202,11 @@ const styles = StyleSheet.create({
   },
   list: {
     padding: 8,
-    gap: 6,
+    gap: 10,
   },
   row: {
     paddingHorizontal: 12,
-    paddingVertical: 9,
+    paddingVertical: 13,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
