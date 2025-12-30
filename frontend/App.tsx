@@ -2370,7 +2370,11 @@ export default function App(): React.JSX.Element {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={[styles.container, styles.appSafe]}>
+      {/* Apply TOP safe-area globally. Screens manage left/right/bottom insets themselves (chat input / CTAs). */}
+      <SafeAreaView
+        style={[styles.container, styles.appSafe, isDark && styles.appSafeDark]}
+        edges={['top']}
+      >
         <Authenticator.Provider>
           {booting ? (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
@@ -2465,6 +2469,9 @@ const styles = StyleSheet.create({
   },
   appSafe: {
     backgroundColor: '#fff',
+  },
+  appSafeDark: {
+    backgroundColor: '#0b0b0f',
   },
   authModalOverlay: {
     flex: 1,
