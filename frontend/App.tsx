@@ -2080,6 +2080,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           theme={theme}
           blockedUserSubs={blockedSubs}
           keyEpoch={keyEpoch}
+          promptAlert={promptAlert}
+          promptConfirm={promptConfirm}
         />
       </View>
     </View>
