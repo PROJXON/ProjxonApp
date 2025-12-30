@@ -15,12 +15,12 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
 
 - **GET `/messages`** → `http/getMessages.js`
   - **Auth**: JWT
-  - **Query**: `conversationId` (defaults to `global`), `limit` (default 50, max 200)
+  - **Query**: `conversationId` (defaults to `global`), `limit` (default 50, max 200), `before` (optional createdAt ms cursor), `cursor=1` (optional: return cursor metadata)
   - **Notes**: returns newest-first; if `BLOCKS_TABLE` is configured, filters out messages authored by blocked users (server-side)
 
 - **GET `/public/messages`** → `http/getPublicMessages.js`
   - **Auth**: **Public** (no authorizer)
-  - **Query**: `conversationId` (must be `global`), `limit` (default 50, max 200)
+  - **Query**: `conversationId` (must be `global`), `limit` (default 50, max 200), `before` (optional createdAt ms cursor), `cursor=1` (optional: return cursor metadata)
   - **Notes**: intended for guest/portfolio preview
 
 - **GET `/public/users`** → `http/getPublicUser.js`
