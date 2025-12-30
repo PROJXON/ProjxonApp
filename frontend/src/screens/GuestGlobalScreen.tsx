@@ -54,6 +54,8 @@ type ChatEnvelope = {
   media?: GuestMessage['media'];
 };
 
+const GUEST_HISTORY_PAGE_SIZE = 50;
+
 function formatGuestTimestamp(ms: number): string {
   const t = Number(ms);
   if (!Number.isFinite(t) || t <= 0) return '';
@@ -152,10 +154,17 @@ function FullscreenVideo({ url }: { url: string }): React.JSX.Element {
   return <VideoView player={player} style={styles.viewerVideo} contentFit="contain" nativeControls />;
 }
 
-async function fetchGuestGlobalHistory(): Promise<GuestMessage[]> {
+async function fetchGuestGlobalHistoryPage(opts?: {
+  before?: number | null;
+}): Promise<{ items: GuestMessage[]; hasMore: boolean; nextCursor: number | null }> {
   if (!API_URL) throw new Error('API_URL is not configured');
   const base = API_URL.replace(/\/$/, '');
-  const qs = `conversationId=${encodeURIComponent('global')}&limit=50`;
+  const before = opts?.before;
+  const qs =
+    `conversationId=${encodeURIComponent('global')}` +
+    `&limit=${GUEST_HISTORY_PAGE_SIZE}` +
+    `&cursor=1` +
+    (typeof before === 'number' && Number.isFinite(before) && before > 0 ? `&before=${encodeURIComponent(String(before))}` : '');
   const candidates = [`${base}/public/messages?${qs}`, `${base}/messages?${qs}`];
 
   const errors: string[] = [];
@@ -168,11 +177,30 @@ async function fetchGuestGlobalHistory(): Promise<GuestMessage[]> {
         continue;
       }
       const json = await res.json();
-      if (!Array.isArray(json)) {
-        errors.push(`GET ${url} returned non-array JSON`);
-        continue;
-      }
-      return normalizeGuestMessages(json);
+      const rawItems = Array.isArray(json) ? json : Array.isArray(json?.items) ? json.items : [];
+      const items = normalizeGuestMessages(rawItems);
+
+      const hasMoreFromServer = typeof json?.hasMore === 'boolean' ? json.hasMore : null;
+      const nextCursorFromServer =
+        typeof json?.nextCursor === 'number' && Number.isFinite(json.nextCursor) ? json.nextCursor : null;
+
+      const nextCursor =
+        typeof nextCursorFromServer === 'number' && Number.isFinite(nextCursorFromServer)
+          ? nextCursorFromServer
+          : items.length
+            ? items[items.length - 1].createdAt
+            : null;
+
+      const hasMore =
+        typeof hasMoreFromServer === 'boolean'
+          ? hasMoreFromServer
+          : rawItems.length >= GUEST_HISTORY_PAGE_SIZE && typeof nextCursor === 'number' && Number.isFinite(nextCursor);
+
+      return {
+        items,
+        hasMore: !!hasMore,
+        nextCursor: typeof nextCursor === 'number' && Number.isFinite(nextCursor) ? nextCursor : null,
+      };
     } catch (err) {
       errors.push(`GET ${url} threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -244,9 +272,14 @@ export default function GuestGlobalScreen({
   }, []);
 
   const [messages, setMessages] = React.useState<GuestMessage[]>([]);
+  const messagesRef = React.useRef<GuestMessage[]>([]);
   const [loading, setLoading] = React.useState<boolean>(true);
   const [refreshing, setRefreshing] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [historyCursor, setHistoryCursor] = React.useState<number | null>(null);
+  const [historyHasMore, setHistoryHasMore] = React.useState<boolean>(true);
+  const [historyLoading, setHistoryLoading] = React.useState<boolean>(false);
+  const historyLoadingRef = React.useRef<boolean>(false);
   const [urlByPath, setUrlByPath] = React.useState<Record<string, string>>({});
   // How quickly we’ll re-check guest profile avatars for updates (tradeoff: freshness vs API calls).
   const AVATAR_PROFILE_TTL_MS = 60_000;
@@ -270,6 +303,25 @@ export default function GuestGlobalScreen({
 
   const [viewerOpen, setViewerOpen] = React.useState<boolean>(false);
   const [viewerMedia, setViewerMedia] = React.useState<null | { url: string; kind: 'image' | 'video' | 'file'; fileName?: string }>(null);
+
+  React.useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const loadOlderHistory = React.useCallback(() => {
+    if (!API_URL) return;
+    if (!historyHasMore) return;
+    // Fire and forget; guarded by historyLoadingRef.
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetchHistoryPage({
+      // Use the oldest currently-rendered message as the cursor.
+      // This avoids stale `historyCursor` edge-cases (e.g., user taps "Load older" quickly).
+      before: messagesRef.current.length
+        ? messagesRef.current[messagesRef.current.length - 1].createdAt
+        : historyCursor,
+      reset: false,
+    });
+  }, [fetchHistoryPage, historyCursor, historyHasMore]);
 
   const resolvePathUrl = React.useCallback(
     async (path: string): Promise<string | null> => {
@@ -400,23 +452,104 @@ export default function GuestGlobalScreen({
     [resolvePathUrl]
   );
 
-  const fetchNow = React.useCallback(async (opts?: { isManual?: boolean }) => {
-    const isManual = !!opts?.isManual;
-    if (isManual) setRefreshing(true);
-    else setLoading((prev) => prev || messages.length === 0);
+  const fetchHistoryPage = React.useCallback(
+    async (opts?: { reset?: boolean; before?: number | null; isManual?: boolean }) => {
+      const reset = !!opts?.reset;
+      const before = opts?.before;
+      const isManual = !!opts?.isManual;
 
+      if (reset) {
+        historyLoadingRef.current = false;
+      }
+      if (historyLoadingRef.current) return;
+      historyLoadingRef.current = true;
+      setHistoryLoading(true);
+
+      if (isManual) setRefreshing(true);
+      else {
+        const currentCount = messagesRef.current.length;
+        setLoading((prev) => prev || (reset ? true : currentCount === 0));
+      }
+
+      try {
+        setError(null);
+        const page = await fetchGuestGlobalHistoryPage({ before });
+        if (reset) {
+          setMessages(page.items);
+          setHistoryHasMore(!!page.hasMore);
+          setHistoryCursor(page.nextCursor);
+        } else {
+          // Merge older page into the list; if the page is all duplicates, stop paging to avoid
+          // an infinite spinner loop (usually means cursor was stale or server ignored `before`).
+          let appendedCount = 0;
+          let mergedNextCursor: number | null = null;
+
+          setMessages((prev) => {
+            const prevSeen = new Set(prev.map((m) => m.id));
+            const filtered = page.items.filter((m) => !prevSeen.has(m.id));
+            appendedCount = filtered.length;
+            const merged = filtered.length ? [...prev, ...filtered] : prev;
+            mergedNextCursor = merged.length ? merged[merged.length - 1].createdAt : null;
+            return merged;
+          });
+
+          if (page.items.length > 0 && appendedCount === 0) {
+            setHistoryHasMore(false);
+          } else {
+            setHistoryHasMore(!!page.hasMore);
+          }
+          setHistoryCursor(mergedNextCursor);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to load messages';
+        setError(msg);
+      } finally {
+        setLoading(false);
+        if (isManual) setRefreshing(false);
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
+    },
+    []
+  );
+
+  const refreshLatest = React.useCallback(async () => {
+    if (!API_URL) return;
+    if (historyLoadingRef.current) return;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
     try {
       setError(null);
-      const next = await fetchGuestGlobalHistory();
-      setMessages(next);
+      const page = await fetchGuestGlobalHistoryPage({ before: null });
+      setMessages((prev) => {
+        const seen = new Set<string>();
+        const combined = [...page.items, ...prev];
+        return combined.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+      });
+      // IMPORTANT: do not reset cursor/hasMore during a "latest refresh" —
+      // otherwise we can wipe paging state while the user is scrolling back.
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load messages';
       setError(msg);
     } finally {
-      setLoading(false);
-      if (isManual) setRefreshing(false);
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
     }
-  }, [messages.length]);
+  }, []);
+
+  const fetchNow = React.useCallback(
+    async (opts?: { isManual?: boolean }) => {
+      const isManual = !!opts?.isManual;
+      if (isManual) {
+        // Pull-to-refresh: fetch latest and merge (do NOT wipe older pages)
+        await refreshLatest();
+        return;
+      }
+      // Initial load: reset pagination.
+      await fetchHistoryPage({ reset: true });
+    },
+    [fetchHistoryPage, refreshLatest]
+  );
 
   // Initial fetch
   React.useEffect(() => {
@@ -436,7 +569,7 @@ export default function GuestGlobalScreen({
     const start = () => {
       if (pollTimer) return;
       pollTimer = setInterval(() => {
-        fetchNow().catch(() => {});
+        refreshLatest().catch(() => {});
       }, 60_000);
     };
 
@@ -452,7 +585,7 @@ export default function GuestGlobalScreen({
       stop();
       sub.remove();
     };
-  }, [fetchNow]);
+  }, [refreshLatest]);
 
   return (
     // App.tsx already applies the top safe area. Avoid double top inset here (dead space).
@@ -529,6 +662,38 @@ export default function GuestGlobalScreen({
         keyExtractor={(m) => m.id}
         inverted
         keyboardShouldPersistTaps="handled"
+        onEndReached={() => {
+          if (!API_URL) return;
+          if (!historyHasMore) return;
+          if (historyLoading) return;
+          loadOlderHistory();
+        }}
+        onEndReachedThreshold={0.2}
+        ListFooterComponent={
+          API_URL ? (
+            <View style={{ paddingVertical: 10, alignItems: 'center' }}>
+              {historyHasMore ? (
+                <Pressable
+                  onPress={loadOlderHistory}
+                  disabled={historyLoading}
+                  style={({ pressed }) => ({
+                    paddingHorizontal: 14,
+                    paddingVertical: 9,
+                    borderRadius: 999,
+                    backgroundColor: isDark ? '#2a2a33' : '#e9e9ee',
+                    opacity: historyLoading ? 0.6 : pressed ? 0.85 : 1,
+                  })}
+                >
+                  <Text style={{ color: isDark ? '#fff' : '#111', fontWeight: '700' }}>
+                    {historyLoading ? 'Loading older…' : 'Load older messages'}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Text style={{ color: isDark ? '#aaa' : '#666' }}>No older messages</Text>
+              )}
+            </View>
+          ) : null
+        }
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl
