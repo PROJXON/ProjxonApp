@@ -22,6 +22,17 @@ exports.handler = async (event) => {
     const params = event.queryStringParameters || {};
     const limit = Math.min(parseInt(params.limit || '50', 10) || 50, 200);
     const conversationId = params.conversationId || 'global';
+    const beforeRaw = params.before;
+    const before =
+      typeof beforeRaw === 'string' && beforeRaw.trim().length
+        ? Number(beforeRaw)
+        : typeof beforeRaw === 'number'
+          ? Number(beforeRaw)
+          : null;
+    const useCursorResponse =
+      String(params.cursor || '').toLowerCase() === '1' ||
+      String(params.cursor || '').toLowerCase() === 'true' ||
+      String(params.v || '').toLowerCase() === '2';
 
     if (conversationId !== 'global') {
       return {
@@ -34,14 +45,22 @@ exports.handler = async (event) => {
       };
     }
 
+    const queryInput = {
+      TableName: process.env.MESSAGES_TABLE,
+      KeyConditionExpression: 'conversationId = :c',
+      ExpressionAttributeValues: { ':c': conversationId },
+      ScanIndexForward: false, // newest first
+      Limit: limit,
+    };
+
+    // Cursor-style paging: fetch older than a given createdAt (epoch ms).
+    if (typeof before === 'number' && Number.isFinite(before) && before > 0) {
+      queryInput.KeyConditionExpression = 'conversationId = :c AND createdAt < :b';
+      queryInput.ExpressionAttributeValues[':b'] = before;
+    }
+
     const resp = await ddb.send(
-      new QueryCommand({
-        TableName: process.env.MESSAGES_TABLE,
-        KeyConditionExpression: 'conversationId = :c',
-        ExpressionAttributeValues: { ':c': conversationId },
-        ScanIndexForward: false, // newest first
-        Limit: limit,
-      })
+      new QueryCommand(queryInput)
     );
 
     const nowSec = Math.floor(Date.now() / 1000);
@@ -85,13 +104,25 @@ exports.handler = async (event) => {
         expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
       }));
 
+    const hasMore = !!resp.LastEvaluatedKey;
+    const nextCursor =
+      resp.LastEvaluatedKey && typeof resp.LastEvaluatedKey.createdAt === 'number'
+        ? Number(resp.LastEvaluatedKey.createdAt)
+        : items.length
+          ? Number(items[items.length - 1].createdAt)
+          : null;
+
     return {
       statusCode: 200,
       headers: {
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
       },
-      body: JSON.stringify(items),
+      body: JSON.stringify(
+        useCursorResponse
+          ? { items, hasMore, nextCursor: typeof nextCursor === 'number' && Number.isFinite(nextCursor) ? nextCursor : null }
+          : items
+      ),
     };
   } catch (err) {
     console.error('getPublicMessages error', err);
