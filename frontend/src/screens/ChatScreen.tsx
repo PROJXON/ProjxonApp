@@ -323,6 +323,7 @@ const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25MB (GIFs/documents)
 const THUMB_MAX_DIM = 720; // px
 const THUMB_JPEG_QUALITY = 0.85; // preview-only; original stays untouched
+const HISTORY_PAGE_SIZE = 50;
   const CHAT_MEDIA_MAX_HEIGHT = 240; // dp
   const CHAT_MEDIA_MAX_WIDTH_FRACTION = 0.86; // fraction of screen width (roughly bubble width)
 
@@ -353,6 +354,10 @@ export default function ChatScreen({
   const { user } = useAuthenticator();
   const { width: windowWidth } = useWindowDimensions();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
+  const [historyCursor, setHistoryCursor] = React.useState<number | null>(null);
+  const [historyHasMore, setHistoryHasMore] = React.useState<boolean>(true);
+  const [historyLoading, setHistoryLoading] = React.useState<boolean>(false);
+  const historyLoadingRef = React.useRef<boolean>(false);
   const blockedSubsSet = React.useMemo(() => new Set((blockedUserSubs || []).filter(Boolean)), [blockedUserSubs]);
   const visibleMessages = React.useMemo(
     () => messages.filter((m) => !(m.userSub && blockedSubsSet.has(String(m.userSub)))),
@@ -2328,19 +2333,27 @@ export default function ChatScreen({
     };
   }, []);
 
-  // Fetch recent history from HTTP API (if configured)
-  React.useEffect(() => {
-    const fetchHistory = async () => {
+  const fetchHistoryPage = React.useCallback(
+    async ({ before, reset }: { before?: number | null; reset?: boolean }) => {
       if (!API_URL) return;
-      setMessages([]);
+      if (historyLoadingRef.current) return;
+      historyLoadingRef.current = true;
+      setHistoryLoading(true);
       try {
         // Some deployments protect GET /messages behind a Cognito authorizer.
         // Include the idToken when available; harmless if the route is public.
         const { tokens } = await fetchAuthSession().catch(() => ({ tokens: undefined }));
         const idToken = tokens?.idToken?.toString();
-        const url = `${API_URL.replace(/\/$/, '')}/messages?conversationId=${encodeURIComponent(
-          activeConversationId
-        )}&limit=50`;
+        const base = API_URL.replace(/\/$/, '');
+        const qs =
+          `conversationId=${encodeURIComponent(activeConversationId)}` +
+          `&limit=${HISTORY_PAGE_SIZE}` +
+          `&cursor=1` +
+          (typeof before === 'number' && Number.isFinite(before) && before > 0
+            ? `&before=${encodeURIComponent(String(before))}`
+            : '');
+        const url = `${base}/messages?${qs}`;
+
         const res = await fetch(url, idToken ? { headers: { Authorization: `Bearer ${idToken}` } } : undefined);
         if (!res.ok) {
           const text = await res.text().catch(() => '');
@@ -2348,51 +2361,103 @@ export default function ChatScreen({
           setError(`History fetch failed (${res.status})`);
           return;
         }
-        const items = await res.json();
-        if (Array.isArray(items)) {
-          const normalized = items
-            .map((it: any) => ({
-              id: String(it.messageId ?? `${it.createdAt ?? Date.now()}-${Math.random().toString(36).slice(2)}`),
-              user: it.user ?? 'anon',
-              userSub: typeof it.userSub === 'string' ? it.userSub : undefined,
-              userLower:
-                typeof it.userLower === 'string'
-                  ? normalizeUser(it.userLower)
-                  : normalizeUser(String(it.user ?? 'anon')),
-              avatarBgColor: typeof it.avatarBgColor === 'string' ? String(it.avatarBgColor) : undefined,
-              avatarTextColor: typeof it.avatarTextColor === 'string' ? String(it.avatarTextColor) : undefined,
-              avatarImagePath: typeof it.avatarImagePath === 'string' ? String(it.avatarImagePath) : undefined,
-              editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
-              deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
-              deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
-              reactions: normalizeReactions((it as any)?.reactions),
-              rawText: typeof it.text === 'string' ? String(it.text) : '',
-              encrypted: parseEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
-              text:
-                typeof it.deletedAt === 'number'
-                  ? ''
-                  : parseEncrypted(typeof it.text === 'string' ? String(it.text) : '')
-                ? ENCRYPTED_PLACEHOLDER
-                    : (typeof it.text === 'string' ? String(it.text) : ''),
-              createdAt: Number(it.createdAt ?? Date.now()),
-              expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
-              ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
-            }))
-            .filter(m => m.text.length > 0)
-            .sort((a, b) => b.createdAt - a.createdAt);
-          // Deduplicate by id (history may overlap with WS delivery)
-          const seen = new Set<string>();
-          const deduped = normalized
-            .filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
-            .filter((m) => !hiddenMessageIds[m.id]);
+
+        const json = await res.json();
+        const rawItems = Array.isArray(json) ? json : Array.isArray(json?.items) ? json.items : [];
+        const hasMoreFromServer = typeof json?.hasMore === 'boolean' ? json.hasMore : null;
+        const nextCursorFromServer =
+          typeof json?.nextCursor === 'number' && Number.isFinite(json.nextCursor) ? json.nextCursor : null;
+
+        const normalized: ChatMessage[] = rawItems
+          .map((it: any) => ({
+            id: String(it.messageId ?? `${it.createdAt ?? Date.now()}-${Math.random().toString(36).slice(2)}`),
+            user: it.user ?? 'anon',
+            userSub: typeof it.userSub === 'string' ? it.userSub : undefined,
+            userLower:
+              typeof it.userLower === 'string'
+                ? normalizeUser(it.userLower)
+                : normalizeUser(String(it.user ?? 'anon')),
+            avatarBgColor: typeof it.avatarBgColor === 'string' ? String(it.avatarBgColor) : undefined,
+            avatarTextColor: typeof it.avatarTextColor === 'string' ? String(it.avatarTextColor) : undefined,
+            avatarImagePath: typeof it.avatarImagePath === 'string' ? String(it.avatarImagePath) : undefined,
+            editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
+            deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
+            deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
+            reactions: normalizeReactions((it as any)?.reactions),
+            rawText: typeof it.text === 'string' ? String(it.text) : '',
+            encrypted: parseEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
+            text:
+              typeof it.deletedAt === 'number'
+                ? ''
+                : parseEncrypted(typeof it.text === 'string' ? String(it.text) : '')
+                  ? ENCRYPTED_PLACEHOLDER
+                  : typeof it.text === 'string'
+                    ? String(it.text)
+                    : '',
+            createdAt: Number(it.createdAt ?? Date.now()),
+            expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
+            ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
+          }))
+          .filter((m: ChatMessage) => m.text.length > 0)
+          .sort((a: ChatMessage, b: ChatMessage) => b.createdAt - a.createdAt);
+
+        // Deduplicate by id (history may overlap with WS delivery)
+        const seen = new Set<string>();
+        const deduped = normalized
+          .filter((m: ChatMessage) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
+          .filter((m: ChatMessage) => !hiddenMessageIds[m.id]);
+
+        if (reset) {
           setMessages(deduped);
+        } else {
+          setMessages((prev) => {
+            const prevSeen = new Set(prev.map((m: ChatMessage) => m.id));
+            const filtered = deduped.filter((m: ChatMessage) => !prevSeen.has(m.id));
+            return filtered.length ? [...prev, ...filtered] : prev;
+          });
         }
+
+        const nextCursor =
+          typeof nextCursorFromServer === 'number' && Number.isFinite(nextCursorFromServer)
+            ? nextCursorFromServer
+            : normalized.length
+              ? normalized[normalized.length - 1].createdAt
+              : null;
+
+        const hasMore =
+          typeof hasMoreFromServer === 'boolean'
+            ? hasMoreFromServer
+            : Array.isArray(rawItems)
+              ? rawItems.length >= HISTORY_PAGE_SIZE && typeof nextCursor === 'number' && Number.isFinite(nextCursor)
+              : false;
+
+        setHistoryHasMore(!!hasMore);
+        setHistoryCursor(typeof nextCursor === 'number' && Number.isFinite(nextCursor) ? nextCursor : null);
       } catch {
         // ignore fetch errors; WS will still populate
+      } finally {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
       }
-    };
-    fetchHistory();
-  }, [API_URL, activeConversationId, hiddenMessageIds]);
+    },
+    [API_URL, activeConversationId, hiddenMessageIds, normalizeUser]
+  );
+
+  // Fetch recent history from HTTP API (if configured)
+  React.useEffect(() => {
+    if (!API_URL) return;
+    // Reset + fetch first page for the active conversation.
+    setMessages([]);
+    setHistoryCursor(null);
+    setHistoryHasMore(true);
+    fetchHistoryPage({ reset: true });
+  }, [API_URL, activeConversationId, hiddenMessageIds, fetchHistoryPage]);
+
+  const loadOlderHistory = React.useCallback(() => {
+    if (!API_URL) return;
+    if (!historyHasMore) return;
+    fetchHistoryPage({ before: historyCursor, reset: false });
+  }, [API_URL, fetchHistoryPage, historyCursor, historyHasMore]);
 
   // Client-side hiding of expired DM messages (server-side TTL still required for real deletion).
   React.useEffect(() => {
@@ -3505,6 +3570,37 @@ export default function ChatScreen({
           keyExtractor={(m) => m.id}
           inverted
           keyboardShouldPersistTaps="handled"
+          onEndReached={() => {
+            if (!API_URL) return;
+            if (!historyHasMore) return;
+            loadOlderHistory();
+          }}
+          onEndReachedThreshold={0.2}
+          ListFooterComponent={
+            API_URL ? (
+              <View style={{ paddingVertical: 10, alignItems: 'center' }}>
+                {historyHasMore ? (
+                  <Pressable
+                    onPress={loadOlderHistory}
+                    disabled={historyLoading}
+                    style={{
+                      paddingHorizontal: 14,
+                      paddingVertical: 9,
+                      borderRadius: 999,
+                      backgroundColor: isDark ? '#2a2a33' : '#e9e9ee',
+                      opacity: historyLoading ? 0.6 : 1,
+                    }}
+                  >
+                    <Text style={{ color: isDark ? '#fff' : '#111', fontWeight: '700' }}>
+                      {historyLoading ? 'Loading older…' : 'Load older messages'}
+                    </Text>
+                  </Pressable>
+                ) : (
+                  <Text style={{ color: isDark ? '#aaa' : '#666' }}>No older messages</Text>
+                )}
+              </View>
+            ) : null
+          }
           // Perf tuning (especially on Android):
           removeClippedSubviews={Platform.OS === 'android'}
           initialNumToRender={18}
