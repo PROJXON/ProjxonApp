@@ -48,6 +48,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { getUrl, uploadData } from 'aws-amplify/storage';
 import { VideoView, useVideoPlayer } from 'expo-video';
+import { InAppCameraModal } from '../components/InAppCameraModal';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
@@ -478,6 +479,8 @@ export default function ChatScreen({
     kind: 'image' | 'video' | 'file';
     fileName?: string;
   } | null>(null);
+  const [attachOpen, setAttachOpen] = React.useState<boolean>(false);
+  const [cameraOpen, setCameraOpen] = React.useState<boolean>(false);
   const activeConversationId = React.useMemo(
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
@@ -666,7 +669,8 @@ export default function ChatScreen({
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] as any,
+        // Use the string union to stay compatible across expo-image-picker typings.
+        mediaTypes: ['images', 'videos'] as any,
         quality: 1,
       });
 
@@ -695,44 +699,33 @@ export default function ChatScreen({
     }
   }, []);
 
-  const captureFromCamera = React.useCallback(async () => {
-    try {
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert('Permission needed', 'Please allow camera access to capture media.');
-        return;
-      }
-
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: [ImagePicker.MediaType.Images, ImagePicker.MediaType.Videos] as any,
-        quality: 1,
-        allowsEditing: false,
-      });
-
-      if (result.canceled) return;
-      const first = result.assets?.[0];
-      if (!first) return;
-
-      const kind =
-        first.type === 'video'
-          ? 'video'
-          : first.type === 'image'
-            ? 'image'
-            : 'file';
-      const fileName = (first as any).fileName as string | undefined;
-      const size = (first as any).fileSize as number | undefined;
-
-      setPendingMedia({
-        uri: first.uri,
-        kind,
-        contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
-        fileName,
-        size,
-      });
-    } catch (e: any) {
-      Alert.alert('Camera failed', e?.message ?? 'Unknown error');
-    }
+  const openCamera = React.useCallback(() => {
+    setCameraOpen(true);
   }, []);
+
+  const handleInAppCameraCaptured = React.useCallback(
+    (cap: { uri: string; mode: 'photo' | 'video' }) => {
+      const rawName = (() => {
+        try {
+          const last = String(cap.uri).split('/').pop() || '';
+          return decodeURIComponent(last);
+        } catch {
+          return '';
+        }
+      })();
+      const fallbackName = cap.mode === 'video' ? 'video.mp4' : 'photo.jpg';
+      const fileName = rawName && rawName.length > 0 ? rawName : fallbackName;
+      const kind = cap.mode === 'video' ? 'video' : 'image';
+      setPendingMedia({
+        uri: cap.uri,
+        kind,
+        contentType: guessContentTypeFromName(fileName) ?? (cap.mode === 'video' ? 'video/mp4' : 'image/jpeg'),
+        fileName,
+        size: undefined,
+      });
+    },
+    []
+  );
 
   const pickDocument = React.useCallback(async () => {
     try {
@@ -775,13 +768,8 @@ export default function ChatScreen({
         return;
       }
     }
-    Alert.alert('Attach', 'Choose a source', [
-      { text: 'Photos / Videos', onPress: () => void pickFromLibrary() },
-      { text: 'Camera (photo or video)', onPress: () => void captureFromCamera() },
-      { text: 'File (GIF, etc.)', onPress: () => void pickDocument() },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
-  }, [isDm, myPrivateKey, peerPublicKey, pickFromLibrary, captureFromCamera, pickDocument]);
+    setAttachOpen(true);
+  }, [isDm, myPrivateKey, peerPublicKey]);
 
   const uploadPendingMedia = React.useCallback(
     async (
@@ -1162,7 +1150,7 @@ export default function ChatScreen({
             }
           } catch (e) {
             // eslint-disable-next-line no-console
-            console.log('avatar getUrl failed', path, e?.message || String(e));
+            console.log('avatar getUrl failed', path, (e as any)?.message || String(e));
           }
         }
         if (!cancelled && pairs.length) {
@@ -4405,6 +4393,80 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={attachOpen} transparent animationType="fade" onRequestClose={() => setAttachOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setAttachOpen(false)} />
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Attach</Text>
+            <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
+              Choose a source
+            </Text>
+
+            <View style={{ gap: 10, marginTop: 12 }}>
+              <Pressable
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, styles.attachOptionBtn]}
+                onPress={() => {
+                  setAttachOpen(false);
+                  setTimeout(() => void pickFromLibrary(), 0);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null, styles.attachOptionText]}>
+                  Photos / Videos
+                </Text>
+              </Pressable>
+
+              <Pressable
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, styles.attachOptionBtn]}
+                onPress={() => {
+                  setAttachOpen(false);
+                  setTimeout(() => void openCamera(), 0);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null, styles.attachOptionText]}>
+                  Camera
+                </Text>
+              </Pressable>
+
+              <Pressable
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, styles.attachOptionBtn]}
+                onPress={() => {
+                  setAttachOpen(false);
+                  setTimeout(() => void pickDocument(), 0);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null, styles.attachOptionText]}>
+                  File (GIF, etc.)
+                </Text>
+              </Pressable>
+            </View>
+
+            <View style={[styles.summaryButtons, { marginTop: 12 }]}>
+              <Pressable
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, styles.attachOptionBtn]}
+                onPress={() => setAttachOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null, styles.attachOptionText]}>
+                  Close
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <InAppCameraModal
+        visible={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onCaptured={(cap) => {
+          setCameraOpen(false);
+          handleInAppCameraCaptured(cap);
+        }}
+      />
+
       <Modal visible={helperOpen} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
@@ -5207,6 +5269,17 @@ const styles = StyleSheet.create({
   },
   toolBtnText: { color: '#111', fontWeight: '700', fontSize: 13 },
   toolBtnTextDark: { color: '#fff' },
+  attachOptionBtn: {
+    minHeight: 52,
+    paddingVertical: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  attachOptionText: {
+    textAlign: 'center',
+    fontSize: 15,
+    fontWeight: '800',
+  },
   ok: { color: '#2e7d32' },
   err: { color: '#b00020' },
   error: { color: '#b00020', marginTop: 6 },
@@ -5586,7 +5659,8 @@ const styles = StyleSheet.create({
   summaryModal: {
     width: '88%',
     maxHeight: '80%',
-    backgroundColor: '#fff',
+    // Match light-mode surface used elsewhere in the app (avoid stark white).
+    backgroundColor: '#f2f2f7',
     borderRadius: 12,
     padding: 16,
   },
