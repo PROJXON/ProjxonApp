@@ -442,6 +442,7 @@ export default function ChatScreen({
     []
   );
   const [ttlIdx, setTtlIdx] = React.useState<number>(0);
+  const [ttlIdxDraft, setTtlIdxDraft] = React.useState<number>(0);
   const [ttlPickerOpen, setTtlPickerOpen] = React.useState(false);
   const [summaryOpen, setSummaryOpen] = React.useState(false);
   const [summaryText, setSummaryText] = React.useState<string>('');
@@ -472,6 +473,9 @@ export default function ChatScreen({
     kind: 'image' | 'video' | 'file';
     contentType?: string;
     fileName?: string;
+    // Friendly label for UI (e.g. "From camera") without affecting uploads.
+    displayName?: string;
+    source?: 'camera' | 'library' | 'file';
     size?: number;
   } | null>(null);
   const pendingMediaRef = React.useRef<typeof pendingMedia>(null);
@@ -679,6 +683,8 @@ export default function ChatScreen({
           kind,
           contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
           fileName,
+          displayName: fileName,
+          source: 'library',
           size,
         });
       } catch {
@@ -722,6 +728,8 @@ export default function ChatScreen({
         kind,
         contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
         fileName,
+        displayName: fileName,
+        source: 'library',
         size,
       });
     } catch (e: any) {
@@ -735,22 +743,17 @@ export default function ChatScreen({
 
   const handleInAppCameraCaptured = React.useCallback(
     (cap: { uri: string; mode: 'photo' | 'video' }) => {
-      const rawName = (() => {
-        try {
-          const last = String(cap.uri).split('/').pop() || '';
-          return decodeURIComponent(last);
-        } catch {
-          return '';
-        }
-      })();
-      const fallbackName = cap.mode === 'video' ? 'video.mp4' : 'photo.jpg';
-      const fileName = rawName && rawName.length > 0 ? rawName : fallbackName;
       const kind = cap.mode === 'video' ? 'video' : 'image';
+      // Camera URIs can contain extremely long auto-generated filenames.
+      // Use a short, stable filename for uploads, and a friendly UI label.
+      const fileName = cap.mode === 'video' ? `camera-${Date.now()}.mp4` : `camera-${Date.now()}.jpg`;
       setPendingMedia({
         uri: cap.uri,
         kind,
         contentType: guessContentTypeFromName(fileName) ?? (cap.mode === 'video' ? 'video/mp4' : 'image/jpeg'),
         fileName,
+        displayName: 'From camera',
+        source: 'camera',
         size: undefined,
       });
     },
@@ -779,6 +782,8 @@ export default function ChatScreen({
             : 'file',
         contentType,
         fileName,
+        displayName: fileName,
+        source: 'file',
         size: typeof first.size === 'number' ? first.size : undefined,
       });
     } catch (e: any) {
@@ -3798,7 +3803,10 @@ export default function ChatScreen({
               </Text>
               <Pressable
                 style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
-                onPress={() => setTtlPickerOpen(true)}
+                onPress={() => {
+                  setTtlIdxDraft(ttlIdx);
+                  setTtlPickerOpen(true);
+                }}
               >
                 <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
                   {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
@@ -4009,6 +4017,7 @@ export default function ChatScreen({
                         backgroundColor={prof?.avatarBgColor ?? item.avatarBgColor}
                         textColor={prof?.avatarTextColor ?? item.avatarTextColor}
                         imageUri={avatarImageUri}
+                        imageBgColor={isDark ? '#1c1c22' : '#f2f2f7'}
                       />
                     </View>
                   ) : null}
@@ -4653,7 +4662,7 @@ export default function ChatScreen({
             disabled={isUploading}
           >
             <Text style={[styles.attachmentPillText, isDark ? styles.attachmentPillTextDark : null]}>
-              {`Attached: ${pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
+              {`Attached: ${pendingMedia.displayName || pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
             </Text>
           </Pressable>
         ) : null}
@@ -5028,8 +5037,8 @@ export default function ChatScreen({
               </View>
               <Text style={[styles.helperHint, isDark ? styles.helperHintDark : null]}>
                 {helperMode === 'reply'
-                  ? 'Draft short, sendable replies based on the chat.'
-                  : 'Ask a question about the chat (no reply bubbles)'}
+                  ? 'Draft short, sendable replies based on the chat'
+                  : 'Ask a question about the chat, or anything!'}
               </Text>
             </View>
 
@@ -5126,10 +5135,20 @@ export default function ChatScreen({
                 {(() => {
                   const t = messageActionTarget;
                   if (!t) return null;
+                  const isOutgoingByUserSub =
+                    !!myUserId && !!t.userSub && String(t.userSub) === String(myUserId);
+                  const isEncryptedOutgoing =
+                    !!t.encrypted && !!myPublicKey && t.encrypted.senderPublicKey === myPublicKey;
+                  const isPlainOutgoing =
+                    !t.encrypted &&
+                    (isOutgoingByUserSub ? true : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
+                  const isOutgoing = isOutgoingByUserSub || isEncryptedOutgoing || isPlainOutgoing;
+                  const bubbleStyle = isOutgoing ? styles.messageBubbleOutgoing : styles.messageBubbleIncoming;
+                  const textStyle = isOutgoing ? styles.messageTextOutgoing : styles.messageTextIncoming;
                   if (t.deletedAt) {
                     return (
-                      <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
-                        <Text style={[styles.messageText, styles.messageTextOutgoing]}>This message has been deleted</Text>
+                      <View style={[styles.messageBubble, bubbleStyle]}>
+                        <Text style={[styles.messageText, textStyle]}>This message has been deleted</Text>
                       </View>
                     );
                   }
@@ -5142,8 +5161,8 @@ export default function ChatScreen({
                   if (t.encrypted) {
                     if (!t.decryptedText) {
                       return (
-                        <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
-                          <Text style={[styles.messageText, styles.messageTextOutgoing]}>{ENCRYPTED_PLACEHOLDER}</Text>
+                        <View style={[styles.messageBubble, bubbleStyle]}>
+                          <Text style={[styles.messageText, textStyle]}>{ENCRYPTED_PLACEHOLDER}</Text>
                         </View>
                       );
                     }
@@ -5175,8 +5194,8 @@ export default function ChatScreen({
 
                   if (!hasMedia) {
                     return (
-                      <View style={[styles.messageBubble, styles.messageBubbleOutgoing]}>
-                        <Text style={[styles.messageText, styles.messageTextOutgoing]}>{caption}</Text>
+                      <View style={[styles.messageBubble, bubbleStyle]}>
+                        <Text style={[styles.messageText, textStyle]}>{caption}</Text>
                       </View>
                     );
                   }
@@ -5572,9 +5591,25 @@ export default function ChatScreen({
       </Modal>
 
 
-      <Modal visible={ttlPickerOpen} transparent animationType="fade">
+      <Modal
+        visible={ttlPickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          // Discard changes unless explicitly confirmed.
+          setTtlIdxDraft(ttlIdx);
+          setTtlPickerOpen(false);
+        }}
+      >
         <View style={styles.modalOverlay}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setTtlPickerOpen(false)} />
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              // Discard changes unless explicitly confirmed.
+              setTtlIdxDraft(ttlIdx);
+              setTtlPickerOpen(false);
+            }}
+          />
           <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
             <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
               Self-Destructing Messages
@@ -5584,7 +5619,7 @@ export default function ChatScreen({
             </Text>
             <View style={{ height: 12 }} />
             {TTL_OPTIONS.map((opt, idx) => {
-              const selected = idx === ttlIdx;
+              const selected = idx === ttlIdxDraft;
               return (
                 <Pressable
                   key={opt.label}
@@ -5596,13 +5631,25 @@ export default function ChatScreen({
                       : null,
                   ]}
                   onPress={() => {
-                    setTtlIdx(idx);
+                    setTtlIdxDraft(idx);
                   }}
                 >
-                  <Text style={[styles.ttlOptionLabel, isDark ? styles.ttlOptionLabelDark : null]}>
+                  <Text
+                    style={[
+                      styles.ttlOptionLabel,
+                      isDark ? styles.ttlOptionLabelDark : null,
+                      selected && !isDark ? styles.ttlOptionLabelSelected : null,
+                    ]}
+                  >
                     {opt.label}
                   </Text>
-                  <Text style={[styles.ttlOptionRadio, isDark ? styles.ttlOptionLabelDark : null]}>
+                  <Text
+                    style={[
+                      styles.ttlOptionRadio,
+                      isDark ? styles.ttlOptionLabelDark : null,
+                      selected && !isDark ? styles.ttlOptionRadioSelected : null,
+                    ]}
+                  >
                     {selected ? '◉' : '○'}
                   </Text>
                 </Pressable>
@@ -5611,7 +5658,11 @@ export default function ChatScreen({
             <View style={styles.summaryButtons}>
               <Pressable
                 style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
-                onPress={() => setTtlPickerOpen(false)}
+                onPress={() => {
+                  // Commit selection only on explicit confirmation.
+                  setTtlIdx(ttlIdxDraft);
+                  setTtlPickerOpen(false);
+                }}
               >
                 <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
                   Done
@@ -5730,7 +5781,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     backgroundColor: '#f4f4f4',
   },
-  ttlOptionRowSelected: { backgroundColor: '#e8eefc' },
+  ttlOptionRowSelected: { backgroundColor: '#111' },
   ttlOptionRowDark: {
     backgroundColor: '#1c1c22',
     borderWidth: StyleSheet.hairlineWidth,
@@ -5742,7 +5793,9 @@ const styles = StyleSheet.create({
     borderColor: '#3a3a46',
   },
   ttlOptionLabel: { color: '#222', fontWeight: '600' },
+  ttlOptionLabelSelected: { color: '#fff', fontWeight: '800' },
   ttlOptionRadio: { color: '#222', fontSize: 18, fontWeight: '800' },
+  ttlOptionRadioSelected: { color: '#fff' },
   ttlOptionLabelDark: { color: '#fff' },
   summarizeBtn: {
     paddingHorizontal: 12,
@@ -5765,9 +5818,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 10,
-    backgroundColor: '#fff',
+    // Light mode: neutral modal buttons should be off-gray.
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
+    borderColor: '#e3e3e3',
   },
   toolBtnDark: {
     backgroundColor: '#2a2a33',
@@ -6170,8 +6224,8 @@ const styles = StyleSheet.create({
   summaryModal: {
     width: '88%',
     maxHeight: '80%',
-    // Match light-mode surface used elsewhere in the app (avoid stark white).
-    backgroundColor: '#f2f2f7',
+    // Modals should be white in light mode.
+    backgroundColor: '#fff',
     borderRadius: 12,
     padding: 16,
   },
@@ -6334,7 +6388,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 6,
     paddingVertical: 3,
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#e3e3e3',
     shadowColor: '#000',
@@ -6407,7 +6461,7 @@ const styles = StyleSheet.create({
     borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#e3e3e3',
   },

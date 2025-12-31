@@ -994,6 +994,7 @@ function GuestMessageRow({
             backgroundColor={avatarBgColor}
             textColor={avatarTextColor}
             imageUri={avatarImageUri}
+            imageBgColor={isDark ? '#1c1c22' : '#f2f2f7'}
           />
         </View>
       ) : null}

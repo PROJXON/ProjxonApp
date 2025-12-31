@@ -42,6 +42,7 @@ export function AvatarBubble({
   backgroundColor,
   textColor = '#fff',
   imageUri,
+  imageBgColor = '#f2f2f7',
   style,
 }: {
   seed: string;
@@ -50,9 +51,11 @@ export function AvatarBubble({
   backgroundColor?: string;
   textColor?: string;
   imageUri?: string;
+  // Background used while the image is loading (prevents flashing the fallback color behind photos).
+  imageBgColor?: string;
   style?: ViewStyle;
 }): React.JSX.Element {
-  const bg = backgroundColor || pickDefaultAvatarColor(seed);
+  const bg = imageUri ? imageBgColor : (backgroundColor || pickDefaultAvatarColor(seed));
   const letter = firstLetter(label);
   const [imageFailed, setImageFailed] = React.useState<boolean>(false);
   const fontSize = Math.max(14, Math.floor(size * 0.58));

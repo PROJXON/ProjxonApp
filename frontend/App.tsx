@@ -83,17 +83,22 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const [keyEpoch, setKeyEpoch] = React.useState<number>(0);
   const [avatarOpen, setAvatarOpen] = React.useState<boolean>(false);
   const [avatarSaving, setAvatarSaving] = React.useState<boolean>(false);
+  const avatarSavingRef = React.useRef<boolean>(false);
   const [avatarError, setAvatarError] = React.useState<string | null>(null);
-  const [myAvatar, setMyAvatar] = React.useState<{
+  type AvatarState = {
     bgColor?: string;
     textColor?: string;
     imagePath?: string;
     imageUri?: string; // cached preview URL (not persisted)
-  }>(() => ({ textColor: '#fff' }));
-  const [pendingAvatarImageUri, setPendingAvatarImageUri] = React.useState<string | null>(null);
-  const [pendingAvatarRemoveImage, setPendingAvatarRemoveImage] = React.useState<boolean>(false);
+  };
+  // Persisted avatar state (what we actually saved / loaded).
+  const [myAvatar, setMyAvatar] = React.useState<AvatarState>(() => ({ textColor: '#fff' }));
+  // Draft avatar state for the Avatar modal. Changes here should only commit on "Save".
+  const [avatarDraft, setAvatarDraft] = React.useState<AvatarState>(() => ({ textColor: '#fff' }));
+  const [avatarDraftImageUri, setAvatarDraftImageUri] = React.useState<string | null>(null);
+  const [avatarDraftRemoveImage, setAvatarDraftRemoveImage] = React.useState<boolean>(false);
   const [passphrasePrompt, setPassphrasePrompt] = useState<{
-    mode: 'setup' | 'restore' | 'change';
+    mode: 'setup' | 'restore' | 'change' | 'reset';
     resolve: (value: string) => void;
     reject: (reason?: any) => void;
   } | null>(null);
@@ -131,7 +136,15 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       }
   >(null);
 
-  const promptPassphrase = (mode: 'setup' | 'restore' | 'change'): Promise<string> =>
+  // Initialize draft state when opening the Avatar modal.
+  React.useEffect(() => {
+    if (!avatarOpen) return;
+    setAvatarDraft(myAvatar);
+    setAvatarDraftImageUri(null);
+    setAvatarDraftRemoveImage(false);
+  }, [avatarOpen, myAvatar]);
+
+  const promptPassphrase = (mode: 'setup' | 'restore' | 'change' | 'reset'): Promise<string> =>
     new Promise<string>((resolve, reject) => {
       setPassphraseInput('');
       setPassphraseConfirmInput('');
@@ -206,7 +219,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
   const handlePromptSubmit = () => {
     if (!passphrasePrompt || processing) return;
-    const needsConfirm = passphrasePrompt.mode === 'setup' || passphrasePrompt.mode === 'change';
+    const needsConfirm =
+      passphrasePrompt.mode === 'setup' || passphrasePrompt.mode === 'change' || passphrasePrompt.mode === 'reset';
     if (needsConfirm) {
       if (passphraseInput.trim() !== passphraseConfirmInput.trim()) {
         setPassphraseError('Passphrases do not match');
@@ -248,7 +262,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       return;
     }
     if (!isSetup) {
-      // Change flow: cancelling should just close (no "skip setup" warning).
+      // Change/reset flow: cancelling should just close (no "skip setup" warning).
       closePrompt();
       passphrasePrompt.reject(new Error('Prompt cancelled'));
       return;
@@ -256,7 +270,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
     // Setup flow: user is choosing to skip creating a recovery passphrase.
     const ok = await promptConfirm(
-      'Skip recovery setup?',
+      'Skip Recovery Setup?',
       "If you don't set a recovery passphrase, you won't be able to restore older encrypted messages if you switch devices.\n\nWe do NOT store your passphrase, so make sure you remember it.",
       { confirmText: 'Skip for now', cancelText: 'Go back', destructive: true }
     );
@@ -513,18 +527,38 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
         // If no recovery blob exists OR user explicitly requested a reset, generate a new keypair.
         if (!keyPair) {
-          const newKeyPair = await generateKeypair();
-          await storeKeyPair(userId, newKeyPair);
-          setKeyEpoch((v) => v + 1);
           const token = (await fetchAuthSession()).tokens?.idToken?.toString();
-          // Publish the public key immediately so other users/devices can encrypt to us,
-          // even if the user cancels recovery setup.
-          await uploadPublicKey(token, newKeyPair.publicKey);
           try {
+            if (resetRecoveryRequested) {
+              // Reset flow is destructive; only proceed AFTER the user submits a new passphrase.
+              const recoveryPassphrase = await promptPassphrase('reset');
+              const newKeyPair = await generateKeypair();
+              await storeKeyPair(userId, newKeyPair);
+              setKeyEpoch((v) => v + 1);
+              await uploadPublicKey(token, newKeyPair.publicKey);
+              await uploadRecoveryBlob(token!, newKeyPair.privateKey, recoveryPassphrase);
+              applyRecoveryBlobExists(true);
+              if (mounted) setRecoveryLocked(false);
+              return;
+            }
+
+            // First-time key setup (non-destructive): generate keys immediately so messaging works,
+            // then optionally prompt to create a recovery backup.
+            const newKeyPair = await generateKeypair();
+            await storeKeyPair(userId, newKeyPair);
+            setKeyEpoch((v) => v + 1);
+            // Publish the public key immediately so other users/devices can encrypt to us,
+            // even if the user cancels recovery setup.
+            await uploadPublicKey(token, newKeyPair.publicKey);
             const recoveryPassphrase = await promptPassphrase('setup');
             await uploadRecoveryBlob(token!, newKeyPair.privateKey, recoveryPassphrase);
             applyRecoveryBlobExists(true);
           } catch (err) {
+            if (resetRecoveryRequested) {
+              // If they cancel the reset passphrase prompt, do NOT rotate keys. Keep locked.
+              if (mounted) setRecoveryLocked(true);
+              return;
+            }
             console.warn('Recovery backup skipped:', err);
           } finally {
             // ensure the UI doesn't get stuck in "processing" for setup flow
@@ -830,7 +864,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const resetRecovery = React.useCallback(async () => {
     if (!myUserSub) return;
     const ok = await promptConfirm(
-      'Reset recovery?',
+      'Reset Recovery?',
       'This will generate a new keypair and recovery passphrase on this device.\n\nOld encrypted direct messages will become unrecoverable.',
       { confirmText: 'Reset', cancelText: 'Cancel', destructive: true }
     );
@@ -843,7 +877,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     try {
       // IMPORTANT: Don't reset anything until the user successfully submits a new passphrase.
       // If they cancel, recovery should remain unchanged.
-      const nextPass = await promptPassphrase('setup');
+      const nextPass = await promptPassphrase('reset');
       const newKeyPair = await generateKeypair();
       await storeKeyPair(myUserSub, newKeyPair);
       setKeyEpoch((v) => v + 1);
@@ -1428,6 +1462,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       ? 'Enter your Recovery Passphrase'
       : passphrasePrompt?.mode === 'change'
         ? 'Change your Recovery Passphrase'
+        : passphrasePrompt?.mode === 'reset'
+          ? 'Set a New Recovery Passphrase'
         : 'Create a Recovery Passphrase';
 
   const headerTop = (
@@ -1515,7 +1551,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 setPeerInput(value);
                 setSearchError(null);
               }}
-              placeholder="User to Message"
+              placeholder="Enter Names"
               placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
               selectionColor={isDark ? '#ffffff' : '#111'}
               cursorColor={isDark ? '#ffffff' : '#111'}
@@ -1615,7 +1651,6 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             onPress: () => {
               setMenuOpen(false);
               setAvatarError(null);
-              setPendingAvatarImageUri(null);
               setAvatarOpen(true);
             },
           },
@@ -1658,9 +1693,32 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         ]}
       />
 
-      <Modal visible={avatarOpen} transparent animationType="fade" onRequestClose={() => setAvatarOpen(false)}>
+      <Modal
+        visible={avatarOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (avatarSavingRef.current) return;
+          // Discard draft changes unless saved.
+          setAvatarOpen(false);
+          setAvatarDraft(myAvatar);
+          setAvatarDraftImageUri(null);
+          setAvatarDraftRemoveImage(false);
+        }}
+      >
         <View style={styles.modalOverlay}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setAvatarOpen(false)} />
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            disabled={avatarSaving}
+            onPress={() => {
+              if (avatarSavingRef.current) return;
+              // Discard draft changes unless saved.
+              setAvatarOpen(false);
+              setAvatarDraft(myAvatar);
+              setAvatarDraftImageUri(null);
+              setAvatarDraftRemoveImage(false);
+            }}
+          />
           <View style={[styles.profileCard, isDark ? styles.profileCardDark : null]}>
             <View style={styles.chatsTopRow}>
               <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Avatar</Text>
@@ -1671,9 +1729,10 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 seed={myUserSub || displayName}
                 label={displayName}
                 size={44}
-                backgroundColor={myAvatar.bgColor || pickDefaultAvatarColor(myUserSub || displayName)}
-                textColor={myAvatar.textColor || '#fff'}
-                imageUri={pendingAvatarImageUri || myAvatar.imageUri}
+                backgroundColor={avatarDraft.bgColor || pickDefaultAvatarColor(myUserSub || displayName)}
+                textColor={avatarDraft.textColor || '#fff'}
+                imageUri={avatarDraftImageUri || avatarDraft.imageUri}
+                imageBgColor={isDark ? '#1c1c22' : '#f2f2f7'}
               />
               <View style={styles.profilePreviewMeta}>
                 <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
@@ -1686,7 +1745,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
               <Text style={[styles.errorText, isDark && styles.errorTextDark]}>{avatarError}</Text>
             ) : null}
 
-            {pendingAvatarImageUri || myAvatar.imageUri ? (
+            {avatarDraftImageUri || avatarDraft.imageUri ? (
               <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, { marginTop: 6 }]}>
                 Photo avatar enabled - remove the photo to edit bubble/text colors
               </Text>
@@ -1697,11 +1756,11 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 </Text>
                 <View style={styles.avatarPaletteRow}>
                   {AVATAR_DEFAULT_COLORS.map((c) => {
-                    const selected = (myAvatar.bgColor || '') === c;
+                    const selected = (avatarDraft.bgColor || '') === c;
                     return (
                       <Pressable
                         key={`bg:${c}`}
-                        onPress={() => setMyAvatar((prev) => ({ ...prev, bgColor: c }))}
+                        onPress={() => setAvatarDraft((prev) => ({ ...prev, bgColor: c }))}
                         style={[
                           styles.avatarColorDot,
                           { backgroundColor: c },
@@ -1717,11 +1776,11 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 </Text>
                 <View style={styles.avatarTextColorRow}>
                   <Pressable
-                    onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#fff' }))}
+                    onPress={() => setAvatarDraft((prev) => ({ ...prev, textColor: '#fff' }))}
                     style={[
                       styles.avatarTextColorBtn,
                       isDark ? styles.avatarTextColorBtnDark : null,
-                      (myAvatar.textColor || '#fff') === '#fff'
+                      (avatarDraft.textColor || '#fff') === '#fff'
                         ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
                         : null,
                     ]}
@@ -1729,11 +1788,11 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                     <Text style={[styles.avatarTextColorLabel, isDark ? styles.avatarTextColorLabelDark : null]}>White</Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => setMyAvatar((prev) => ({ ...prev, textColor: '#111' }))}
+                    onPress={() => setAvatarDraft((prev) => ({ ...prev, textColor: '#111' }))}
                     style={[
                       styles.avatarTextColorBtn,
                       isDark ? styles.avatarTextColorBtnDark : null,
-                      (myAvatar.textColor || '#fff') === '#111'
+                      (avatarDraft.textColor || '#fff') === '#111'
                         ? (isDark ? styles.avatarTextColorBtnSelectedDark : styles.avatarTextColorBtnSelected)
                         : null,
                     ]}
@@ -1746,11 +1805,17 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
             <View style={styles.profileActionsRow}>
               <Pressable
-                style={({ pressed }) => [styles.toolBtn, isDark && styles.toolBtnDark, pressed && { opacity: 0.92 }]}
+                disabled={avatarSaving}
+                style={({ pressed }) => [
+                  styles.toolBtn,
+                  isDark && styles.toolBtnDark,
+                  avatarSaving ? { opacity: 0.5 } : null,
+                  pressed && !avatarSaving ? { opacity: 0.92 } : null,
+                ]}
                 onPress={async () => {
                   try {
                     setAvatarError(null);
-                    setPendingAvatarRemoveImage(false);
+                    setAvatarDraftRemoveImage(false);
                     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
                     if (!perm.granted) {
                       setAvatarError('Please allow photo library access to choose an avatar.');
@@ -1766,22 +1831,37 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                     if (result.canceled) return;
                     const uri = result.assets?.[0]?.uri;
                     if (!uri) return;
-                    setPendingAvatarImageUri(uri);
+                    setAvatarDraftImageUri(uri);
                   } catch (e: any) {
                     setAvatarError(e?.message || 'Could not pick image.');
                   }
                 }}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: avatarSaving }}
               >
                 <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Upload photo</Text>
               </Pressable>
 
+              {/*
+                Disable "Remove photo" when there's nothing to remove, and while saving to avoid
+                racey state changes during the upload/save pipeline.
+              */}
               <Pressable
-                style={({ pressed }) => [styles.toolBtn, isDark && styles.toolBtnDark, pressed && { opacity: 0.92 }]}
+                disabled={avatarSaving || (!avatarDraftImageUri && !avatarDraft.imageUri)}
+                style={({ pressed }) => [
+                  styles.toolBtn,
+                  isDark && styles.toolBtnDark,
+                  (avatarSaving || (!avatarDraftImageUri && !avatarDraft.imageUri)) ? { opacity: 0.5 } : null,
+                  pressed && !(avatarSaving || (!avatarDraftImageUri && !avatarDraft.imageUri)) ? { opacity: 0.92 } : null,
+                ]}
                 onPress={() => {
-                  setPendingAvatarImageUri(null);
-                  setPendingAvatarRemoveImage(true);
-                  setMyAvatar((prev) => ({ ...prev, imagePath: undefined, imageUri: undefined }));
+                  setAvatarDraftImageUri(null);
+                  setAvatarDraftRemoveImage(true);
+                  // Only change draft state; commit happens on Save.
+                  setAvatarDraft((prev) => ({ ...prev, imagePath: undefined, imageUri: undefined }));
                 }}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: avatarSaving || (!avatarDraftImageUri && !avatarDraft.imageUri) }}
               >
                 <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Remove photo</Text>
               </Pressable>
@@ -1797,15 +1877,16 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 ]}
                 onPress={async () => {
                   if (!myUserSub) return;
+                  avatarSavingRef.current = true;
                   setAvatarSaving(true);
                   setAvatarError(null);
                   try {
-                    let nextImagePath = myAvatar.imagePath;
+                    let nextImagePath = avatarDraft.imagePath;
 
-                    if (pendingAvatarImageUri) {
+                    if (avatarDraftImageUri) {
                       // Normalize to a square JPEG (256x256) after user crop.
                       const normalized = await ImageManipulator.manipulateAsync(
-                        pendingAvatarImageUri,
+                        avatarDraftImageUri,
                         [{ resize: { width: 256, height: 256 } }],
                         { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
                       );
@@ -1815,17 +1896,17 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                       const path = `uploads/global/avatars/${myUserSub}/${Date.now()}.jpg`;
                       await uploadData({ path, data: blob, options: { contentType: 'image/jpeg' } }).result;
                       nextImagePath = path;
-                      setPendingAvatarImageUri(null);
-                      setPendingAvatarRemoveImage(false);
+                      setAvatarDraftImageUri(null);
+                      setAvatarDraftRemoveImage(false);
                     }
 
                     const next = {
-                      bgColor: myAvatar.bgColor,
-                      textColor: myAvatar.textColor || '#fff',
+                      bgColor: avatarDraft.bgColor,
+                      textColor: avatarDraft.textColor || '#fff',
                       // IMPORTANT:
                       // - undefined => omit key => "no change" server-side
                       // - ''        => explicit clear (updateProfile.js removes avatarImagePath)
-                      imagePath: pendingAvatarRemoveImage ? '' : nextImagePath,
+                      imagePath: avatarDraftRemoveImage ? '' : nextImagePath,
                     };
 
                     // Update local state first so UI feels instant.
@@ -1835,6 +1916,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   } catch (e: any) {
                     setAvatarError(e?.message || 'Failed to save avatar.');
                   } finally {
+                    avatarSavingRef.current = false;
                     setAvatarSaving(false);
                   }
                 }}
@@ -1857,7 +1939,14 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   isDark ? styles.modalButtonDark : null,
                   pressed ? { opacity: 0.92 } : null,
                 ]}
-                onPress={() => setAvatarOpen(false)}
+                onPress={() => {
+                  if (avatarSavingRef.current) return;
+                  // Discard draft changes unless saved.
+                  setAvatarOpen(false);
+                  setAvatarDraft(myAvatar);
+                  setAvatarDraftImageUri(null);
+                  setAvatarDraftRemoveImage(false);
+                }}
                 disabled={avatarSaving}
               >
                 <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
@@ -1923,8 +2012,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 <Pressable
                   style={({ pressed }) => [
                     styles.modalButton,
-                    styles.modalButtonCta,
-                    isDark ? styles.modalButtonCtaDark : null,
+                    isDark ? styles.modalButtonDark : null,
                     pressed && { opacity: 0.9 },
                   ]}
                   onPress={async () => {
@@ -1934,7 +2022,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   accessibilityRole="button"
                   accessibilityLabel="Change recovery passphrase"
                 >
-                  <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>
+                  <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
                     Change Your Recovery Passphrase
                   </Text>
                 </Pressable>
@@ -1954,7 +2042,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 accessibilityLabel="Reset recovery"
               >
                 <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
-                  Reset Recovery - Old Messages Unrecoverable!
+                  Reset Recovery
                 </Text>
               </Pressable>
             </View>
@@ -2168,7 +2256,6 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
               style={[
                 styles.modalContent,
                 isDark ? styles.modalContentDark : null,
-                uiPrompt?.kind === 'choice3' && !isDark ? { backgroundColor: '#f2f2f7' } : null,
               ]}
             >
               <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
@@ -2324,6 +2411,10 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
                   Choose a new passphrase you’ll remember - we do not store it
                 </Text>
+              ) : passphrasePrompt?.mode === 'reset' ? (
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+                  Set a new recovery passphrase for your account - we do not store it
+                </Text>
               ) : null}
               <View style={styles.passphraseFieldWrapper}>
                 <TextInput
@@ -2365,7 +2456,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                 </Pressable>
               </View>
 
-              {passphrasePrompt?.mode === 'setup' || passphrasePrompt?.mode === 'change' ? (
+              {passphrasePrompt?.mode === 'setup' ||
+              passphrasePrompt?.mode === 'change' ||
+              passphrasePrompt?.mode === 'reset' ? (
                 <View style={styles.passphraseFieldWrapper}>
                   <TextInput
                     style={[
@@ -2423,14 +2516,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                     isDark ? styles.modalButtonCtaDark : null,
                     (processing ||
                       !passphraseInput.trim() ||
-                      ((passphrasePrompt?.mode === 'setup' || passphrasePrompt?.mode === 'change') &&
+                      ((passphrasePrompt?.mode === 'setup' ||
+                        passphrasePrompt?.mode === 'change' ||
+                        passphrasePrompt?.mode === 'reset') &&
                         !passphraseConfirmInput.trim())) && { opacity: 0.45 },
                   ]}
                   onPress={handlePromptSubmit}
                   disabled={
                     processing ||
                     !passphraseInput.trim() ||
-                    ((passphrasePrompt?.mode === 'setup' || passphrasePrompt?.mode === 'change') &&
+                    ((passphrasePrompt?.mode === 'setup' ||
+                      passphrasePrompt?.mode === 'change' ||
+                      passphrasePrompt?.mode === 'reset') &&
                       !passphraseConfirmInput.trim())
                   }
                   >
@@ -2441,6 +2538,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                             ? 'Decrypting'
                             : passphrasePrompt?.mode === 'change'
                               ? 'Updating backup'
+                              : passphrasePrompt?.mode === 'reset'
+                                ? 'Resetting recovery'
                               : 'Encrypting backup'}
                         </Text>
                         <AnimatedDots color="#fff" size={18} />
@@ -3408,6 +3507,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     height: 40,
+    // Light mode: make the entry field white.
+    backgroundColor: '#fff',
+    color: '#111',
   },
   searchInputDark: {
     backgroundColor: '#14141a',
@@ -3591,10 +3693,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 8,
-    backgroundColor: '#fff',
+    // Light mode: neutral buttons should be off-gray (modal backgrounds are white).
+    backgroundColor: '#f2f2f7',
     borderWidth: 1,
     // Neutral "tool button" style (avoid blue default buttons in light mode).
-    borderColor: '#ddd',
+    borderColor: '#e3e3e3',
   },
   modalButtonSmall: {
     paddingHorizontal: 12,
@@ -3657,8 +3760,8 @@ const styles = StyleSheet.create({
   chatsCard: {
     width: '92%',
     maxWidth: 520,
-    // Match the app's light-mode surface (avoid stark white).
-    backgroundColor: '#f2f2f7',
+    // Modals should be white in light mode.
+    backgroundColor: '#fff',
     borderRadius: 16,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -3672,8 +3775,8 @@ const styles = StyleSheet.create({
   profileCard: {
     width: '92%',
     maxWidth: 520,
-    // Match the app's light-mode surface (avoid stark white).
-    backgroundColor: '#f2f2f7',
+    // Modals should be white in light mode.
+    backgroundColor: '#fff',
     borderRadius: 16,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -3730,9 +3833,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 10,
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
+    borderColor: '#e3e3e3',
   },
   chatsCloseBtnDark: { backgroundColor: '#2a2a33', borderWidth: 0, borderColor: 'transparent' },
   chatsCloseText: { color: '#111', fontWeight: '800' },
@@ -3764,9 +3867,9 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 12,
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
+    borderColor: '#e3e3e3',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -3775,8 +3878,8 @@ const styles = StyleSheet.create({
   blocksCard: {
     width: '92%',
     maxWidth: 520,
-    // Match the app's light-mode surface (avoid stark white).
-    backgroundColor: '#f2f2f7',
+    // Modals should be white in light mode.
+    backgroundColor: '#fff',
     borderRadius: 16,
     padding: 12,
     borderWidth: StyleSheet.hairlineWidth,
@@ -3792,7 +3895,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#e3e3e3',
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     paddingHorizontal: 12,
     color: '#111',
   },
@@ -3801,9 +3904,9 @@ const styles = StyleSheet.create({
     height: 40,
     paddingHorizontal: 14,
     borderRadius: 12,
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
+    borderColor: '#e3e3e3',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -3831,9 +3934,9 @@ const styles = StyleSheet.create({
     width: 34,
     height: 34,
     borderRadius: 12,
-    backgroundColor: '#fff',
+    backgroundColor: '#f2f2f7',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
+    borderColor: '#e3e3e3',
     alignItems: 'center',
     justifyContent: 'center',
   },

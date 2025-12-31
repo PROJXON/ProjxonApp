@@ -60,15 +60,15 @@ export function HeaderMenuModal({
   const translateX = anim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
 
   // Match ChatScreen/GuestGlobalScreen surface colors.
-  const cardBg = isDark ? '#0b0b0f' : '#f2f2f7';
+  const cardBg = isDark ? '#0b0b0f' : '#fff';
   const border = isDark ? '#2a2a33' : '#e3e3e3';
   const divider = isDark ? '#2a2a33' : '#e9e9ee';
   const text = isDark ? '#fff' : '#111';
   const pressedBg = isDark ? '#1c1c22' : '#e9e9ee';
 
   // Match the app's "tool button" look (Summarize / AI Helper).
-  const btnBg = isDark ? '#2a2a33' : '#fff';
-  const btnBorder = isDark ? '#2a2a33' : '#ddd';
+  const btnBg = isDark ? '#2a2a33' : '#f2f2f7';
+  const btnBorder = isDark ? '#2a2a33' : '#e3e3e3';
   const btnBorderWidth = isDark ? 0 : StyleSheet.hairlineWidth;
 
   return (
