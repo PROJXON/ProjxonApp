@@ -85,8 +85,8 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
 
 - **POST `/ai/helper`** → `http/aiHelper.js`
   - **Auth**: JWT
-  - **Body**: `{ conversationId, peer?, instruction, messages: [{ user, text, createdAt }] }`
-  - **Returns**: `{ answer, suggestions: string[] }`
+  - **Body**: `{ conversationId, peer?, instruction, wantReplies?: boolean, messages: [{ user, text, createdAt }], thread?: [{ role: "user"|"assistant", text }], resetThread?: boolean, attachments?: [{ kind: "image"|"video", thumbKey, thumbUrl, fileName?, size?, user?, createdAt? }] }`
+  - **Returns**: `{ answer, suggestions: string[], thread: [{ role, text }] }`
 
 - **POST `/push/token`** → `http/registerPushToken.js`
   - **Auth**: JWT

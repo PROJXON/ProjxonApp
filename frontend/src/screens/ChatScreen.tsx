@@ -6,6 +6,8 @@ import {
   AppState,
   AppStateStatus,
   Easing,
+  findNodeHandle,
+  UIManager,
   useWindowDimensions,
   FlatList,
   Image,
@@ -449,6 +451,21 @@ export default function ChatScreen({
   const [helperLoading, setHelperLoading] = React.useState<boolean>(false);
   const [helperAnswer, setHelperAnswer] = React.useState<string>('');
   const [helperSuggestions, setHelperSuggestions] = React.useState<string[]>([]);
+  const [helperThread, setHelperThread] = React.useState<
+    Array<{ role: 'user' | 'assistant'; text: string; thinking?: boolean }>
+  >([]);
+  const [helperResetThread, setHelperResetThread] = React.useState<boolean>(false);
+  const [helperMode, setHelperMode] = React.useState<'ask' | 'reply'>('ask');
+  const helperScrollRef = React.useRef<ScrollView | null>(null);
+  const helperScrollViewportHRef = React.useRef<number>(0);
+  const helperScrollContentHRef = React.useRef<number>(0);
+  const helperScrollContentRef = React.useRef<View | null>(null);
+  const helperLastTurnRef = React.useRef<View | null>(null);
+  const helperAutoScrollRetryRef = React.useRef<{ timer: any; attempts: number }>({ timer: null, attempts: 0 });
+  // Drives deterministic scroll behavior.
+  // - 'thinking': always pin to bottom
+  // - 'answer': bottom unless answer bubble is taller than viewport (then show top of bubble)
+  const helperAutoScrollIntentRef = React.useRef<null | 'thinking' | 'answer'>(null);
   const [isUploading, setIsUploading] = React.useState(false);
   const [pendingMedia, setPendingMedia] = React.useState<{
     uri: string;
@@ -3397,9 +3414,8 @@ export default function ChatScreen({
   const openAiHelper = React.useCallback(() => {
     setHelperOpen(true);
     setHelperLoading(false);
-    setHelperAnswer('');
-    setHelperSuggestions([]);
     setHelperInstruction('');
+    // Keep helperThread so follow-up questions work across open/close.
   }, []);
 
   const submitAiHelper = React.useCallback(async () => {
@@ -3410,11 +3426,13 @@ export default function ChatScreen({
     if (helperLoading) return;
     const instruction = helperInstruction.trim();
     if (!instruction) {
-      openInfo('Ask a question', 'Type what you want help with first.');
+      openInfo('Ask a question', 'Type what you want help with first');
       return;
     }
 
     try {
+      // Clear the input immediately after submit (we still use `instruction` captured above).
+      setHelperInstruction('');
       setHelperLoading(true);
       setHelperAnswer('');
       setHelperSuggestions([]);
@@ -3423,13 +3441,94 @@ export default function ChatScreen({
       const idToken = tokens?.idToken?.toString();
       if (!idToken) throw new Error('Not authenticated');
 
+      // Capture the thread BEFORE we optimistically add the user's turn.
+      const threadBefore = helperThread;
+      const shouldResetThread = helperResetThread;
+      setHelperResetThread(false);
+      if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+      helperAutoScrollRetryRef.current.timer = null;
+      helperAutoScrollRetryRef.current.attempts = 0;
+      helperAutoScrollIntentRef.current = 'thinking';
+      setHelperThread((prev) => [...prev, { role: 'user', text: instruction }, { role: 'assistant', text: '', thinking: true }]);
+
       // messages[] is newest-first (FlatList inverted), so take the most recent 50 and send oldest-first.
-      const recent = messages.slice(0, 50).slice().reverse();
+      const recentNewestFirst = messages.slice(0, 50);
+      const recent = recentNewestFirst.slice().reverse();
+      const maxThumbs = 3;
+      const resolvedThumbUrlByKey: Record<string, string> = {};
+      const attachmentsForAi: Array<{
+        kind: 'image' | 'video';
+        thumbKey: string;
+        thumbUrl: string;
+        fileName?: string;
+        size?: number;
+        user?: string;
+        createdAt?: number;
+      }> = [];
+
+      // Collect up to N *most recent* attachment thumbnails (Global only).
+      // If the thumb URL isn't already in `mediaUrlByPath`, resolve it on-demand.
+      if (!isDm) {
+        for (const m of recentNewestFirst) {
+          if (attachmentsForAi.length >= maxThumbs) break;
+          if (m.encrypted) continue; // never send encrypted payloads to AI
+          const raw = m.decryptedText ?? (m.rawText ?? m.text);
+          const env = parseChatEnvelope(String(raw || ''));
+          const media = (env?.media ?? m.media) || null;
+          if (!media) continue;
+          if (!(media.kind === 'image' || media.kind === 'video')) continue;
+
+          const thumbKey = String(media.thumbPath || media.path || '');
+          if (!thumbKey) continue;
+
+          let thumbUrl = resolvedThumbUrlByKey[thumbKey] || mediaUrlByPath[thumbKey] || '';
+          if (!thumbUrl) {
+            try {
+              const { url } = await getUrl({ path: thumbKey });
+              thumbUrl = String(url || '');
+              if (thumbUrl) {
+                resolvedThumbUrlByKey[thumbKey] = thumbUrl;
+                // Keep the global cache warm for future UI and AI calls.
+                setMediaUrlByPath((prev) => ({ ...prev, [thumbKey]: thumbUrl }));
+              }
+            } catch {
+              // ignore URL resolution failures; AI will fall back to text-only description
+            }
+          }
+          if (!thumbUrl) continue;
+
+          attachmentsForAi.push({
+            kind: media.kind,
+            thumbKey,
+            thumbUrl,
+            fileName: media.fileName,
+            size: media.size,
+            user: m.user,
+            createdAt: m.createdAt,
+          });
+        }
+      }
+
       const transcript = recent
         .map((m) => {
           // Only send plaintext. If message is still encrypted, skip it.
           const raw = m.decryptedText ?? (m.encrypted ? '' : (m.rawText ?? m.text));
-          const text = raw.length > 500 ? `${raw.slice(0, 500)}…` : raw;
+          const env = !m.encrypted && !isDm ? parseChatEnvelope(raw) : null;
+          const media = (env?.media ?? m.media) || null;
+
+          // If the message includes media, add a better text description.
+          const mediaDesc = (() => {
+            if (!media) return '';
+            const kindLabel = media.kind === 'image' ? 'Image' : media.kind === 'video' ? 'Video' : 'File';
+            const name = media.fileName ? ` "${media.fileName}"` : '';
+            const size = typeof media.size === 'number' ? ` (${formatBytes(media.size)})` : '';
+            return `${kindLabel} attachment${name}${size}`;
+          })();
+
+          const rawText = String(raw || '');
+          const baseText = rawText.length ? rawText : mediaDesc;
+          const text = baseText.length > 500 ? `${baseText.slice(0, 500)}…` : baseText;
+
           return text
             ? {
                 user: m.user ?? 'anon',
@@ -3450,7 +3549,11 @@ export default function ChatScreen({
           conversationId: activeConversationId,
           peer: peer ?? null,
           instruction,
+          wantReplies: helperMode === 'reply',
           messages: transcript,
+          thread: threadBefore,
+          resetThread: shouldResetThread,
+          attachments: attachmentsForAi.slice(0, maxThumbs),
         }),
       });
 
@@ -3461,17 +3564,173 @@ export default function ChatScreen({
       const data = await resp.json().catch(() => ({}));
       const answer = String((data as any).answer ?? '').trim();
       const suggestions = Array.isArray((data as any).suggestions)
-        ? (data as any).suggestions.map((s: any) => String(s ?? '').trim()).filter(Boolean).slice(0, 6)
+        ? (data as any).suggestions.map((s: any) => String(s ?? '').trim()).filter(Boolean).slice(0, 3)
         : [];
 
       setHelperAnswer(answer);
       setHelperSuggestions(suggestions);
+      if (Array.isArray((data as any).thread)) {
+        helperLastTurnRef.current = null;
+        if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+        helperAutoScrollRetryRef.current.timer = null;
+        helperAutoScrollRetryRef.current.attempts = 0;
+        helperAutoScrollIntentRef.current = 'answer';
+        setHelperThread((data as any).thread);
+      } else if (answer) {
+        helperLastTurnRef.current = null;
+        if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+        helperAutoScrollRetryRef.current.timer = null;
+        helperAutoScrollRetryRef.current.attempts = 0;
+        helperAutoScrollIntentRef.current = 'answer';
+        setHelperThread((prev) => {
+          const next = prev.slice();
+          // Drop the trailing "thinking" placeholder if present.
+          if (next.length && next[next.length - 1]?.role === 'assistant' && (next[next.length - 1] as any)?.thinking) {
+            next.pop();
+          }
+          next.push({ role: 'assistant', text: answer });
+          return next;
+        });
+      }
     } catch (e: any) {
       openInfo('AI helper failed', e?.message ?? 'Unknown error');
     } finally {
       setHelperLoading(false);
     }
-  }, [API_URL, helperInstruction, messages, activeConversationId, peer, openInfo]);
+  }, [API_URL, helperInstruction, helperThread, helperResetThread, messages, activeConversationId, peer, openInfo]);
+
+  const resetAiHelperThread = React.useCallback(() => {
+    setHelperThread([]);
+    setHelperResetThread(true);
+    setHelperAnswer('');
+    setHelperSuggestions([]);
+    setHelperInstruction('');
+  }, []);
+
+  const autoScrollAiHelper = React.useCallback(() => {
+    if (!helperOpen) return;
+    if (!helperThread.length) return;
+    const viewportH = Math.max(0, Math.floor(helperScrollViewportHRef.current || 0));
+    const contentH = Math.max(0, Math.floor(helperScrollContentHRef.current || 0));
+
+    const intent = helperAutoScrollIntentRef.current;
+
+    // IMPORTANT:
+    // Only auto-scroll when we have an explicit intent ('thinking' or 'answer').
+    // The previous fallback behavior ("keep us near the end") was fighting the long-answer case:
+    // we'd scroll to the top of the newest AI bubble, then a later layout tick would scroll back to end.
+    if (!intent) return;
+
+    // Helper: retry shortly (layout/content size can lag on Android).
+    const scheduleRetry = () => {
+      if (helperAutoScrollRetryRef.current.attempts < 20) {
+        helperAutoScrollRetryRef.current.attempts += 1;
+        if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+        helperAutoScrollRetryRef.current.timer = setTimeout(() => autoScrollAiHelper(), 50);
+      }
+    };
+
+    // Desired behavior:
+    // - While Thinking…: always scroll to end.
+    // - When answer arrives: scroll to end unless the newest answer bubble is taller than the viewport,
+    //   in which case scroll to the top of that bubble.
+    // "All the way down" = bottom of scroll content.
+    const endY = viewportH > 0 ? Math.max(0, contentH - viewportH) : 0;
+
+    // THINKING: always pin to bottom.
+    // Use ScrollView.scrollToEnd when available (most reliable across platforms).
+    if (intent === 'thinking') {
+      const sv: any = helperScrollRef.current as any;
+      if (sv?.scrollToEnd) {
+        sv.scrollToEnd({ animated: true });
+        helperAutoScrollIntentRef.current = null;
+        if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+        helperAutoScrollRetryRef.current.timer = null;
+        helperAutoScrollRetryRef.current.attempts = 0;
+        return;
+      }
+      // Fallback: if we can't compute endY yet, retry.
+      if (viewportH <= 0 || contentH <= 0) {
+        scheduleRetry();
+        return;
+      }
+      helperScrollRef.current?.scrollTo({ y: endY, animated: true });
+      helperAutoScrollIntentRef.current = null;
+      if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+      helperAutoScrollRetryRef.current.timer = null;
+      helperAutoScrollRetryRef.current.attempts = 0;
+      return;
+    }
+
+    // Guard: if we don't yet have measurements, wait for the next layout/content-size callback.
+    if (viewportH <= 0 || contentH <= 0) {
+      scheduleRetry();
+      return;
+    }
+
+    // Measure the last bubble relative to the ScrollView content container, then decide:
+    // - If it fits: scroll to end
+    // - If it doesn't: scroll so the bubble's top is at the top of the viewport
+    const measureLastTurnAndScroll = () => {
+      const contentNode: any = helperScrollContentRef.current as any;
+      const lastNode: any = helperLastTurnRef.current as any;
+      if (!contentNode || !lastNode) return false;
+      try {
+        // On Android/Fabric, calling `ref.measureLayout(...)` is flaky depending on the ref instance type.
+        // Using UIManager.measureLayout with native node handles is much more reliable.
+        const contentHandle = findNodeHandle(contentNode);
+        const lastHandle = findNodeHandle(lastNode);
+        if (!contentHandle || !lastHandle) return false;
+        UIManager.measureLayout(
+          lastHandle,
+          contentHandle,
+          () => {
+            // measure failed; keep intent so we retry on next layout tick
+          },
+          (x: number, y: number, w: number, h: number) => {
+            const bubbleTopY = Math.max(0, Math.floor(y));
+            // "AI response" can include reply options below the assistant bubble.
+            // We want:
+            // - If the response area (from this bubble's top to the bottom of the ScrollView content)
+            //   does NOT fit in the viewport, start at the top of the bubble.
+            // - Otherwise, scroll to end so the whole response is visible at once.
+            const latestViewportH = Math.max(0, Math.floor(helperScrollViewportHRef.current || 0));
+            const latestContentH = Math.max(0, Math.floor(helperScrollContentHRef.current || 0));
+            const latestEndY = latestViewportH > 0 ? Math.max(0, latestContentH - latestViewportH) : 0;
+            const responseH = Math.max(0, Math.floor(latestContentH - bubbleTopY));
+            const targetY = responseH > latestViewportH ? bubbleTopY : latestEndY;
+            helperScrollRef.current?.scrollTo({ y: targetY, animated: true });
+            helperAutoScrollIntentRef.current = null;
+            if (helperAutoScrollRetryRef.current.timer) clearTimeout(helperAutoScrollRetryRef.current.timer);
+            helperAutoScrollRetryRef.current.timer = null;
+            helperAutoScrollRetryRef.current.attempts = 0;
+          }
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (intent === 'answer') {
+      const ok = measureLastTurnAndScroll();
+      if (!ok) {
+        scheduleRetry();
+      }
+      return;
+    }
+  }, [helperOpen, helperThread.length, helperLoading]);
+
+  React.useEffect(() => {
+    // When helper thread changes (thinking bubble added, answer arrives), attempt an auto-scroll.
+    // We also call this from layout/content-size callbacks for better accuracy.
+    const id = setTimeout(
+      () => autoScrollAiHelper(),
+      // Give layout a brief moment to catch up after the "thinking" placeholder is replaced by a long answer.
+      helperLoading ? 0 : 60
+    );
+    return () => clearTimeout(id);
+  }, [autoScrollAiHelper, helperThread.length, helperLoading]);
 
   return (
     <SafeAreaView
@@ -4583,43 +4842,90 @@ export default function ChatScreen({
           <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
             <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>AI Helper</Text>
 
-            <TextInput
-              value={helperInstruction}
-              onChangeText={setHelperInstruction}
-              placeholder="How do you want to respond to this message?"
-              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
-              style={[styles.helperInput, isDark ? styles.helperInputDark : null]}
-              editable={!helperLoading}
-              multiline
-            />
-            <Text style={[styles.helperHint, isDark ? styles.helperHintDark : null]}>
-              Tip: include the word “response” in your request if you want reply options.
-            </Text>
+            {(helperThread.length || helperAnswer.length || helperSuggestions.length) ? (
+              <ScrollView
+                ref={helperScrollRef}
+                style={styles.summaryScroll}
+                onLayout={(e) => {
+                  helperScrollViewportHRef.current = e.nativeEvent.layout.height;
+                  setTimeout(() => autoScrollAiHelper(), 0);
+                }}
+                onContentSizeChange={(_w, h) => {
+                  helperScrollContentHRef.current = h;
+                  setTimeout(() => autoScrollAiHelper(), 0);
+                }}
+              >
+                <View ref={helperScrollContentRef} collapsable={false}>
+                  {helperThread.length ? (
+                    <View style={styles.helperBlock}>
+                      <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Conversation</Text>
+                      <View style={{ gap: 8 }}>
+                      {(() => {
+                        // IMPORTANT: we want to measure/scroll to the latest *assistant* bubble,
+                        // not necessarily the last thread element (which can be a user turn).
+                        let lastAssistantIdx = -1;
+                        for (let i = helperThread.length - 1; i >= 0; i--) {
+                          if (helperThread[i]?.role === 'assistant') {
+                            lastAssistantIdx = i;
+                            break;
+                          }
+                        }
+                        return helperThread.map((t, idx) => (
+                        <View
+                          key={`turn:${idx}`}
+                          collapsable={false}
+                          ref={(r) => {
+                            if (idx === lastAssistantIdx) helperLastTurnRef.current = r;
+                          }}
+                          onLayout={(e) => {
+                            if (idx !== lastAssistantIdx) return;
+                            // Ensure we re-run scroll logic after the newest assistant bubble lays out.
+                            setTimeout(() => autoScrollAiHelper(), 0);
+                          }}
+                        >
+                          <View
+                            style={[
+                              styles.helperTurnBubble,
+                              t.role === 'user' ? styles.helperTurnBubbleUser : styles.helperTurnBubbleAssistant,
+                              isDark ? styles.helperTurnBubbleDark : null,
+                              isDark && t.role === 'user' ? styles.helperTurnBubbleUserDark : null,
+                              isDark && t.role === 'assistant' ? styles.helperTurnBubbleAssistantDark : null,
+                            ]}
+                          >
+                          <Text style={[styles.helperTurnLabel, isDark ? styles.summaryTextDark : null]}>
+                            {t.role === 'user' ? 'You' : 'AI'}
+                          </Text>
+                          {t.thinking ? (
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>Thinking</Text>
+                              <AnimatedDots color={isDark ? '#d7d7e0' : '#555'} size={18} />
+                            </View>
+                          ) : (
+                            <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>{t.text}</Text>
+                          )}
+                          </View>
+                        </View>
+                      ));
+                      })()}
+                      </View>
+                    </View>
+                  ) : null}
 
-            {helperLoading ? (
-              <View style={styles.summaryLoadingRow}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Text style={[styles.summaryLoadingText, isDark ? styles.summaryTextDark : null]}>
-                    Thinking
-                  </Text>
-                  <AnimatedDots color={isDark ? '#d7d7e0' : '#555'} size={18} />
-                </View>
-              </View>
-            ) : null}
+                {/*
+                  If we're showing the full helper conversation, the latest assistant message is already included there.
+                  Avoid duplicating it as a separate "Answer" section.
+                */}
+                  {!helperThread.length && helperAnswer.length ? (
+                    <View style={styles.helperBlock}>
+                      <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Answer</Text>
+                      <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>{helperAnswer}</Text>
+                    </View>
+                  ) : null}
 
-            {!helperLoading && (helperAnswer.length || helperSuggestions.length) ? (
-              <ScrollView style={styles.summaryScroll}>
-                {helperAnswer.length ? (
-                  <View style={styles.helperBlock}>
-                    <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Answer</Text>
-                    <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>{helperAnswer}</Text>
-                  </View>
-                ) : null}
-
-                {helperSuggestions.length ? (
-                  <View style={styles.helperBlock}>
-                    <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Reply options</Text>
-                    <View style={{ gap: 10 }}>
+                  {helperSuggestions.length ? (
+                    <View style={styles.helperBlock}>
+                      <Text style={[styles.helperSectionTitle, isDark ? styles.summaryTitleDark : null]}>Reply options</Text>
+                      <View style={{ gap: 10 }}>
                       {helperSuggestions.map((s, idx) => (
                         <View
                           key={`sugg:${idx}`}
@@ -4647,11 +4953,79 @@ export default function ChatScreen({
                           </View>
                         </View>
                       ))}
+                      </View>
                     </View>
-                  </View>
-                ) : null}
+                  ) : null}
+                </View>
               </ScrollView>
             ) : null}
+
+            <TextInput
+              value={helperInstruction}
+              onChangeText={setHelperInstruction}
+              placeholder={
+                helperThread.length || helperAnswer.length || helperSuggestions.length
+                  ? 'Ask a follow-up…'
+                  : 'How do you want to respond to this message?'
+              }
+              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+              style={[
+                styles.helperInput,
+                isDark ? styles.helperInputDark : null,
+                helperThread.length || helperAnswer.length || helperSuggestions.length ? styles.helperInputFollowUp : null,
+              ]}
+              editable={!helperLoading}
+              multiline
+            />
+            <View style={styles.helperModeRow}>
+              <View style={[styles.helperModeSegment, isDark ? styles.helperModeSegmentDark : null]}>
+                <Pressable
+                  style={[
+                    styles.helperModeBtn,
+                    helperMode === 'ask' ? styles.helperModeBtnActive : null,
+                    helperMode === 'ask' && isDark ? styles.helperModeBtnActiveDark : null,
+                  ]}
+                  onPress={() => setHelperMode('ask')}
+                  disabled={helperLoading}
+                >
+                  <Text
+                    style={[
+                      styles.helperModeBtnText,
+                      isDark ? styles.helperModeBtnTextDark : null,
+                      helperMode === 'ask' ? styles.helperModeBtnTextActive : null,
+                      helperMode === 'ask' && isDark ? styles.helperModeBtnTextActiveDark : null,
+                    ]}
+                  >
+                    Ask
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.helperModeBtn,
+                    helperMode === 'reply' ? styles.helperModeBtnActive : null,
+                    helperMode === 'reply' && isDark ? styles.helperModeBtnActiveDark : null,
+                  ]}
+                  onPress={() => setHelperMode('reply')}
+                  disabled={helperLoading}
+                >
+                  <Text
+                    style={[
+                      styles.helperModeBtnText,
+                      isDark ? styles.helperModeBtnTextDark : null,
+                      helperMode === 'reply' ? styles.helperModeBtnTextActive : null,
+                      helperMode === 'reply' && isDark ? styles.helperModeBtnTextActiveDark : null,
+                    ]}
+                  >
+                    Draft replies
+                  </Text>
+                </Pressable>
+              </View>
+              <Text style={[styles.helperHint, isDark ? styles.helperHintDark : null]}>
+                {helperMode === 'reply'
+                  ? 'Draft short, sendable replies based on the chat.'
+                  : 'Ask a question about the chat (no reply bubbles).'}
+              </Text>
+            </View>
 
             <View style={styles.summaryButtons}>
               <Pressable
@@ -4663,8 +5037,24 @@ export default function ChatScreen({
                 disabled={helperLoading}
                 onPress={submitAiHelper}
               >
+                {helperLoading ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Thinking</Text>
+                    <AnimatedDots color={isDark ? '#d7d7e0' : '#555'} size={18} />
+                  </View>
+                ) : (
+                  <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                    {helperMode === 'reply' ? 'Draft replies' : 'Ask'}
+                  </Text>
+                )}
+              </Pressable>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                disabled={helperLoading}
+                onPress={resetAiHelperThread}
+              >
                 <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
-                  Ask
+                  New thread
                 </Text>
               </Pressable>
               <Pressable
@@ -5799,15 +6189,75 @@ const styles = StyleSheet.create({
     backgroundColor: '#fafafa',
     color: '#111',
   },
+  helperInputFollowUp: {
+    marginTop: 10,
+  },
   helperInputDark: {
     borderColor: '#2a2a33',
     backgroundColor: '#1c1c22',
     color: '#fff',
   },
+  helperModeRow: { marginTop: 8 },
+  helperModeSegment: {
+    flexDirection: 'row',
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: '#e9e9ee',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+  },
+  helperModeSegmentDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  helperModeBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  helperModeBtnActive: {
+    backgroundColor: '#111',
+  },
+  helperModeBtnActiveDark: {
+    backgroundColor: '#ffffff',
+  },
+  helperModeBtnText: { fontWeight: '800', color: '#111' },
+  helperModeBtnTextDark: { color: '#fff' },
+  helperModeBtnTextActive: { color: '#fff' },
+  helperModeBtnTextActiveDark: { color: '#111' },
   helperHint: { marginTop: 8, fontSize: 12, color: '#666', fontWeight: '600' },
   helperHintDark: { color: '#a7a7b4' },
   helperBlock: { marginTop: 10 },
   helperSectionTitle: { fontSize: 13, fontWeight: '800', marginBottom: 6, color: '#111' },
+  helperTurnBubble: {
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#e1e1e6',
+  },
+  helperTurnBubbleUser: {
+    backgroundColor: '#f7f7fb',
+  },
+  helperTurnBubbleAssistant: {
+    backgroundColor: '#f0f0f5',
+  },
+  helperTurnBubbleDark: {
+    borderColor: '#2a2a33',
+  },
+  helperTurnBubbleUserDark: {
+    backgroundColor: '#1c1c22',
+  },
+  helperTurnBubbleAssistantDark: {
+    backgroundColor: '#14141a',
+  },
+  helperTurnLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    opacity: 0.8,
+    marginBottom: 6,
+  },
   helperSuggestionBubble: {
     borderRadius: 12,
     padding: 12,
