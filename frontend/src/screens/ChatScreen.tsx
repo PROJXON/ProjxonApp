@@ -448,6 +448,9 @@ export default function ChatScreen({
   const [summaryText, setSummaryText] = React.useState<string>('');
   const [summaryLoading, setSummaryLoading] = React.useState(false);
   const [helperOpen, setHelperOpen] = React.useState(false);
+  const [aiConsentOpen, setAiConsentOpen] = React.useState<boolean>(false);
+  const [aiConsentAction, setAiConsentAction] = React.useState<null | 'summary' | 'helper'>(null);
+  const [dmAiConsentGranted, setDmAiConsentGranted] = React.useState<boolean>(false);
   const [helperInstruction, setHelperInstruction] = React.useState<string>('');
   const [helperLoading, setHelperLoading] = React.useState<boolean>(false);
   const [helperAnswer, setHelperAnswer] = React.useState<string>('');
@@ -752,7 +755,7 @@ export default function ChatScreen({
         kind,
         contentType: guessContentTypeFromName(fileName) ?? (cap.mode === 'video' ? 'video/mp4' : 'image/jpeg'),
         fileName,
-        displayName: 'From camera',
+        displayName: 'From Camera',
         source: 'camera',
         size: undefined,
       });
@@ -3427,6 +3430,20 @@ export default function ChatScreen({
     // Keep helperThread so follow-up questions work across open/close.
   }, []);
 
+  const requestAiAction = React.useCallback(
+    (action: 'summary' | 'helper') => {
+      const needsConsent = isDm && !dmAiConsentGranted;
+      if (needsConsent) {
+        setAiConsentAction(action);
+        setAiConsentOpen(true);
+        return;
+      }
+      if (action === 'summary') void summarize();
+      else openAiHelper();
+    },
+    [dmAiConsentGranted, isDm, openAiHelper, summarize]
+  );
+
   const submitAiHelper = React.useCallback(async () => {
     if (!API_URL) {
       openInfo('AI not configured', 'API_URL is not configured.');
@@ -3758,7 +3775,7 @@ export default function ChatScreen({
             </Text>
             <Pressable
               style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
-              onPress={summarize}
+              onPress={() => requestAiAction('summary')}
             >
               <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
                 Summarize Chat
@@ -3771,7 +3788,7 @@ export default function ChatScreen({
             </Text>
             <Pressable
               style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
-              onPress={openAiHelper}
+              onPress={() => requestAiAction('helper')}
             >
               <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
                 AI Helper
@@ -4771,6 +4788,58 @@ export default function ChatScreen({
               >
                 <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
                   Close
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={aiConsentOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setAiConsentOpen(false);
+          setAiConsentAction(null);
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              Privacy Notice
+            </Text>
+            <ScrollView style={styles.summaryScroll}>
+              <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
+                This is an encrypted DM. Using AI Helper / Summarize will send message content (decrypted on-device) to a third-party AI provider to generate a response.
+              </Text>
+            </ScrollView>
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => {
+                  const action = aiConsentAction;
+                  setAiConsentOpen(false);
+                  setAiConsentAction(null);
+                  setDmAiConsentGranted(true);
+                  if (!action) return;
+                  if (action === 'summary') void summarize();
+                  else openAiHelper();
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Proceed
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => {
+                  setAiConsentOpen(false);
+                  setAiConsentAction(null);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Cancel
                 </Text>
               </Pressable>
             </View>
