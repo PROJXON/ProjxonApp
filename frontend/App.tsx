@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
+import * as SplashScreen from 'expo-splash-screen';
 import {
   ActivityIndicator,
   StyleSheet,
@@ -65,6 +66,12 @@ import {
 
 import 'react-native-get-random-values'
 import 'react-native-url-polyfill/auto'
+
+// Keep the native splash visible until we explicitly hide it (prevents a brief
+// "white screen + spinner" flash while JS bootstraps and we check auth session).
+SplashScreen.preventAutoHideAsync().catch(() => {
+  // ignore (can throw if called multiple times in dev)
+});
 
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2917,7 +2924,10 @@ export default function App(): React.JSX.Element {
   const [rootMode, setRootMode] = React.useState<'guest' | 'app'>('guest');
   const [authModalOpen, setAuthModalOpen] = React.useState<boolean>(false);
   const [uiTheme, setUiTheme] = React.useState<'light' | 'dark'>('light');
+  const [themeReady, setThemeReady] = React.useState<boolean>(false);
+  const [rootLayoutDone, setRootLayoutDone] = React.useState<boolean>(false);
   const isDark = uiTheme === 'dark';
+  const appReady = !booting && themeReady;
 
   // Keep the app portrait by default, but allow camera UI to temporarily unlock orientation.
   React.useEffect(() => {
@@ -2960,12 +2970,26 @@ export default function App(): React.JSX.Element {
         if (stored === 'dark' || stored === 'light') setUiTheme(stored);
       } catch {
         // ignore
+      } finally {
+        if (mounted) setThemeReady(true);
       }
     })();
     return () => {
       mounted = false;
     };
   }, []);
+
+  // Hide the native splash once we’re ready and the root view has laid out.
+  React.useEffect(() => {
+    if (!appReady || !rootLayoutDone) return;
+    (async () => {
+      try {
+        await SplashScreen.hideAsync();
+      } catch {
+        // ignore
+      }
+    })();
+  }, [appReady, rootLayoutDone]);
 
   // Re-read theme when opening the auth modal in case the user toggled it on the guest screen.
   React.useEffect(() => {
@@ -3190,6 +3214,7 @@ export default function App(): React.JSX.Element {
       <SafeAreaView
         style={[styles.container, styles.appSafe, isDark && styles.appSafeDark]}
         edges={['top']}
+        onLayout={() => setRootLayoutDone(true)}
       >
         <Authenticator.Provider>
           {booting ? (
