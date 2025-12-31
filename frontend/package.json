@@ -29,6 +29,7 @@
     "expo-document-picker": "~14.0.8",
     "expo-image-manipulator": "~14.0.8",
     "expo-image-picker": "~17.0.10",
+    "expo-media-library": "~18.2.1",
     "expo-notifications": "~0.32.15",
     "expo-screen-orientation": "~9.0.8",
     "expo-secure-store": "~15.0.7",

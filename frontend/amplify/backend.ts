@@ -2,6 +2,8 @@ import { defineBackend } from '@aws-amplify/backend';
 import { auth } from './auth/resource';
 import { storage } from './storage/resource';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { preSignUpUniqueUsername } from './functions/preSignUpUniqueUsername/resource';
 import { postConfirmationUpsertUser } from './functions/postConfirmationUpsertUser/resource';
 
@@ -46,3 +48,43 @@ backend.postConfirmationUpsertUser.resources.lambda.addToRolePolicy(
     resources: [usersTableArn],
   })
 );
+
+// ---- CloudFront CDN in front of Storage bucket (public media) ----
+// We serve public channel media + avatars via CloudFront for speed/caching.
+// DM media remains fetched via Amplify `getUrl()` for now (S3 presigned).
+const mediaBucket = backend.storage.resources.bucket;
+// IMPORTANT:
+// Put the Distribution in the *same* nested stack as the bucket to avoid
+// circular dependencies between nested stacks (CloudFront OAC adds a bucket policy).
+const cdnScope = mediaBucket.stack;
+const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(mediaBucket);
+const cdn = new cloudfront.Distribution(cdnScope, 'MediaCdn', {
+  defaultBehavior: {
+    origin: s3Origin,
+    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+    allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+    cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+  },
+  additionalBehaviors: {
+    // Public channel media (including thumbs)
+    '/uploads/channels/*': {
+      origin: s3Origin,
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
+    // Public avatars
+    '/uploads/public/*': {
+      origin: s3Origin,
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
+  },
+});
+
+backend.addOutput({
+  custom: {
+    cdnUrl: `https://${cdn.domainName}`,
+  },
+});
