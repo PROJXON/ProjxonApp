@@ -690,7 +690,7 @@ export default function GuestGlobalScreen({
                 </Pressable>
               ) : (
                 <Text style={{ color: isDark ? '#aaa' : '#666' }}>
-                  {messages.length === 0 ? 'Sign in to start the conversation' : 'No older messages'}
+                  {messages.length === 0 ? 'Sign in to Start the Conversation!' : 'No older messages'}
                 </Text>
               )}
             </View>
