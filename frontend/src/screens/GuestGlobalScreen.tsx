@@ -308,21 +308,6 @@ export default function GuestGlobalScreen({
     messagesRef.current = messages;
   }, [messages]);
 
-  const loadOlderHistory = React.useCallback(() => {
-    if (!API_URL) return;
-    if (!historyHasMore) return;
-    // Fire and forget; guarded by historyLoadingRef.
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    fetchHistoryPage({
-      // Use the oldest currently-rendered message as the cursor.
-      // This avoids stale `historyCursor` edge-cases (e.g., user taps "Load older" quickly).
-      before: messagesRef.current.length
-        ? messagesRef.current[messagesRef.current.length - 1].createdAt
-        : historyCursor,
-      reset: false,
-    });
-  }, [fetchHistoryPage, historyCursor, historyHasMore]);
-
   const resolvePathUrl = React.useCallback(
     async (path: string): Promise<string | null> => {
       if (!path) return null;
@@ -513,6 +498,21 @@ export default function GuestGlobalScreen({
     []
   );
 
+  const loadOlderHistory = React.useCallback(() => {
+    if (!API_URL) return;
+    if (!historyHasMore) return;
+    // Fire and forget; guarded by historyLoadingRef.
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetchHistoryPage({
+      // Use the oldest currently-rendered message as the cursor.
+      // This avoids stale `historyCursor` edge-cases (e.g., user taps "Load older" quickly).
+      before: messagesRef.current.length
+        ? messagesRef.current[messagesRef.current.length - 1].createdAt
+        : historyCursor,
+      reset: false,
+    });
+  }, [fetchHistoryPage, historyCursor, historyHasMore]);
+
   const refreshLatest = React.useCallback(async () => {
     if (!API_URL) return;
     if (historyLoadingRef.current) return;
@@ -689,7 +689,9 @@ export default function GuestGlobalScreen({
                   </Text>
                 </Pressable>
               ) : (
-                <Text style={{ color: isDark ? '#aaa' : '#666' }}>No older messages</Text>
+                <Text style={{ color: isDark ? '#aaa' : '#666' }}>
+                  {messages.length === 0 ? 'Sign in to Start the Conversation!' : 'No older messages'}
+                </Text>
               )}
             </View>
           ) : null
@@ -992,6 +994,7 @@ function GuestMessageRow({
             backgroundColor={avatarBgColor}
             textColor={avatarTextColor}
             imageUri={avatarImageUri}
+            imageBgColor={isDark ? '#1c1c22' : '#f2f2f7'}
           />
         </View>
       ) : null}
