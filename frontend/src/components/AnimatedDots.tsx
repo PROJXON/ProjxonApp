@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Animated, View } from 'react-native';
+import { Animated, Easing, View } from 'react-native';
 
 export function AnimatedDots({
   color,
@@ -14,49 +14,77 @@ export function AnimatedDots({
   staggerMs?: number;
   holdMs?: number;
 }): React.JSX.Element {
-  const dot1 = React.useRef(new Animated.Value(0)).current;
-  const dot2 = React.useRef(new Animated.Value(0)).current;
-  const dot3 = React.useRef(new Animated.Value(0)).current;
+  /**
+   * IMPORTANT:
+   * We intentionally avoid `Animated.stagger/sequence/delay` here because those often rely on JS-side
+   * scheduling even with `useNativeDriver: true`, which can "freeze" when the JS thread is busy doing
+   * crypto work. A single continuously-running native-driver animation + interpolations stays smooth.
+   */
+  const progress = React.useRef(new Animated.Value(0)).current;
 
   React.useEffect(() => {
-    const makeDotAnim = (v: Animated.Value) =>
-      Animated.sequence([
-        Animated.timing(v, {
-          toValue: 1,
-          duration: 250,
-          useNativeDriver: true,
-        }),
-        Animated.timing(v, {
-          toValue: 0,
-          duration: 250,
-          useNativeDriver: true,
-        }),
-      ]);
+    // Reset before each start so hot reloads don't "jump" mid-cycle.
+    progress.setValue(0);
+    const phaseMs = 500; // 250 in + 250 out
+    const activeMs = phaseMs + 2 * staggerMs;
+    const totalMs = activeMs + holdMs;
 
     const loop = Animated.loop(
-      Animated.sequence([
-        Animated.stagger(staggerMs, [makeDotAnim(dot1), makeDotAnim(dot2), makeDotAnim(dot3)]),
-        Animated.delay(holdMs),
-      ])
+      Animated.timing(progress, {
+        toValue: 1,
+        duration: totalMs,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+      { resetBeforeIteration: true }
     );
 
     loop.start();
-    return () => loop.stop();
-  }, [dot1, dot2, dot3, staggerMs, holdMs]);
+    return () => {
+      loop.stop();
+    };
+  }, [progress, staggerMs, holdMs]);
 
-  const dotStyle = (v: Animated.Value) => ({
-    opacity: v.interpolate({ inputRange: [0, 1], outputRange: [0.25, 1] }),
-  });
+  const baseOpacity = 0.25;
+  const phaseMs = 500;
+  const activeMs = phaseMs + 2 * staggerMs;
+  const totalMs = activeMs + holdMs;
+
+  const makeOpacity = (offsetMs: number) => {
+    const start = offsetMs / totalMs;
+    const mid = (offsetMs + phaseMs / 2) / totalMs;
+    const end = (offsetMs + phaseMs) / totalMs;
+    return progress.interpolate({
+      inputRange: [0, start, mid, end, 1],
+      outputRange: [baseOpacity, baseOpacity, 1, baseOpacity, baseOpacity],
+      extrapolate: 'clamp',
+    });
+  };
 
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <Animated.Text style={[{ color, fontSize: size, fontWeight: '900', lineHeight: size }, dotStyle(dot1)]}>
+      <Animated.Text
+        style={[
+          { color, fontSize: size, fontWeight: '900', lineHeight: size },
+          { opacity: makeOpacity(0) },
+        ]}
+      >
         {dot}
       </Animated.Text>
-      <Animated.Text style={[{ color, fontSize: size, fontWeight: '900', lineHeight: size }, dotStyle(dot2)]}>
+      <Animated.Text
+        style={[
+          { color, fontSize: size, fontWeight: '900', lineHeight: size },
+          { opacity: makeOpacity(staggerMs) },
+        ]}
+      >
         {dot}
       </Animated.Text>
-      <Animated.Text style={[{ color, fontSize: size, fontWeight: '900', lineHeight: size }, dotStyle(dot3)]}>
+      <Animated.Text
+        style={[
+          { color, fontSize: size, fontWeight: '900', lineHeight: size },
+          { opacity: makeOpacity(2 * staggerMs) },
+        ]}
+      >
         {dot}
       </Animated.Text>
     </View>

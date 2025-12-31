@@ -608,14 +608,18 @@ export default function ChatScreen({
   const latestOutgoingMessageId = React.useMemo(() => {
     const myLower = normalizeUser(displayName);
     for (const m of messages) {
+      // IMPORTANT:
+      // Use author identity (userSub) to determine outgoing vs incoming whenever possible.
+      // Recovery resets rotate our keypair; old encrypted messages should still be "outgoing"
+      // if they were sent by this account, even if we can no longer decrypt them.
+      const isOutgoingByUserSub =
+        !!myUserId && !!m.userSub && String(m.userSub) === String(myUserId);
       const isEncryptedOutgoing =
         !!m.encrypted && !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
       const isPlainOutgoing =
         !m.encrypted &&
-        (m.userSub && myUserId
-          ? m.userSub === myUserId
-          : normalizeUser(m.userLower ?? m.user ?? 'anon') === myLower);
-      if (isEncryptedOutgoing || isPlainOutgoing) return m.id;
+        (isOutgoingByUserSub ? true : normalizeUser(m.userLower ?? m.user ?? 'anon') === myLower);
+      if (isOutgoingByUserSub || isEncryptedOutgoing || isPlainOutgoing) return m.id;
     }
     return null;
   }, [messages, myPublicKey, myUserId, displayName, normalizeUser]);
@@ -2057,16 +2061,16 @@ export default function ChatScreen({
               // TTL-from-read for outgoing messages: start countdown for that specific message (if it has ttlSeconds).
               setMessages((prev) =>
                 prev.map((m) => {
+                  const isOutgoingByUserSub =
+                    !!myUserId && !!m.userSub && String(m.userSub) === String(myUserId);
                   const isEncryptedOutgoing =
                     !!m.encrypted &&
                     !!myPublicKeyRef.current &&
                     m.encrypted.senderPublicKey === myPublicKeyRef.current;
                   const isPlainOutgoing =
                     !m.encrypted &&
-                    (m.userSub && myUserId
-                      ? m.userSub === myUserId
-                      : normalizeUser(m.userLower ?? m.user ?? 'anon') === myUserLower);
-                  const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
+                    (isOutgoingByUserSub ? true : normalizeUser(m.userLower ?? m.user ?? 'anon') === myUserLower);
+                  const isOutgoing = isOutgoingByUserSub || isEncryptedOutgoing || isPlainOutgoing;
                   if (!isOutgoing) return m;
                   if (m.createdAt !== messageCreatedAt) return m;
                   if (m.expiresAt) return m;
@@ -3880,14 +3884,14 @@ export default function ChatScreen({
             const expiresIn =
               isDm && typeof item.expiresAt === 'number' ? item.expiresAt - nowSec : null;
 
+          const isOutgoingByUserSub =
+            !!myUserId && !!item.userSub && String(item.userSub) === String(myUserId);
           const isEncryptedOutgoing =
             !!item.encrypted && !!myPublicKey && item.encrypted.senderPublicKey === myPublicKey;
           const isPlainOutgoing =
             !item.encrypted &&
-            (item.userSub && myUserId
-              ? item.userSub === myUserId
-              : normalizeUser(item.userLower ?? item.user ?? 'anon') === normalizeUser(displayName));
-          const isOutgoing = isEncryptedOutgoing || isPlainOutgoing;
+            (isOutgoingByUserSub ? true : normalizeUser(item.userLower ?? item.user ?? 'anon') === normalizeUser(displayName));
+          const isOutgoing = isOutgoingByUserSub || isEncryptedOutgoing || isPlainOutgoing;
           const outgoingSeenLabel = isDm
             ? getSeenLabelFor(peerSeenAtByCreatedAt, item.createdAt)
             : null;
@@ -5025,7 +5029,7 @@ export default function ChatScreen({
               <Text style={[styles.helperHint, isDark ? styles.helperHintDark : null]}>
                 {helperMode === 'reply'
                   ? 'Draft short, sendable replies based on the chat.'
-                  : 'Ask a question about the chat (no reply bubbles).'}
+                  : 'Ask a question about the chat (no reply bubbles)'}
               </Text>
             </View>
 
@@ -5278,14 +5282,14 @@ export default function ChatScreen({
               {(() => {
                 const t = messageActionTarget;
                 if (!t) return null;
+                const isOutgoingByUserSub =
+                  !!myUserId && !!t.userSub && String(t.userSub) === String(myUserId);
                 const isEncryptedOutgoing =
                   !!t.encrypted && !!myPublicKey && t.encrypted.senderPublicKey === myPublicKey;
                 const isPlainOutgoing =
                   !t.encrypted &&
-                  (t.userSub && myUserId
-                    ? t.userSub === myUserId
-                    : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
-                const canEdit = isEncryptedOutgoing || isPlainOutgoing;
+                  (isOutgoingByUserSub ? true : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
+                const canEdit = isOutgoingByUserSub || isEncryptedOutgoing || isPlainOutgoing;
                 if (!canEdit) return null;
                 const hasMedia = (() => {
                   if (t.deletedAt) return false;
@@ -5374,14 +5378,14 @@ export default function ChatScreen({
               {(() => {
                 const t = messageActionTarget;
                 if (!t) return null;
+                const isOutgoingByUserSub =
+                  !!myUserId && !!t.userSub && String(t.userSub) === String(myUserId);
                 const isEncryptedOutgoing =
                   !!t.encrypted && !!myPublicKey && t.encrypted.senderPublicKey === myPublicKey;
                 const isPlainOutgoing =
                   !t.encrypted &&
-                  (t.userSub && myUserId
-                    ? t.userSub === myUserId
-                    : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
-                const canDeleteForEveryone = isEncryptedOutgoing || isPlainOutgoing;
+                  (isOutgoingByUserSub ? true : normalizeUser(t.userLower ?? t.user ?? 'anon') === normalizeUser(displayName));
+                const canDeleteForEveryone = isOutgoingByUserSub || isEncryptedOutgoing || isPlainOutgoing;
                 if (!canDeleteForEveryone) return null;
                 return (
                   <Pressable
