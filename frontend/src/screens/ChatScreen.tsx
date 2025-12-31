@@ -3855,7 +3855,9 @@ export default function ChatScreen({
                     </Text>
                   </Pressable>
                 ) : (
-                  <Text style={{ color: isDark ? '#aaa' : '#666' }}>No older messages</Text>
+                  <Text style={{ color: isDark ? '#aaa' : '#666' }}>
+                    {visibleMessages.length === 0 ? 'Start the conversation' : 'No older messages'}
+                  </Text>
                 )}
               </View>
             ) : null
