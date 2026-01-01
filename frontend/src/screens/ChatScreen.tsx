@@ -53,11 +53,11 @@ import { VideoView, useVideoPlayer } from 'expo-video';
 import { InAppCameraModal } from '../components/InAppCameraModal';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import { fromByteArray, toByteArray } from 'base64-js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
+import { getDmMediaSignedUrl } from '../utils/dmSignedUrl';
 
 function toCdnUrl(path: string): string {
   const base = (CDN_URL || '').trim();
@@ -847,10 +847,19 @@ export default function ChatScreen({
         } catch {
           // fall through
         }
-        const b64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        return toByteArray(b64);
+        const fsAny: any = require('expo-file-system');
+        const File = fsAny?.File;
+        if (!File) throw new Error('File API not available');
+        const f: any = new File(uri);
+        if (typeof f?.bytes === 'function') {
+          const bytes = await f.bytes();
+          return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        }
+        if (typeof f?.base64 === 'function') {
+          const b64 = await f.base64();
+          return toByteArray(String(b64 || ''));
+        }
+        throw new Error('File read API not available');
       };
 
       const declaredSize = typeof media.size === 'number' ? media.size : undefined;
@@ -971,10 +980,19 @@ export default function ChatScreen({
         } catch {
           // fall through
         }
-        const b64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        return toByteArray(b64);
+        const fsAny: any = require('expo-file-system');
+        const File = fsAny?.File;
+        if (!File) throw new Error('File API not available');
+        const f: any = new File(uri);
+        if (typeof f?.bytes === 'function') {
+          const bytes = await f.bytes();
+          return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        }
+        if (typeof f?.base64 === 'function') {
+          const b64 = await f.base64();
+          return toByteArray(String(b64 || ''));
+        }
+        throw new Error('File read API not available');
       };
 
       const declaredSize = typeof media.size === 'number' ? media.size : undefined;
@@ -1346,10 +1364,16 @@ export default function ChatScreen({
         const b64 = vm.url.slice(comma + 1);
         const isBase64 = /;base64/i.test(header);
         if (!isBase64) throw new Error('Unsupported data URI encoding');
-        const destUri = `${(FileSystem.cacheDirectory || FileSystem.documentDirectory || '')}${baseName}.${ext}`;
-        if (!destUri) throw new Error('No writable cache directory');
-        await FileSystem.writeAsStringAsync(destUri, b64, { encoding: FileSystem.EncodingType.Base64 });
-        await MediaLibrary.saveToLibraryAsync(destUri);
+        const fsAny: any = require('expo-file-system');
+        const Paths = fsAny?.Paths;
+        const File = fsAny?.File;
+        const root = (Paths?.cache || Paths?.document) as any;
+        if (!root) throw new Error('No writable cache directory');
+        if (!File) throw new Error('File API not available');
+        const dest = new File(root, `${baseName}.${ext}`);
+        if (typeof dest?.write !== 'function') throw new Error('File write API not available');
+        await dest.write(b64, { encoding: 'base64' });
+        await MediaLibrary.saveToLibraryAsync(dest.uri);
         showToast('Saved to your device.', 'success');
         return;
       }
@@ -1663,10 +1687,24 @@ export default function ChatScreen({
       const chatKey = buildDmMediaKey(msg);
       const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext); // 32 bytes
 
-      const { url } = await getUrl({ path: env.media.thumbPath });
-      const encResp = await fetch(url.toString());
+      const signedUrl = await getDmMediaSignedUrl(env.media.thumbPath, 300);
+      const encResp = await fetch(signedUrl);
+      if (!encResp.ok) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download failed (${encResp.status}): ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const respCt = String(encResp.headers.get('content-type') || '');
+      if (respCt.includes('text') || respCt.includes('xml') || respCt.includes('json') || respCt.includes('html')) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
+      }
       const encBytes = new Uint8Array(await encResp.arrayBuffer());
-      const plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
+      let plainThumbBytes: Uint8Array;
+      try {
+        plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
+      } catch {
+        throw new Error('DM decrypt failed (bad key or corrupted download)');
+      }
 
       const b64 = fromByteArray(plainThumbBytes);
       const ct =
@@ -1697,11 +1735,25 @@ export default function ChatScreen({
       const chatKey = buildDmMediaKey(msg);
       const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext);
 
-      const { url } = await getUrl({ path: env.media.path });
-      const encResp = await fetch(url.toString());
+      const signedUrl = await getDmMediaSignedUrl(env.media.path, 300);
+      const encResp = await fetch(signedUrl);
+      if (!encResp.ok) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download failed (${encResp.status}): ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const respCt = String(encResp.headers.get('content-type') || '');
+      if (respCt.includes('text') || respCt.includes('xml') || respCt.includes('json') || respCt.includes('html')) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
+      }
       const encBytes = new Uint8Array(await encResp.arrayBuffer());
       const fileIvBytes = hexToBytes(env.media.iv);
-      const plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
+      let plainBytes: Uint8Array;
+      try {
+        plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
+      } catch {
+        throw new Error('DM decrypt failed (bad key or corrupted download)');
+      }
 
       const ct = env.media.contentType || 'application/octet-stream';
       const ext =
@@ -1711,12 +1763,18 @@ export default function ChatScreen({
             ? ct.split('/')[1] || 'mp4'
             : 'bin';
       const fileNameSafe = (env.media.fileName || `dm-${Date.now()}`).replace(/[^\w.\-() ]+/g, '_');
-      const outUri = `${FileSystem.cacheDirectory}dm-${fileNameSafe}.${ext}`;
-      const b64 = fromByteArray(plainBytes);
-      await FileSystem.writeAsStringAsync(outUri, b64, { encoding: FileSystem.EncodingType.Base64 });
+      const fsAny: any = require('expo-file-system');
+      const Paths = fsAny?.Paths;
+      const File = fsAny?.File;
+      const root = (Paths?.cache || Paths?.document) as any;
+      if (!root) throw new Error('No writable cache directory');
+      if (!File) throw new Error('File API not available');
+      const outFile = new File(root, `dm-${fileNameSafe}.${ext}`);
+      if (typeof outFile?.write !== 'function') throw new Error('File write API not available');
+      await outFile.write(plainBytes);
 
-      setDmFileUriByPath((prev) => ({ ...prev, [cacheKey]: outUri }));
-      return outUri;
+      setDmFileUriByPath((prev) => ({ ...prev, [cacheKey]: outFile.uri }));
+      return outFile.uri;
     },
     [aesGcmDecryptBytes, buildDmMediaKey, dmFileUriByPath]
   );

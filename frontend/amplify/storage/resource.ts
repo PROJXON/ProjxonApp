@@ -24,10 +24,9 @@ export const storage = defineStorage({
     'uploads/public/*': [allow.authenticated.to(['read', 'write']), allow.guest.to(['read'])],
 
     // ---- DM chat (E2EE encrypted blobs) ----
-    // Keep these auth-only (includes nested keys like thumbs/).
-    // NOTE: for now the mobile app still uses Amplify `getUrl()` for DMs (S3 presigned URLs).
-    // Once the CloudFront signer service is added, we can remove direct read access here.
-    'uploads/dm/*': [allow.authenticated.to(['read', 'write'])],
+    // Keep these auth-only. Reads should happen via CloudFront signed URLs/cookies.
+    // (This prevents bypassing CloudFront by minting S3 presigned URLs.)
+    'uploads/dm/*': [allow.authenticated.to(['write'])],
   }),
 });
 
