@@ -3548,12 +3548,17 @@ const styles = StyleSheet.create({
     flex: 1,
     borderWidth: 1,
     borderColor: '#ccc',
-    borderRadius: 8,
+    borderRadius: 10,
     paddingHorizontal: 10,
-    height: 40,
+    // Keep compact, but make sure text/placeholder are vertically centered (esp. Android).
+    height: 36,
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     // Light mode: make the entry field white.
     backgroundColor: '#fff',
     color: '#111',
+    fontSize: 13,
+    lineHeight: 16,
   },
   searchInputDark: {
     backgroundColor: '#14141a',
@@ -3561,9 +3566,10 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   startDmBtn: {
-    height: 40,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    minHeight: 36,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#fff',
@@ -3577,15 +3583,17 @@ const styles = StyleSheet.create({
   startDmBtnText: {
     color: '#111',
     fontWeight: '700',
+    fontSize: 13,
     lineHeight: 16,
   },
   startDmBtnTextDark: {
     color: '#fff',
   },
   cancelBtn: {
-    height: 40,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    minHeight: 36,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: StyleSheet.hairlineWidth,
@@ -3599,6 +3607,7 @@ const styles = StyleSheet.create({
   cancelBtnText: {
     color: '#111',
     fontWeight: '700',
+    fontSize: 13,
     lineHeight: 16,
   },
   cancelBtnTextDark: {
