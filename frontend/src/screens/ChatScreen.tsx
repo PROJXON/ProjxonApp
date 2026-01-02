@@ -3957,7 +3957,7 @@ export default function ChatScreen({
               onPress={() => requestAiAction('summary')}
             >
               <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
-                Summarize Chat
+                Summarize
               </Text>
             </Pressable>
           </View>
@@ -4099,10 +4099,9 @@ export default function ChatScreen({
           const outgoingSeenLabel = isDm
             ? getSeenLabelFor(peerSeenAtByCreatedAt, item.createdAt)
             : null;
-          const incomingSeenLabel = isDm
-            ? getSeenLabelFor(mySeenAtByCreatedAt, item.createdAt)
-            : null;
-          const seenLabel = isOutgoing ? outgoingSeenLabel : incomingSeenLabel;
+          // Keep receipts lightweight: show "seen" only on outgoing messages.
+          // Incoming "you saw this" is redundant and adds clutter.
+          const seenLabel = isOutgoing ? outgoingSeenLabel : null;
 
           const envelope =
             !item.encrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;

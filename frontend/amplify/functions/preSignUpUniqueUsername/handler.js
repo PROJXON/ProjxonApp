@@ -16,9 +16,15 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 export const handler = async (event) => {
   const attrs = event.request?.userAttributes || {};
   const preferred = attrs.preferred_username;
+  const MAX_USERNAME_LEN = 21;
 
   if (!preferred) {
     throw new Error('Username (preferred_username) is required.');
+  }
+
+  // Enforce a reasonable username length (Cognito allows much longer).
+  if (String(preferred).length > MAX_USERNAME_LEN) {
+    throw new Error(`Username must be ${MAX_USERNAME_LEN} characters or fewer.`);
   }
 
   // Reject ANY whitespace

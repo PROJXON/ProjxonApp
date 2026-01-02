@@ -2724,6 +2724,7 @@ const LinkedSignUpFormFields = ({
   caret: { selectionColor: string; cursorColor?: string };
 }): React.JSX.Element => {
   const [showPassword, setShowPassword] = React.useState(false);
+  const MAX_USERNAME_LEN = 21;
 
   const formFields = (fields ?? []).map(({ name, type, ...field }: any) => {
     const errors = validationErrors ? getErrors(validationErrors?.[name]) : [];
@@ -2747,6 +2748,12 @@ const LinkedSignUpFormFields = ({
       <React.Fragment key={name}>
         <FieldComp
           {...field}
+          {...(name === 'preferred_username'
+            ? {
+                // Prevent ultra-long usernames; backend enforces too.
+                maxLength: MAX_USERNAME_LEN,
+              }
+            : null)}
           disabled={isPending}
           error={hasError}
           fieldStyle={fieldStyle}
