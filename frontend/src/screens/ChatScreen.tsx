@@ -3952,64 +3952,65 @@ export default function ChatScreen({
             <Text style={[styles.title, isDark ? styles.titleDark : null]} numberOfLines={1}>
               {peer ? `DM with ${peer}` : 'Global Chat'}
             </Text>
-            <Pressable
-              style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
-              onPress={() => requestAiAction('summary')}
-            >
-              <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
-                Summarize
-              </Text>
-            </Pressable>
-          </View>
-          <View style={styles.headerSubRow}>
-            <Text style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null]} numberOfLines={1}>
-              {`Welcome ${displayName}!`}
-            </Text>
-            <Pressable
-              style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
-              onPress={() => requestAiAction('helper')}
-            >
-              <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
-                AI Helper
-              </Text>
-            </Pressable>
-          </View>
-          {isDm ? (
-            <View style={styles.decryptRow}>
-              <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
-                Auto-Decrypt
-              </Text>
-              <Switch
-                value={autoDecrypt}
-                onValueChange={setAutoDecrypt}
-                disabled={!myPrivateKey}
-                  trackColor={{
-                    false: '#d1d1d6',
-                    true: '#d1d1d6',
-                  }}
-                thumbColor={isDark ? '#2a2a33' : '#ffffff'}
-                  ios_backgroundColor="#d1d1d6"
-              />
-            </View>
-          ) : null}
-          {isDm ? (
-            <View style={styles.decryptRow}>
-              <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>
-                Self-Destructing Messages
-              </Text>
+            <View style={styles.headerTools}>
               <Pressable
-                style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
-                onPress={() => {
-                  setTtlIdxDraft(ttlIdx);
-                  setTtlPickerOpen(true);
-                }}
+                style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
+                onPress={() => requestAiAction('summary')}
               >
-                <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
-                  {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
+                  Summarize
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.summarizeBtn, isDark ? styles.summarizeBtnDark : null]}
+                onPress={() => requestAiAction('helper')}
+              >
+                <Text style={[styles.summarizeBtnText, isDark ? styles.summarizeBtnTextDark : null]}>
+                  AI Helper
                 </Text>
               </Pressable>
             </View>
-          ) : null}
+          </View>
+          <View style={styles.headerSubRow}>
+            <Text
+              style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null, styles.welcomeTextFlex]}
+              numberOfLines={1}
+            >
+              {`Welcome ${displayName}!`}
+            </Text>
+            {isDm ? (
+              <View style={styles.dmHeaderControls}>
+                <View style={styles.dmHeaderControl}>
+                  <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>Decrypt</Text>
+                  <Switch
+                    value={autoDecrypt}
+                    onValueChange={setAutoDecrypt}
+                    disabled={!myPrivateKey}
+                    trackColor={{
+                      false: '#d1d1d6',
+                      true: '#d1d1d6',
+                    }}
+                    thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                    ios_backgroundColor="#d1d1d6"
+                  />
+                </View>
+                <View style={styles.dmHeaderControl}>
+                  <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>Self‑Destruct</Text>
+                  <Pressable
+                    style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
+                    onPress={() => {
+                      setTtlIdxDraft(ttlIdx);
+                      setTtlPickerOpen(true);
+                    }}
+                  >
+                    <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
+                      {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+          </View>
           {isConnecting ? (
             <View style={styles.statusRow}>
               <ActivityIndicator size="small" />
@@ -5883,7 +5884,7 @@ export default function ChatScreen({
               Self-Destructing Messages
             </Text>
             <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
-              Messages will disappear after the selected time from when they are sent.
+              Messages will disappear after the selected time from when they are sent
             </Text>
             <View style={{ height: 12 }} />
             {TTL_OPTIONS.map((opt, idx) => {
@@ -6055,6 +6056,7 @@ const styles = StyleSheet.create({
   titleDark: { color: '#fff' },
   welcomeText: { fontSize: 14, color: '#555', marginTop: 4, fontWeight: '700' },
   welcomeTextDark: { color: '#b7b7c2' },
+  welcomeTextFlex: { flexGrow: 1, flexShrink: 1, paddingRight: 10 },
   headerSubRow: {
     marginTop: 6,
     flexDirection: 'row',
@@ -6068,6 +6070,35 @@ const styles = StyleSheet.create({
   decryptRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
   decryptLabel: { fontSize: 12, color: '#555', fontWeight: '600' },
   decryptLabelDark: { color: '#b7b7c2' },
+  dmHeaderControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 12,
+    flexShrink: 0,
+    flexWrap: 'wrap',
+  },
+  dmHeaderControl: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dmSettingsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginTop: 8,
+    flexWrap: 'wrap',
+  },
+  dmSettingCell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    flexGrow: 1,
+    flexBasis: 220,
+  },
   ttlChip: {
     paddingHorizontal: 10,
     paddingVertical: 6,
