@@ -276,32 +276,30 @@ type ChatMessage = {
   deletedAt?: number; // epoch ms
   deletedBySub?: string;
   reactions?: Record<string, { count: number; userSubs: string[] }>;
-  media?: {
-    path: string;
-    thumbPath?: string;
-    kind: 'image' | 'video' | 'file';
-    contentType?: string;
-    thumbContentType?: string;
-    fileName?: string;
-    size?: number;
-  };
+  // Backward-compat: historically we supported only a single attachment per message.
+  // New messages can include multiple attachments; use `mediaList` when present.
+  media?: ChatMediaItem;
+  mediaList?: ChatMediaItem[];
   createdAt: number;
   // Local-only UI state for optimistic sends.
   localStatus?: 'sending' | 'sent' | 'failed';
 };
 
+type ChatMediaItem = {
+  path: string;
+  thumbPath?: string;
+  kind: 'image' | 'video' | 'file';
+  contentType?: string;
+  thumbContentType?: string;
+  fileName?: string;
+  size?: number;
+};
+
 type ChatEnvelope = {
   type: 'chat';
   text?: string;
-  media?: {
-    path: string;
-    thumbPath?: string;
-    kind: 'image' | 'video' | 'file';
-    contentType?: string;
-    thumbContentType?: string;
-    fileName?: string;
-    size?: number;
-  };
+  // Backward-compat: `media` may be a single object (v1) or an array (v2+).
+  media?: ChatMediaItem | ChatMediaItem[];
 };
 
 const ENCRYPTED_PLACEHOLDER = 'Encrypted message (tap to decrypt)';
@@ -327,20 +325,304 @@ type DmMediaEnvelopeV1 = {
   };
 };
 
-const parseDmMediaEnvelope = (raw: string): DmMediaEnvelopeV1 | null => {
+type DmMediaEnvelopeV2 = {
+  type: 'dm_media_v2';
+  v: 2;
+  caption?: string;
+  // Each item wraps its own per-attachment file key (Signal-style).
+  items: Array<{
+    media: DmMediaEnvelopeV1['media'];
+    wrap: DmMediaEnvelopeV1['wrap'];
+  }>;
+};
+
+type DmMediaEnvelope = DmMediaEnvelopeV1 | DmMediaEnvelopeV2;
+
+const parseDmMediaEnvelope = (raw: string): DmMediaEnvelope | null => {
   if (!raw) return null;
   try {
     const obj = JSON.parse(raw);
     if (!obj || typeof obj !== 'object') return null;
-    if (obj.type !== 'dm_media_v1' || obj.v !== 1) return null;
-    if (!obj.media || !obj.wrap) return null;
-    if (typeof obj.media.path !== 'string' || typeof obj.media.iv !== 'string') return null;
-    if (typeof obj.wrap.iv !== 'string' || typeof obj.wrap.ciphertext !== 'string') return null;
-    return obj as DmMediaEnvelopeV1;
+    if (obj.type === 'dm_media_v1' && obj.v === 1) {
+      if (!obj.media || !obj.wrap) return null;
+      if (typeof obj.media.path !== 'string' || typeof obj.media.iv !== 'string') return null;
+      if (typeof obj.wrap.iv !== 'string' || typeof obj.wrap.ciphertext !== 'string') return null;
+      return obj as DmMediaEnvelopeV1;
+    }
+    if (obj.type === 'dm_media_v2' && obj.v === 2) {
+      if (!Array.isArray(obj.items) || obj.items.length === 0) return null;
+      for (const it of obj.items) {
+        if (!it || typeof it !== 'object') return null;
+        const m = (it as any).media;
+        const w = (it as any).wrap;
+        if (!m || !w) return null;
+        if (typeof m.path !== 'string' || typeof m.iv !== 'string') return null;
+        if (typeof w.iv !== 'string' || typeof w.ciphertext !== 'string') return null;
+      }
+      return obj as DmMediaEnvelopeV2;
+    }
+    return null;
   } catch {
     return null;
   }
 };
+
+const normalizeChatMediaList = (raw: ChatEnvelope['media']): ChatMediaItem[] => {
+  if (!raw) return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  const out: ChatMediaItem[] = [];
+  for (const m of arr) {
+    if (!m || typeof m !== 'object') continue;
+    if (typeof (m as any).path !== 'string') continue;
+    const kind = (m as any).kind === 'video' ? 'video' : (m as any).kind === 'image' ? 'image' : 'file';
+    out.push({
+      path: String((m as any).path),
+      thumbPath: typeof (m as any).thumbPath === 'string' ? String((m as any).thumbPath) : undefined,
+      kind,
+      contentType: typeof (m as any).contentType === 'string' ? String((m as any).contentType) : undefined,
+      thumbContentType:
+        typeof (m as any).thumbContentType === 'string' ? String((m as any).thumbContentType) : undefined,
+      fileName: typeof (m as any).fileName === 'string' ? String((m as any).fileName) : undefined,
+      size: typeof (m as any).size === 'number' && Number.isFinite((m as any).size) ? (m as any).size : undefined,
+    });
+  }
+  return out;
+};
+
+const normalizeDmMediaItems = (
+  env: DmMediaEnvelope | null
+): Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }> => {
+  if (!env) return [];
+  if (env.type === 'dm_media_v1') return [{ media: env.media, wrap: env.wrap }];
+  return Array.isArray(env.items) ? env.items : [];
+};
+
+function MediaStackCarousel({
+  messageId,
+  mediaList,
+  width,
+  height,
+  isDm,
+  isDark,
+  isOutgoing,
+  mediaUrlByPath,
+  dmThumbUriByPath,
+  onOpen,
+}: {
+  messageId: string;
+  mediaList: ChatMediaItem[];
+  width: number;
+  height: number;
+  isDm: boolean;
+  isDark: boolean;
+  isOutgoing: boolean;
+  mediaUrlByPath: Record<string, string>;
+  dmThumbUriByPath: Record<string, string>;
+  onOpen: (idx: number, media: ChatMediaItem) => void;
+}): React.JSX.Element | null {
+  const n = mediaList.length;
+  const loopEnabled = n > 1;
+  const pages = React.useMemo(() => {
+    if (!loopEnabled) return mediaList;
+    const first = mediaList[0];
+    const last = mediaList[n - 1];
+    return [last, ...mediaList, first];
+  }, [loopEnabled, mediaList, n]);
+
+  const scrollRef = React.useRef<ScrollView | null>(null);
+  const [pageIdx, setPageIdx] = React.useState<number>(0); // 0..n-1
+  const pageIdxRef = React.useRef<number>(0);
+  React.useEffect(() => {
+    pageIdxRef.current = pageIdx;
+  }, [pageIdx]);
+
+  // When media changes, reset to the first "real" page.
+  React.useEffect(() => {
+    setPageIdx(0);
+    if (!loopEnabled) return;
+    // Defer to next tick so layout is ready.
+    setTimeout(() => {
+      try {
+        scrollRef.current?.scrollTo({ x: width, y: 0, animated: false });
+      } catch {
+        // ignore
+      }
+    }, 0);
+  }, [messageId, loopEnabled, width]);
+
+  const handleMomentumEnd = React.useCallback(
+    (e: any) => {
+      if (!loopEnabled) return;
+      const x = Number(e?.nativeEvent?.contentOffset?.x ?? 0);
+      const raw = Math.round(x / Math.max(1, width)); // 0..n+1
+      if (raw === 0) {
+        // Jump to last real page
+        try {
+          scrollRef.current?.scrollTo({ x: width * n, y: 0, animated: false });
+        } catch {}
+        setPageIdx(n - 1);
+      } else if (raw === n + 1) {
+        // Jump to first real page
+        try {
+          scrollRef.current?.scrollTo({ x: width, y: 0, animated: false });
+        } catch {}
+        setPageIdx(0);
+      } else {
+        setPageIdx(Math.max(0, Math.min(n - 1, raw - 1)));
+      }
+    },
+    [loopEnabled, n, width]
+  );
+
+  const handleScroll = React.useCallback(
+    (e: any) => {
+      if (!loopEnabled) return;
+      const x = Number(e?.nativeEvent?.contentOffset?.x ?? 0);
+      const raw = Math.round(x / Math.max(1, width)); // 0..n+1
+      const nextIdx =
+        raw === 0 ? n - 1 : raw === n + 1 ? 0 : Math.max(0, Math.min(n - 1, raw - 1));
+      if (nextIdx !== pageIdxRef.current) setPageIdx(nextIdx);
+    },
+    [loopEnabled, n, width]
+  );
+
+  const goTo = React.useCallback(
+    (idx: number) => {
+      if (!loopEnabled) return;
+      const safe = Math.max(0, Math.min(n - 1, idx));
+      setPageIdx(safe);
+      try {
+        scrollRef.current?.scrollTo({ x: width * (safe + 1), y: 0, animated: true });
+      } catch {
+        // ignore
+      }
+    },
+    [loopEnabled, n, width]
+  );
+
+  if (!n) return null;
+
+  return (
+    <View style={{ width }}>
+      {/* Stacked-card hint behind the top attachment */}
+      {n > 1 ? (
+        <>
+          <View style={[styles.mediaStackCard, { width, height, top: 10, left: 10 }]} />
+          <View style={[styles.mediaStackCard, { width, height, top: 5, left: 5 }]} />
+        </>
+      ) : null}
+
+      <ScrollView
+        ref={(r) => {
+          scrollRef.current = r;
+        }}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        snapToInterval={width}
+        decelerationRate="fast"
+        style={{ width, height }}
+        scrollEventThrottle={16}
+        onScroll={handleScroll}
+        onMomentumScrollEnd={handleMomentumEnd}
+      >
+        {pages.map((m2, idx2) => {
+          const looksImage = m2.kind === 'image' || (m2.kind === 'file' && (m2.contentType || '').startsWith('image/'));
+          const looksVideo = m2.kind === 'video' || (m2.kind === 'file' && (m2.contentType || '').startsWith('video/'));
+          const thumbKey = String(m2.thumbPath || m2.path || '');
+          const thumbUri = isDm
+            ? (m2.thumbPath ? dmThumbUriByPath[m2.thumbPath] : null)
+            : (thumbKey ? mediaUrlByPath[thumbKey] : null);
+
+          // Map extended pages → real index.
+          const realIndex = !loopEnabled
+            ? idx2
+            : idx2 === 0
+              ? n - 1
+              : idx2 === n + 1
+                ? 0
+                : idx2 - 1;
+
+          const onPress = () => onOpen(realIndex, mediaList[realIndex]);
+
+          return (
+            <Pressable
+              key={`page:${messageId}:${m2.path}:${idx2}`}
+              onPress={onPress}
+              style={{ width, height }}
+              accessibilityRole="button"
+              accessibilityLabel="Open attachment"
+            >
+              {thumbUri && (looksImage || looksVideo) ? (
+                looksImage ? (
+                  <Image source={{ uri: thumbUri }} style={[styles.mediaCappedImage, { width, height }]} resizeMode="contain" />
+                ) : (
+                  <View style={[styles.videoThumbWrap, { width, height }]}>
+                    <Image source={{ uri: thumbUri }} style={styles.mediaFill} resizeMode="cover" />
+                    <View style={styles.videoPlayOverlay}>
+                      <Text style={styles.videoPlayText}>▶</Text>
+                    </View>
+                  </View>
+                )
+              ) : looksImage || looksVideo ? (
+                <View style={[styles.imageThumbWrap, { width, height, justifyContent: 'center', alignItems: 'center' }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Text
+                      style={{
+                        color: isOutgoing ? 'rgba(255,255,255,0.9)' : isDark ? '#b7b7c2' : '#555',
+                        fontWeight: '700',
+                        fontSize: 14,
+                      }}
+                    >
+                      Loading
+                    </Text>
+                    <AnimatedDots color={isOutgoing ? 'rgba(255,255,255,0.9)' : isDark ? '#b7b7c2' : '#555'} size={16} />
+                  </View>
+                </View>
+              ) : (
+                <View style={[styles.imageThumbWrap, { width, height, justifyContent: 'center', alignItems: 'center' }]}>
+                  <Text style={styles.attachmentLink}>
+                    {`Attachment: ${m2.kind}${m2.fileName ? ` · ${m2.fileName}` : ''}`}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
+      {/* Count badge overlay (always visible for multi) */}
+      {n > 1 ? (
+        <View style={styles.mediaCountBadge}>
+          <Text style={styles.mediaCountBadgeText}>{`${pageIdx + 1}/${n}`}</Text>
+        </View>
+      ) : null}
+
+      {/* Dots overlay (tap-able) */}
+      {n > 1 ? (
+        <View style={styles.mediaDotsOverlay} pointerEvents="box-none">
+          <View style={styles.mediaDotsRow}>
+            {mediaList.map((_, i) => {
+              const active = i === pageIdx;
+              return (
+                <Pressable
+                  key={`dot:${messageId}:${i}`}
+                  onPress={() => goTo(i)}
+                  hitSlop={10}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Attachment ${i + 1} of ${n}`}
+                  style={({ pressed }) => [pressed ? { opacity: 0.85 } : null]}
+                >
+                  <View style={[styles.mediaDot, active ? styles.mediaDotActive : null]} />
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 const parseChatEnvelope = (raw: string): ChatEnvelope | null => {
   if (!raw) return null;
@@ -389,6 +671,7 @@ const guessContentTypeFromName = (name?: string): string | undefined => {
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
 const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25MB (GIFs/documents)
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const THUMB_MAX_DIM = 720; // px
 const THUMB_JPEG_QUALITY = 0.85; // preview-only; original stays untouched
 const HISTORY_PAGE_SIZE = 50;
@@ -535,16 +818,8 @@ export default function ChatScreen({
   >([]);
   const [helperResetThread, setHelperResetThread] = React.useState<boolean>(false);
 
-  // Enable LayoutAnimation for Android (for collapsing DM settings row).
-  React.useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (UIManager as any)?.setLayoutAnimationEnabledExperimental?.(true);
-    } catch {
-      // ignore
-    }
-  }, []);
+  // NOTE: We intentionally do NOT call `UIManager.setLayoutAnimationEnabledExperimental` here.
+  // In React Native New Architecture (Fabric), it's a no-op and spams Metro warnings.
 
   // Persist DM settings visibility per-device, per-account.
   React.useEffect(() => {
@@ -642,7 +917,7 @@ export default function ChatScreen({
   // - 'answer': bottom unless answer bubble is taller than viewport (then show top of bubble)
   const helperAutoScrollIntentRef = React.useRef<null | 'thinking' | 'answer'>(null);
   const [isUploading, setIsUploading] = React.useState(false);
-  const [pendingMedia, setPendingMedia] = React.useState<{
+  type PendingMediaItem = {
     uri: string;
     kind: 'image' | 'video' | 'file';
     contentType?: string;
@@ -651,8 +926,9 @@ export default function ChatScreen({
     displayName?: string;
     source?: 'camera' | 'library' | 'file';
     size?: number;
-  } | null>(null);
-  const pendingMediaRef = React.useRef<typeof pendingMedia>(null);
+  };
+  const [pendingMedia, setPendingMedia] = React.useState<PendingMediaItem[]>([]);
+  const pendingMediaRef = React.useRef<PendingMediaItem[]>([]);
   const [mediaUrlByPath, setMediaUrlByPath] = React.useState<Record<string, string>>({});
   const inFlightMediaUrlRef = React.useRef<Set<string>>(new Set());
   const [avatarUrlByPath, setAvatarUrlByPath] = React.useState<Record<string, string>>({});
@@ -678,11 +954,20 @@ export default function ChatScreen({
   >({});
   const inFlightAvatarProfileRef = React.useRef<Set<string>>(new Set());
   const [viewerOpen, setViewerOpen] = React.useState(false);
-  const [viewerMedia, setViewerMedia] = React.useState<{
-    url: string;
-    kind: 'image' | 'video' | 'file';
-    fileName?: string;
-  } | null>(null);
+  const [viewerState, setViewerState] = React.useState<
+    | null
+    | {
+        mode: 'global' | 'dm';
+        title?: string;
+        index: number;
+        globalItems?: Array<{ url: string; kind: 'image' | 'video' | 'file'; fileName?: string }>;
+        dmMsg?: ChatMessage;
+        dmItems?: Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }>;
+      }
+  >(null);
+  const [dmThumbUriByPath, setDmThumbUriByPath] = React.useState<Record<string, string>>({});
+  const [dmFileUriByPath, setDmFileUriByPath] = React.useState<Record<string, string>>({});
+  const inFlightDmViewerDecryptRef = React.useRef<Set<string>>(new Set());
   const [viewerSaving, setViewerSaving] = React.useState<boolean>(false);
   const [viewerChromeVisible, setViewerChromeVisible] = React.useState<boolean>(true);
   const viewerChromeHideTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -940,20 +1225,30 @@ export default function ChatScreen({
         const pending = await ImagePicker.getPendingResultAsync();
         if (cancelled) return;
         if (!pending || (pending as any).canceled) return;
-        const first = (pending as any).assets?.[0];
-        if (!first) return;
-        const kind =
-          first.type === 'video' ? 'video' : first.type === 'image' ? 'image' : 'file';
-        const fileName = (first as any).fileName as string | undefined;
-        const size = (first as any).fileSize as number | undefined;
-        setPendingMedia({
-          uri: first.uri,
-          kind,
-          contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
-          fileName,
-          displayName: fileName,
-          source: 'library',
-          size,
+        const assets = Array.isArray((pending as any).assets) ? (pending as any).assets : [];
+        if (!assets.length) return;
+        const items: PendingMediaItem[] = assets
+          .map((a: any) => {
+            if (!a?.uri) return null;
+            const kind = a.type === 'video' ? 'video' : a.type === 'image' ? 'image' : 'file';
+            const fileName = a.fileName as string | undefined;
+            const size = a.fileSize as number | undefined;
+            return {
+              uri: String(a.uri),
+              kind,
+              contentType: a.mimeType ?? guessContentTypeFromName(fileName),
+              fileName,
+              displayName: fileName,
+              source: 'library' as const,
+              size,
+            } satisfies PendingMediaItem;
+          })
+          .filter(Boolean) as PendingMediaItem[];
+        if (!items.length) return;
+        setPendingMedia((prev) => {
+          const next = inlineEditAttachmentMode === 'replace' ? items : [...prev, ...items];
+          pendingMediaRef.current = next;
+          return next;
         });
       } catch {
         // ignore
@@ -962,7 +1257,7 @@ export default function ChatScreen({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [inlineEditAttachmentMode]);
 
   const showAlert = React.useCallback(
     (title: string, message: string) => {
@@ -977,6 +1272,33 @@ export default function ChatScreen({
       Alert.alert(title, message);
     },
     [promptAlert]
+  );
+
+  const addPendingMediaItems = React.useCallback(
+    (items: PendingMediaItem[]) => {
+      const incoming = Array.isArray(items) ? items : [];
+      if (!incoming.length) return;
+      setPendingMedia((prev) => {
+        const base = inlineEditAttachmentMode === 'replace' ? [] : prev;
+        const remaining = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - base.length);
+        if (remaining <= 0) {
+          showAlert('Attachment limit', `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} items per message.`);
+          pendingMediaRef.current = base;
+          return base;
+        }
+        const toAdd = incoming.slice(0, remaining);
+        if (incoming.length > remaining) {
+          showAlert(
+            'Attachment limit',
+            `Only the first ${remaining} item${remaining === 1 ? '' : 's'} were added (limit ${MAX_ATTACHMENTS_PER_MESSAGE})`
+          );
+        }
+        const next = [...base, ...toAdd];
+        pendingMediaRef.current = next;
+        return next;
+      });
+    },
+    [inlineEditAttachmentMode, showAlert]
   );
 
   const pickFromLibrary = React.useCallback(async () => {
@@ -994,35 +1316,46 @@ export default function ChatScreen({
       const result = await ImagePicker.launchImageLibraryAsync({
         // Use the string union to stay compatible across expo-image-picker typings.
         mediaTypes: ['images', 'videos'] as any,
+        allowsMultipleSelection: true,
         quality: 1,
       });
 
       if (result.canceled) return;
-      const first = result.assets?.[0];
-      if (!first) return;
-
-      const kind =
-        first.type === 'video'
-          ? 'video'
-          : first.type === 'image'
-            ? 'image'
-            : 'file';
-      const fileName = (first as any).fileName as string | undefined;
-      const size = (first as any).fileSize as number | undefined;
-
-      setPendingMedia({
-        uri: first.uri,
-        kind,
-        contentType: (first as any).mimeType ?? guessContentTypeFromName(fileName),
-        fileName,
-        displayName: fileName,
-        source: 'library',
-        size,
-      });
+      const assets = Array.isArray(result.assets) ? result.assets : [];
+      if (!assets.length) return;
+      const items: PendingMediaItem[] = assets
+        .map((a: any) => {
+          if (!a?.uri) return null;
+          const kind = a.type === 'video' ? 'video' : a.type === 'image' ? 'image' : 'file';
+          const fileName = a.fileName as string | undefined;
+          const size = a.fileSize as number | undefined;
+          return {
+            uri: String(a.uri),
+            kind,
+            contentType: a.mimeType ?? guessContentTypeFromName(fileName),
+            fileName,
+            displayName: fileName,
+            source: 'library' as const,
+            size,
+          } satisfies PendingMediaItem;
+        })
+        .filter(Boolean) as PendingMediaItem[];
+      if (!items.length) return;
+      if (inlineEditAttachmentMode === 'replace') {
+        // Replace mode should still respect the max.
+        const capped = items.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+        setPendingMedia(capped);
+        pendingMediaRef.current = capped;
+        if (items.length > capped.length) {
+          showAlert('Attachment limit', `Only ${MAX_ATTACHMENTS_PER_MESSAGE} items allowed per message.`);
+        }
+      } else {
+        addPendingMediaItems(items);
+      }
     } catch (e: any) {
       showAlert('Picker failed', e?.message ?? 'Unknown error');
     }
-  }, [showAlert]);
+  }, [showAlert, inlineEditAttachmentMode, addPendingMediaItems]);
 
   const openCamera = React.useCallback(() => {
     setCameraOpen(true);
@@ -1034,7 +1367,7 @@ export default function ChatScreen({
       // Camera URIs can contain extremely long auto-generated filenames.
       // Use a short, stable filename for uploads, and a friendly UI label.
       const fileName = cap.mode === 'video' ? `camera-${Date.now()}.mp4` : `camera-${Date.now()}.jpg`;
-      setPendingMedia({
+      const item: PendingMediaItem = {
         uri: cap.uri,
         kind,
         contentType: guessContentTypeFromName(fileName) ?? (cap.mode === 'video' ? 'video/mp4' : 'image/jpeg'),
@@ -1042,9 +1375,15 @@ export default function ChatScreen({
         displayName: 'From Camera',
         source: 'camera',
         size: undefined,
-      });
+      };
+      if (inlineEditAttachmentMode === 'replace') {
+        setPendingMedia([item]);
+        pendingMediaRef.current = [item];
+      } else {
+        addPendingMediaItems([item]);
+      }
     },
-    []
+    [inlineEditAttachmentMode, addPendingMediaItems]
   );
 
   const pickDocument = React.useCallback(async () => {
@@ -1052,31 +1391,46 @@ export default function ChatScreen({
       const result = await DocumentPicker.getDocumentAsync({
         type: '*/*',
         copyToCacheDirectory: true,
-        multiple: false,
+        multiple: true,
       });
       if (result.canceled) return;
-      const first = result.assets?.[0];
-      if (!first) return;
-
-      const fileName = first.name;
-      const contentType = first.mimeType ?? guessContentTypeFromName(fileName);
-      setPendingMedia({
-        uri: first.uri,
-        kind: contentType?.startsWith('image/')
-          ? 'image'
-          : contentType?.startsWith('video/')
-            ? 'video'
-            : 'file',
-        contentType,
-        fileName,
-        displayName: fileName,
-        source: 'file',
-        size: typeof first.size === 'number' ? first.size : undefined,
-      });
+      const assets = Array.isArray(result.assets) ? result.assets : [];
+      if (!assets.length) return;
+      const items: PendingMediaItem[] = assets
+        .map((a: any) => {
+          if (!a?.uri) return null;
+          const fileName = a.name as string | undefined;
+          const contentType = a.mimeType ?? guessContentTypeFromName(fileName);
+          return {
+            uri: String(a.uri),
+            kind: contentType?.startsWith('image/')
+              ? 'image'
+              : contentType?.startsWith('video/')
+                ? 'video'
+                : 'file',
+            contentType,
+            fileName,
+            displayName: fileName,
+            source: 'file' as const,
+            size: typeof a.size === 'number' ? a.size : undefined,
+          } satisfies PendingMediaItem;
+        })
+        .filter(Boolean) as PendingMediaItem[];
+      if (!items.length) return;
+      if (inlineEditAttachmentMode === 'replace') {
+        const capped = items.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+        setPendingMedia(capped);
+        pendingMediaRef.current = capped;
+        if (items.length > capped.length) {
+          showAlert('Attachment limit', `Only ${MAX_ATTACHMENTS_PER_MESSAGE} items allowed per message.`);
+        }
+      } else {
+        addPendingMediaItems(items);
+      }
     } catch (e: any) {
       showAlert('File picker failed', e?.message ?? 'Unknown error');
     }
-  }, [showAlert]);
+  }, [showAlert, inlineEditAttachmentMode, addPendingMediaItems]);
 
   // Attachments: Global = plaintext S3; DM = E2EE (client-side encryption before upload)
   const handlePickMedia = React.useCallback(() => {
@@ -1095,8 +1449,8 @@ export default function ChatScreen({
 
   const uploadPendingMedia = React.useCallback(
     async (
-      media: NonNullable<typeof pendingMedia>
-    ): Promise<ChatEnvelope['media']> => {
+      media: PendingMediaItem
+    ): Promise<ChatMediaItem> => {
       const readUriBytes = async (uri: string): Promise<Uint8Array> => {
         // Prefer fetch(...).arrayBuffer() (works for http(s) and often for file://),
         // fallback to FileSystem Base64 read for cases where Blob/arrayBuffer is missing.
@@ -1220,15 +1574,16 @@ export default function ChatScreen({
         size: media.size,
       };
     },
-    [pendingMedia, activeConversationId]
+    [activeConversationId]
   );
 
   const uploadPendingMediaDmEncrypted = React.useCallback(
     async (
-      media: NonNullable<typeof pendingMedia>,
+      media: PendingMediaItem,
       conversationKey: string,
       senderPrivateKeyHex: string,
-      recipientPublicKeyHex: string
+      recipientPublicKeyHex: string,
+      captionOverride?: string
     ): Promise<DmMediaEnvelopeV1> => {
       const readUriBytes = async (uri: string): Promise<Uint8Array> => {
         // Prefer fetch(...).arrayBuffer() (works for http(s) and often for file://),
@@ -1348,7 +1703,7 @@ export default function ChatScreen({
       return {
         type: 'dm_media_v1',
         v: 1,
-        caption: input.trim() || undefined,
+        caption: (typeof captionOverride === 'string' ? captionOverride.trim() : input.trim()) || undefined,
         media: {
           kind: media.kind,
           contentType: media.contentType,
@@ -1423,15 +1778,23 @@ export default function ChatScreen({
 
     for (const m of messages) {
       const env = !m.encrypted ? parseChatEnvelope(m.rawText ?? m.text) : null;
-      const media = env?.media ?? m.media;
-      const paths: string[] = [];
-      if (media?.path) paths.push(media.path);
-      if (media?.thumbPath) paths.push(media.thumbPath);
-      for (const path of paths) {
+      const list = env
+        ? normalizeChatMediaList(env.media)
+        : m.mediaList
+          ? m.mediaList
+          : m.media
+            ? [m.media]
+            : [];
+      for (const media of list) {
+        const paths: string[] = [];
+        if (media?.path) paths.push(media.path);
+        if (media?.thumbPath) paths.push(media.thumbPath);
+        for (const path of paths) {
         if (!path) continue;
         if (mediaUrlByPath[path]) continue;
         if (inFlightMediaUrlRef.current.has(path)) continue;
         needed.push(path);
+        }
       }
     }
 
@@ -1525,17 +1888,25 @@ export default function ChatScreen({
 
     for (const m of messages) {
       const env = !m.encrypted ? parseChatEnvelope(m.rawText ?? m.text) : null;
-      const media = env?.media ?? m.media;
-      if (!media?.path) continue;
-      const looksImage =
-        media.kind === 'image' || (media.kind === 'file' && (media.contentType || '').startsWith('image/'));
-      if (!looksImage) continue;
-      const keyPath = media.thumbPath || media.path;
-      const url = mediaUrlByPath[keyPath];
-      if (!url) continue;
-      if (imageAspectByPath[keyPath]) continue;
-      if (inFlightImageSizeRef.current.has(keyPath)) continue;
-      needed.push({ path: keyPath, url });
+      const list = env
+        ? normalizeChatMediaList(env.media)
+        : m.mediaList
+          ? m.mediaList
+          : m.media
+            ? [m.media]
+            : [];
+      for (const media of list) {
+        if (!media?.path) continue;
+        const looksImage =
+          media.kind === 'image' || (media.kind === 'file' && (media.contentType || '').startsWith('image/'));
+        if (!looksImage) continue;
+        const keyPath = media.thumbPath || media.path;
+        const url = mediaUrlByPath[keyPath];
+        if (!url) continue;
+        if (imageAspectByPath[keyPath]) continue;
+        if (inFlightImageSizeRef.current.has(keyPath)) continue;
+        needed.push({ path: keyPath, url });
+      }
     }
 
     if (!needed.length) return;
@@ -1557,20 +1928,24 @@ export default function ChatScreen({
   }, [isDm, messages, mediaUrlByPath, imageAspectByPath]);
 
   const openViewer = React.useCallback(
-    (media: NonNullable<ChatEnvelope['media']>) => {
-      const url = mediaUrlByPath[media.path];
-      if (!url) return;
-      const kind =
-        media.kind === 'file' && (media.contentType || '').startsWith('image/')
-          ? 'image'
-          : media.kind === 'file' && (media.contentType || '').startsWith('video/')
-            ? 'video'
-            : media.kind;
-      if (kind !== 'image' && kind !== 'video') {
-        void openMedia(media.path);
-        return;
+    (mediaList: ChatMediaItem[], startIdx: number) => {
+      const list = Array.isArray(mediaList) ? mediaList : [];
+      if (!list.length) return;
+      const items: Array<{ url: string; kind: 'image' | 'video' | 'file'; fileName?: string }> = [];
+      for (const m of list) {
+        const url = m?.path ? mediaUrlByPath[m.path] : '';
+        if (!url) continue;
+        const kind =
+          m.kind === 'file' && (m.contentType || '').startsWith('image/')
+            ? 'image'
+            : m.kind === 'file' && (m.contentType || '').startsWith('video/')
+              ? 'video'
+              : m.kind;
+        items.push({ url, kind, fileName: m.fileName });
       }
-      setViewerMedia({ url, kind, fileName: media.fileName });
+      if (!items.length) return;
+      const idx = Math.max(0, Math.min(items.length - 1, Math.floor(startIdx || 0)));
+      setViewerState({ mode: 'global', index: idx, globalItems: items });
       setViewerOpen(true);
     },
     [mediaUrlByPath, openMedia]
@@ -1599,7 +1974,20 @@ export default function ChatScreen({
   }, []);
 
   const saveViewerMediaToDevice = React.useCallback(async () => {
-    const vm = viewerMedia;
+    const vs = viewerState;
+    if (!vs) return;
+    const vm = (() => {
+      if (vs.mode === 'global') return vs.globalItems?.[vs.index] ?? null;
+      if (vs.mode === 'dm') {
+        const it = vs.dmItems?.[vs.index];
+        if (!it?.media?.path) return null;
+        const url = dmFileUriByPath[it.media.path];
+        if (!url) return null;
+        const kind = it.media.kind === 'video' ? 'video' : it.media.kind === 'image' ? 'image' : 'file';
+        return { url, kind, fileName: it.media.fileName };
+      }
+      return null;
+    })();
     if (!vm?.url) return;
     if (viewerSaving) return;
     setViewerSaving(true);
@@ -1678,7 +2066,7 @@ export default function ChatScreen({
     } finally {
       setViewerSaving(false);
     }
-  }, [viewerMedia, viewerSaving, showToast]);
+  }, [viewerState, dmFileUriByPath, viewerSaving, showToast]);
 
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
@@ -1943,19 +2331,19 @@ export default function ChatScreen({
     [myPrivateKey, myPublicKey, peerPublicKey]
   );
 
-  const [dmThumbUriByPath, setDmThumbUriByPath] = React.useState<Record<string, string>>({});
-  const [dmFileUriByPath, setDmFileUriByPath] = React.useState<Record<string, string>>({});
-
   const decryptDmThumbToDataUri = React.useCallback(
-    async (msg: ChatMessage, env: DmMediaEnvelopeV1): Promise<string | null> => {
-      if (!env.media.thumbPath || !env.media.thumbIv) return null;
-      const cacheKey = env.media.thumbPath;
+    async (
+      msg: ChatMessage,
+      it: { media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }
+    ): Promise<string | null> => {
+      if (!it.media.thumbPath || !it.media.thumbIv) return null;
+      const cacheKey = it.media.thumbPath;
       if (dmThumbUriByPath[cacheKey]) return dmThumbUriByPath[cacheKey];
 
       const chatKey = buildDmMediaKey(msg);
-      const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext); // 32 bytes
+      const fileKey = aesGcmDecryptBytes(chatKey, it.wrap.iv, it.wrap.ciphertext); // 32 bytes
 
-      const signedUrl = await getDmMediaSignedUrl(env.media.thumbPath, 300);
+      const signedUrl = await getDmMediaSignedUrl(it.media.thumbPath, 300);
       const encResp = await fetch(signedUrl);
       if (!encResp.ok) {
         const txt = await encResp.text().catch(() => '');
@@ -1969,15 +2357,15 @@ export default function ChatScreen({
       const encBytes = new Uint8Array(await encResp.arrayBuffer());
       let plainThumbBytes: Uint8Array;
       try {
-        plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
+        plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(it.media.thumbIv))).decrypt(encBytes);
       } catch {
         throw new Error('DM decrypt failed (bad key or corrupted download)');
       }
 
       const b64 = fromByteArray(plainThumbBytes);
       const ct =
-        env.media.thumbContentType ||
-        (String(env.media.thumbPath || '').includes('.webp') ? 'image/webp' : 'image/jpeg');
+        it.media.thumbContentType ||
+        (String(it.media.thumbPath || '').includes('.webp') ? 'image/webp' : 'image/jpeg');
       const dataUri = `data:${ct};base64,${b64}`;
       setDmThumbUriByPath((prev) => ({ ...prev, [cacheKey]: dataUri }));
 
@@ -1996,14 +2384,17 @@ export default function ChatScreen({
   );
 
   const decryptDmFileToCacheUri = React.useCallback(
-    async (msg: ChatMessage, env: DmMediaEnvelopeV1): Promise<string> => {
-      const cacheKey = env.media.path;
+    async (
+      msg: ChatMessage,
+      it: { media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }
+    ): Promise<string> => {
+      const cacheKey = it.media.path;
       if (dmFileUriByPath[cacheKey]) return dmFileUriByPath[cacheKey];
 
       const chatKey = buildDmMediaKey(msg);
-      const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext);
+      const fileKey = aesGcmDecryptBytes(chatKey, it.wrap.iv, it.wrap.ciphertext);
 
-      const signedUrl = await getDmMediaSignedUrl(env.media.path, 300);
+      const signedUrl = await getDmMediaSignedUrl(it.media.path, 300);
       const encResp = await fetch(signedUrl);
       if (!encResp.ok) {
         const txt = await encResp.text().catch(() => '');
@@ -2015,7 +2406,7 @@ export default function ChatScreen({
         throw new Error(`DM download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
       }
       const encBytes = new Uint8Array(await encResp.arrayBuffer());
-      const fileIvBytes = hexToBytes(env.media.iv);
+      const fileIvBytes = hexToBytes(it.media.iv);
       let plainBytes: Uint8Array;
       try {
         plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
@@ -2023,14 +2414,14 @@ export default function ChatScreen({
         throw new Error('DM decrypt failed (bad key or corrupted download)');
       }
 
-      const ct = env.media.contentType || 'application/octet-stream';
+      const ct = it.media.contentType || 'application/octet-stream';
       const ext =
         ct.startsWith('image/')
           ? ct.split('/')[1] || 'jpg'
           : ct.startsWith('video/')
             ? ct.split('/')[1] || 'mp4'
             : 'bin';
-      const fileNameSafe = (env.media.fileName || `dm-${Date.now()}`).replace(/[^\w.\-() ]+/g, '_');
+      const fileNameSafe = (it.media.fileName || `dm-${Date.now()}`).replace(/[^\w.\-() ]+/g, '_');
       const fsAny: any = require('expo-file-system');
       const Paths = fsAny?.Paths;
       const File = fsAny?.File;
@@ -2056,12 +2447,17 @@ export default function ChatScreen({
         if (cancelled) return;
         if (!m.decryptedText) continue;
         const env = parseDmMediaEnvelope(m.decryptedText);
-        if (!env?.media?.thumbPath || !env.media.thumbIv) continue;
-        if (dmThumbUriByPath[env.media.thumbPath]) continue;
-        try {
-          await decryptDmThumbToDataUri(m, env);
-        } catch {
-          // ignore
+        const items = normalizeDmMediaItems(env);
+        for (const it of items) {
+          if (cancelled) return;
+          if (!it.media.thumbPath || !it.media.thumbIv) continue;
+          if (dmThumbUriByPath[it.media.thumbPath]) continue;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await decryptDmThumbToDataUri(m, it);
+          } catch {
+            // ignore
+          }
         }
       }
     };
@@ -2072,17 +2468,23 @@ export default function ChatScreen({
   }, [isDm, messages, dmThumbUriByPath, decryptDmThumbToDataUri]);
 
   const openDmMediaViewer = React.useCallback(
-    async (msg: ChatMessage) => {
+    async (msg: ChatMessage, idx: number = 0) => {
       if (!isDm) return;
       if (!msg.decryptedText) return;
       const env = parseDmMediaEnvelope(msg.decryptedText);
       if (!env) return;
+      const items = normalizeDmMediaItems(env);
+      const it = items[idx];
+      if (!it) return;
       try {
-        const localUri = await decryptDmFileToCacheUri(msg, env);
-        setViewerMedia({
-          url: localUri,
-          kind: env.media.kind === 'video' ? 'video' : env.media.kind === 'image' ? 'image' : 'file',
-          fileName: env.media.fileName,
+        const localUri = await decryptDmFileToCacheUri(msg, it);
+        // Start viewer in DM mode; additional pages will decrypt lazily.
+        setViewerState({
+          mode: 'dm',
+          index: Math.max(0, Math.min(items.length - 1, idx)),
+          dmMsg: msg,
+          dmItems: items,
+          title: it.media.fileName,
         });
         setViewerOpen(true);
       } catch (e: any) {
@@ -2091,6 +2493,34 @@ export default function ChatScreen({
     },
     [isDm, decryptDmFileToCacheUri, showAlert]
   );
+
+  // Fullscreen DM viewer: lazily decrypt the currently visible page (and a neighbor).
+  React.useEffect(() => {
+    if (!viewerOpen) return;
+    const vs = viewerState;
+    if (!vs || vs.mode !== 'dm') return;
+    const msg = vs.dmMsg;
+    const items = vs.dmItems;
+    if (!msg || !items || !items.length) return;
+
+    const want = [vs.index, vs.index + 1, vs.index - 1]
+      .filter((i) => typeof i === 'number' && i >= 0 && i < items.length)
+      .slice(0, 3);
+
+    want.forEach((i) => {
+      const it = items[i];
+      const key = it?.media?.path;
+      if (!key) return;
+      if (dmFileUriByPath[key]) return;
+      if (inFlightDmViewerDecryptRef.current.has(key)) return;
+      inFlightDmViewerDecryptRef.current.add(key);
+      decryptDmFileToCacheUri(msg, it)
+        .catch(() => {})
+        .finally(() => {
+          inFlightDmViewerDecryptRef.current.delete(key);
+        });
+    });
+  }, [viewerOpen, viewerState, dmFileUriByPath, decryptDmFileToCacheUri]);
 
   const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
     setMySeenAtByCreatedAt((prev) => ({
@@ -2243,6 +2673,16 @@ export default function ChatScreen({
         const plaintext = decryptForDisplay(m);
         changed = true;
         const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
+        const dmItems = dmEnv ? normalizeDmMediaItems(dmEnv) : [];
+        const dmMediaList: ChatMediaItem[] = dmItems.map((it) => ({
+          path: it.media.path,
+          thumbPath: it.media.thumbPath,
+          kind: it.media.kind,
+          contentType: it.media.contentType,
+          thumbContentType: it.media.thumbContentType,
+          fileName: it.media.fileName,
+          size: it.media.size,
+        }));
         if (!isFromMe) {
           decryptedIncomingCreatedAts.push(m.createdAt);
           const expiresAt =
@@ -2252,17 +2692,8 @@ export default function ChatScreen({
             ...m,
             decryptedText: plaintext,
             text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
-            media: dmEnv
-              ? {
-                  path: dmEnv.media.path,
-                  thumbPath: dmEnv.media.thumbPath,
-                  kind: dmEnv.media.kind,
-                  contentType: dmEnv.media.contentType,
-                  thumbContentType: dmEnv.media.thumbContentType,
-                  fileName: dmEnv.media.fileName,
-                  size: dmEnv.media.size,
-                }
-              : m.media,
+            media: dmMediaList.length ? dmMediaList[0] : m.media,
+            mediaList: dmMediaList.length ? dmMediaList : undefined,
             expiresAt,
           };
         }
@@ -2271,17 +2702,8 @@ export default function ChatScreen({
           ...m,
           decryptedText: plaintext,
           text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
-          media: dmEnv
-            ? {
-                path: dmEnv.media.path,
-                thumbPath: dmEnv.media.thumbPath,
-                kind: dmEnv.media.kind,
-                contentType: dmEnv.media.contentType,
-                thumbContentType: dmEnv.media.thumbContentType,
-                fileName: dmEnv.media.fileName,
-                size: dmEnv.media.size,
-              }
-            : m.media,
+          media: dmMediaList.length ? dmMediaList[0] : m.media,
+          mediaList: dmMediaList.length ? dmMediaList : undefined,
         };
       } catch {
         changed = true;
@@ -2967,7 +3389,7 @@ export default function ChatScreen({
     if (isUploading) return;
     const currentInput = inputRef.current;
     const currentPendingMedia = pendingMediaRef.current;
-    if (!currentInput.trim() && !currentPendingMedia) return;
+    if (!currentInput.trim() && (!currentPendingMedia || currentPendingMedia.length === 0)) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
       return;
@@ -2993,7 +3415,13 @@ export default function ChatScreen({
 
     // Snapshot current input/media.
     const originalInput = currentInput;
-    const originalPendingMedia = currentPendingMedia;
+    const originalPendingMedia =
+      currentPendingMedia && currentPendingMedia.length > MAX_ATTACHMENTS_PER_MESSAGE
+        ? currentPendingMedia.slice(0, MAX_ATTACHMENTS_PER_MESSAGE)
+        : currentPendingMedia;
+    if (currentPendingMedia && currentPendingMedia.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+      showAlert('Attachment limit', `Only ${MAX_ATTACHMENTS_PER_MESSAGE} items allowed per message.`);
+    }
 
     let outgoingText = originalInput.trim();
     let dmMediaPathsToSend: string[] | undefined = undefined;
@@ -3010,13 +3438,13 @@ export default function ChatScreen({
       }
       setInput('');
       inputRef.current = '';
-      setPendingMedia(null);
-      pendingMediaRef.current = null;
+      setPendingMedia([]);
+      pendingMediaRef.current = [];
     };
 
     const restoreDraftIfUnchanged = () => {
       // Only restore if the user hasn't started typing a new message / attaching new media.
-      if ((inputRef.current || '').length === 0 && !pendingMediaRef.current) {
+      if ((inputRef.current || '').length === 0 && (!pendingMediaRef.current || pendingMediaRef.current.length === 0)) {
         setInput(originalInput);
         inputRef.current = originalInput;
         setPendingMedia(originalPendingMedia);
@@ -3043,21 +3471,39 @@ export default function ChatScreen({
       // DM media: encrypt + upload ciphertext, then encrypt the envelope as a normal DM message.
       // We also include opaque S3 keys as `mediaPaths` so the backend can delete attachments later
       // without decrypting message text.
-      if (originalPendingMedia) {
+      if (originalPendingMedia && originalPendingMedia.length) {
         try {
           setIsUploading(true);
-          const dmEnv = await uploadPendingMediaDmEncrypted(
-            originalPendingMedia,
-            activeConversationId,
-            myPrivateKey,
-            peerPublicKey
-          );
-          const plaintextEnvelope = JSON.stringify(dmEnv);
+          const caption = originalInput.trim();
+          const envs: DmMediaEnvelopeV1[] = [];
+          for (const item of originalPendingMedia) {
+            // eslint-disable-next-line no-await-in-loop
+            const dmEnv = await uploadPendingMediaDmEncrypted(
+              item,
+              activeConversationId,
+              myPrivateKey,
+              peerPublicKey,
+              caption
+            );
+            envs.push(dmEnv);
+          }
+          const dmAny: DmMediaEnvelope =
+            envs.length === 1
+              ? envs[0]
+              : {
+                  type: 'dm_media_v2',
+                  v: 2,
+                  caption: caption || undefined,
+                  items: envs.map((e) => ({ media: e.media, wrap: e.wrap })),
+                };
+          const plaintextEnvelope = JSON.stringify(dmAny);
           const enc = encryptChatMessageV1(plaintextEnvelope, myPrivateKey, peerPublicKey);
           outgoingText = JSON.stringify(enc);
-          dmMediaPathsToSend = [dmEnv.media.path, dmEnv.media.thumbPath].filter(Boolean) as string[];
+          dmMediaPathsToSend = envs
+            .flatMap((e) => [e.media.path, e.media.thumbPath].filter(Boolean))
+            .map(String);
         } catch (e: any) {
-          showAlert('Upload failed', e?.message ?? 'Failed to upload media');
+          showAlert('Upload Failed', e?.message ?? 'Failed to upload media');
           restoreDraftIfUnchanged();
           return;
         } finally {
@@ -3067,18 +3513,23 @@ export default function ChatScreen({
         const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
         outgoingText = JSON.stringify(enc);
       }
-    } else if (originalPendingMedia) {
+    } else if (originalPendingMedia && originalPendingMedia.length) {
       try {
         setIsUploading(true);
-        const uploaded = await uploadPendingMedia(originalPendingMedia);
+        const uploadedItems: ChatMediaItem[] = [];
+        for (const item of originalPendingMedia) {
+          // eslint-disable-next-line no-await-in-loop
+          const uploaded = await uploadPendingMedia(item);
+          uploadedItems.push(uploaded);
+        }
         const envelope: ChatEnvelope = {
           type: 'chat',
           text: outgoingText,
-          media: uploaded,
+          media: uploadedItems.length === 1 ? uploadedItems[0] : uploadedItems,
         };
         outgoingText = JSON.stringify(envelope);
       } catch (e: any) {
-        showAlert('Upload failed', e?.message ?? 'Failed to upload media');
+        showAlert('Upload Failed', e?.message ?? 'Failed to upload media');
         restoreDraftIfUnchanged();
         return;
       } finally {
@@ -3092,7 +3543,7 @@ export default function ChatScreen({
 
     // Optimistic UI: show the outgoing message immediately, then let the WS echo dedupe by id.
     // (Backend uses clientMessageId as messageId when provided.)
-    if (!originalPendingMedia) {
+    if (!originalPendingMedia || originalPendingMedia.length === 0) {
       const optimisticRaw = outgoingText;
       const optimisticEncrypted = parseEncrypted(optimisticRaw);
       const optimisticPlaintext = originalInput.trim();
@@ -3314,6 +3765,16 @@ export default function ChatScreen({
         const readAt = Math.floor(Date.now() / 1000);
         const plaintext = decryptForDisplay(msg);
         const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
+        const dmItems = dmEnv ? normalizeDmMediaItems(dmEnv) : [];
+        const dmMediaList: ChatMediaItem[] = dmItems.map((it) => ({
+          path: it.media.path,
+          thumbPath: it.media.thumbPath,
+          kind: it.media.kind,
+          contentType: it.media.contentType,
+          thumbContentType: it.media.thumbContentType,
+          fileName: it.media.fileName,
+          size: it.media.size,
+        }));
         const isFromMe = !!myPublicKey && msg.encrypted?.senderPublicKey === myPublicKey;
         setMessages((prev) =>
           prev.map((m) =>
@@ -3322,17 +3783,8 @@ export default function ChatScreen({
                   ...m,
                   decryptedText: plaintext,
                   text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
-                  media: dmEnv
-                    ? {
-                        path: dmEnv.media.path,
-                        thumbPath: dmEnv.media.thumbPath,
-                        kind: dmEnv.media.kind,
-                        contentType: dmEnv.media.contentType,
-                        thumbContentType: dmEnv.media.thumbContentType,
-                        fileName: dmEnv.media.fileName,
-                        size: dmEnv.media.size,
-                      }
-                    : m.media,
+                  media: dmMediaList.length ? dmMediaList[0] : m.media,
+                  mediaList: dmMediaList.length ? dmMediaList : undefined,
                   expiresAt:
                     // TTL-from-read:
                     // - Incoming messages: start countdown at decrypt time.
@@ -3427,8 +3879,8 @@ export default function ChatScreen({
     setInlineEditDraft('');
     // If we were in "replace attachment" mode, discard the picked media so it doesn't leak into new sends.
     if (inlineEditAttachmentMode === 'replace') {
-      setPendingMedia(null);
-      pendingMediaRef.current = null;
+      setPendingMedia([]);
+      pendingMediaRef.current = [];
     }
     setInlineEditAttachmentMode('keep');
   }, [inlineEditAttachmentMode, inlineEditUploading]);
@@ -3510,6 +3962,8 @@ export default function ChatScreen({
     let outgoingText = nextCaption;
     let dmPlaintextSent: string | null = null;
     let dmMediaSent: ChatMessage['media'] | undefined = undefined;
+    let dmMediaListSent: ChatMediaItem[] | undefined = undefined;
+    let dmMediaPathsSent: string[] | undefined = undefined;
     const needsEncryption = isDm && !!target.encrypted;
     if (needsEncryption) {
       if (!myPrivateKey || !peerPublicKey) {
@@ -3524,17 +3978,32 @@ export default function ChatScreen({
       const existingPlain = String(target.decryptedText || '');
       const existingDmEnv = parseDmMediaEnvelope(existingPlain);
 
-      if (inlineEditAttachmentMode === 'replace' && pendingMediaRef.current) {
+      if (inlineEditAttachmentMode === 'replace' && pendingMediaRef.current && pendingMediaRef.current.length) {
         // Replace attachment by uploading new encrypted media and updating caption.
         setInlineEditUploading(true);
         try {
-          const dmEnv = await uploadPendingMediaDmEncrypted(
-            pendingMediaRef.current,
-            activeConversationId,
-            myPrivateKey,
-            peerPublicKey
-          );
-          plaintextToEncrypt = JSON.stringify({ ...dmEnv, caption: nextCaption || undefined });
+          const envs: DmMediaEnvelopeV1[] = [];
+          for (const item of pendingMediaRef.current) {
+            // eslint-disable-next-line no-await-in-loop
+            const dmEnv = await uploadPendingMediaDmEncrypted(
+              item,
+              activeConversationId,
+              myPrivateKey,
+              peerPublicKey,
+              nextCaption
+            );
+            envs.push(dmEnv);
+          }
+          const dmAny: DmMediaEnvelope =
+            envs.length === 1
+              ? envs[0]
+              : {
+                  type: 'dm_media_v2',
+                  v: 2,
+                  caption: nextCaption || undefined,
+                  items: envs.map((e) => ({ media: e.media, wrap: e.wrap })),
+                };
+          plaintextToEncrypt = JSON.stringify(dmAny);
         } finally {
           setInlineEditUploading(false);
         }
@@ -3544,16 +4013,21 @@ export default function ChatScreen({
 
       dmPlaintextSent = plaintextToEncrypt;
       const parsed = parseDmMediaEnvelope(dmPlaintextSent);
-      if (parsed?.media?.path) {
-        dmMediaSent = {
-          path: parsed.media.path,
-          thumbPath: parsed.media.thumbPath,
-          kind: parsed.media.kind,
-          contentType: parsed.media.contentType,
-          thumbContentType: parsed.media.thumbContentType,
-          fileName: parsed.media.fileName,
-          size: parsed.media.size,
-        };
+      const dmItems = normalizeDmMediaItems(parsed);
+      if (dmItems.length) {
+        dmMediaListSent = dmItems.map((it) => ({
+          path: it.media.path,
+          thumbPath: it.media.thumbPath,
+          kind: it.media.kind,
+          contentType: it.media.contentType,
+          thumbContentType: it.media.thumbContentType,
+          fileName: it.media.fileName,
+          size: it.media.size,
+        }));
+        dmMediaSent = dmMediaListSent[0];
+        dmMediaPathsSent = dmItems
+          .flatMap((it) => [it.media.path, it.media.thumbPath].filter(Boolean))
+          .map(String);
       }
 
       const enc = encryptChatMessageV1(plaintextToEncrypt, myPrivateKey, peerPublicKey);
@@ -3566,11 +4040,20 @@ export default function ChatScreen({
       const raw = String(target.rawText ?? target.text ?? '');
       const env = parseChatEnvelope(raw);
 
-      if (inlineEditAttachmentMode === 'replace' && pendingMediaRef.current) {
+      if (inlineEditAttachmentMode === 'replace' && pendingMediaRef.current && pendingMediaRef.current.length) {
         setInlineEditUploading(true);
         try {
-          const uploaded = await uploadPendingMedia(pendingMediaRef.current);
-          outgoingText = JSON.stringify({ type: 'chat', text: nextCaption || undefined, media: uploaded });
+          const uploadedItems: ChatMediaItem[] = [];
+          for (const item of pendingMediaRef.current) {
+            // eslint-disable-next-line no-await-in-loop
+            const uploaded = await uploadPendingMedia(item);
+            uploadedItems.push(uploaded);
+          }
+          outgoingText = JSON.stringify({
+            type: 'chat',
+            text: nextCaption || undefined,
+            media: uploadedItems.length === 1 ? uploadedItems[0] : uploadedItems,
+          });
         } finally {
           setInlineEditUploading(false);
         }
@@ -3589,7 +4072,7 @@ export default function ChatScreen({
           ...(needsEncryption && inlineEditAttachmentMode === 'remove'
             ? { mediaPaths: [] }
             : needsEncryption && inlineEditAttachmentMode === 'replace'
-              ? { mediaPaths: [dmMediaSent?.path, dmMediaSent?.thumbPath].filter(Boolean) }
+              ? { mediaPaths: dmMediaPathsSent || [] }
               : {}),
           createdAt: Date.now(),
         })
@@ -3600,13 +4083,16 @@ export default function ChatScreen({
       // - For DM media edits, update decryptedText + media so UI renders immediately.
       let optimisticDecryptedText: string | undefined = undefined;
       let optimisticMedia: ChatMessage['media'] | undefined = undefined;
+      let optimisticMediaList: ChatMessage['mediaList'] | undefined = undefined;
       if (needsEncryption) {
         if (inlineEditAttachmentMode === 'remove') {
           optimisticDecryptedText = nextCaption;
           optimisticMedia = undefined;
+          optimisticMediaList = undefined;
         } else if (dmPlaintextSent) {
           optimisticDecryptedText = dmPlaintextSent;
           optimisticMedia = dmMediaSent;
+          optimisticMediaList = dmMediaListSent;
         } else {
           optimisticDecryptedText = nextCaption;
         }
@@ -3620,6 +4106,7 @@ export default function ChatScreen({
                 encrypted: parseEncrypted(outgoingText) ?? undefined,
                 decryptedText: needsEncryption ? optimisticDecryptedText : m.decryptedText,
                 media: needsEncryption ? optimisticMedia : m.media,
+                mediaList: needsEncryption ? optimisticMediaList : m.mediaList,
                 // Always show the edited caption in the UI (even for envelopes).
                 text: nextCaption,
                 editedAt: now,
@@ -3969,38 +4456,46 @@ export default function ChatScreen({
           if (m.encrypted) continue; // never send encrypted payloads to AI
           const raw = m.decryptedText ?? (m.rawText ?? m.text);
           const env = parseChatEnvelope(String(raw || ''));
-          const media = (env?.media ?? m.media) || null;
-          if (!media) continue;
-          if (!(media.kind === 'image' || media.kind === 'video')) continue;
+          const list = env
+            ? normalizeChatMediaList(env.media)
+            : m.mediaList
+              ? m.mediaList
+              : m.media
+                ? [m.media]
+                : [];
+          for (const media of list) {
+            if (attachmentsForAi.length >= maxThumbs) break;
+            if (!(media.kind === 'image' || media.kind === 'video')) continue;
 
-          const thumbKey = String(media.thumbPath || media.path || '');
-          if (!thumbKey) continue;
+            const thumbKey = String(media.thumbPath || media.path || '');
+            if (!thumbKey) continue;
 
-          let thumbUrl = resolvedThumbUrlByKey[thumbKey] || mediaUrlByPath[thumbKey] || '';
-          if (!thumbUrl) {
-            try {
-              const s = toCdnUrl(thumbKey);
-              thumbUrl = String(s || '');
-              if (thumbUrl) {
-                resolvedThumbUrlByKey[thumbKey] = thumbUrl;
-                // Keep the global cache warm for future UI and AI calls.
-                setMediaUrlByPath((prev) => ({ ...prev, [thumbKey]: thumbUrl }));
+            let thumbUrl = resolvedThumbUrlByKey[thumbKey] || mediaUrlByPath[thumbKey] || '';
+            if (!thumbUrl) {
+              try {
+                const s = toCdnUrl(thumbKey);
+                thumbUrl = String(s || '');
+                if (thumbUrl) {
+                  resolvedThumbUrlByKey[thumbKey] = thumbUrl;
+                  // Keep the global cache warm for future UI and AI calls.
+                  setMediaUrlByPath((prev) => ({ ...prev, [thumbKey]: thumbUrl }));
+                }
+              } catch {
+                // ignore URL resolution failures; AI will fall back to text-only description
               }
-            } catch {
-              // ignore URL resolution failures; AI will fall back to text-only description
             }
-          }
-          if (!thumbUrl) continue;
+            if (!thumbUrl) continue;
 
-          attachmentsForAi.push({
-            kind: media.kind,
-            thumbKey,
-            thumbUrl,
-            fileName: media.fileName,
-            size: media.size,
-            user: m.user,
-            createdAt: m.createdAt,
-          });
+            attachmentsForAi.push({
+              kind: media.kind,
+              thumbKey,
+              thumbUrl,
+              fileName: media.fileName,
+              size: media.size,
+              user: m.user,
+              createdAt: m.createdAt,
+            });
+          }
         }
       }
 
@@ -4009,15 +4504,25 @@ export default function ChatScreen({
           // Only send plaintext. If message is still encrypted, skip it.
           const raw = m.decryptedText ?? (m.encrypted ? '' : (m.rawText ?? m.text));
           const env = !m.encrypted && !isDm ? parseChatEnvelope(raw) : null;
-          const media = (env?.media ?? m.media) || null;
+          const list = env
+            ? normalizeChatMediaList(env.media)
+            : m.mediaList
+              ? m.mediaList
+              : m.media
+                ? [m.media]
+                : [];
 
           // If the message includes media, add a better text description.
           const mediaDesc = (() => {
-            if (!media) return '';
-            const kindLabel = media.kind === 'image' ? 'Image' : media.kind === 'video' ? 'Video' : 'File';
-            const name = media.fileName ? ` "${media.fileName}"` : '';
-            const size = typeof media.size === 'number' ? ` (${formatBytes(media.size)})` : '';
-            return `${kindLabel} attachment${name}${size}`;
+            if (!list.length) return '';
+            if (list.length === 1) {
+              const media = list[0];
+              const kindLabel = media.kind === 'image' ? 'Image' : media.kind === 'video' ? 'Video' : 'File';
+              const name = media.fileName ? ` "${media.fileName}"` : '';
+              const size = typeof media.size === 'number' ? ` (${formatBytes(media.size)})` : '';
+              return `${kindLabel} attachment${name}${size}`;
+            }
+            return `${list.length} attachments`;
           })();
 
           const rawText = String(raw || '');
@@ -4558,9 +5063,10 @@ export default function ChatScreen({
 
           const envelope =
             !item.encrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;
+          const envMediaList = envelope ? normalizeChatMediaList(envelope.media) : [];
           // Only treat it as a "media envelope" if it actually has media.
           // (Otherwise a random JSON message could parse as an envelope and we'd hide the text.)
-          const mediaEnvelope = envelope?.media?.path ? envelope : null;
+          const mediaEnvelope = envelope && envMediaList.length ? envelope : null;
           // If it's a media envelope, the caption is ONLY env.text (optional).
           // Do NOT fall back to item.text, because for envelopes item.text often contains the full JSON.
           const captionText = mediaEnvelope ? String(mediaEnvelope.text ?? '') : item.text;
@@ -4574,7 +5080,15 @@ export default function ChatScreen({
                 .filter((r) => r.emoji && r.count > 0)
                 .sort((a, b) => b.count - a.count)
             : [];
-          const media = mediaEnvelope?.media ?? item.media;
+          const mediaList = mediaEnvelope
+            ? envMediaList
+            : item.mediaList
+              ? item.mediaList
+              : item.media
+                ? [item.media]
+                : [];
+          const media = mediaList.length ? mediaList[0] : null;
+          const extraMedia = mediaList.length > 1 ? mediaList.slice(1) : [];
           const mediaUrl = media?.path ? mediaUrlByPath[media.path] : null;
           const mediaThumbUrl = media?.thumbPath ? mediaUrlByPath[media.thumbPath] : null;
           const dmThumbUri =
@@ -4591,7 +5105,7 @@ export default function ChatScreen({
           // IMPORTANT: if the message is still encrypted (not decrypted yet),
           // always render it as a normal encrypted-text bubble so media placeholders
           // don't appear larger than encrypted text placeholders.
-          const hasMedia = !!media?.path && (!item.encrypted || !!item.decryptedText);
+          const hasMedia = !!mediaList.length && (!item.encrypted || !!item.decryptedText);
           const imageKeyPath = mediaLooksImage ? (media?.thumbPath || media?.path) : undefined;
           const imageAspect =
             imageKeyPath && imageAspectByPath[imageKeyPath] ? imageAspectByPath[imageKeyPath] : undefined;
@@ -4771,7 +5285,7 @@ export default function ChatScreen({
                                 >
                                   Attachment will be removed
                                 </Text>
-                              ) : inlineEditAttachmentMode === 'replace' && pendingMedia ? (
+                              ) : inlineEditAttachmentMode === 'replace' && pendingMedia.length ? (
                                 <Text
                                   style={[
                                     styles.mediaEditHint,
@@ -4887,124 +5401,22 @@ export default function ChatScreen({
                             </View>
                           ) : null}
                         </View>
-                        {media?.path ? (
-                          displayThumbUri && mediaLooksImage ? (
-                            <Pressable
-                              onPress={() => {
-                                if (isDm) void openDmMediaViewer(item);
-                                else openViewer(media as any);
-                              }}
-                            >
-                              {typeof thumbAspect === 'number' ? (
-                                <Image
-                                  source={{ uri: displayThumbUri }}
-                                  style={[styles.mediaCappedImage, { width: capped.w, height: capped.h }]}
-                                  // No crop: we size the view to the image aspect ratio.
-                                  resizeMode="contain"
-                                />
-                              ) : (
-                                <View style={styles.imageThumbWrap}>
-                                  <Image
-                                    source={{ uri: displayThumbUri }}
-                                    style={styles.mediaFill}
-                                    // Fallback while we haven't measured aspect ratio yet.
-                                    resizeMode="contain"
-                                  />
-                                </View>
-                              )}
-                            </Pressable>
-                          ) : displayThumbUri && mediaLooksVideo ? (
-                            <Pressable
-                              onPress={() => {
-                                if (isDm) void openDmMediaViewer(item);
-                                else openViewer(media as any);
-                              }}
-                            >
-                              <View style={[styles.videoThumbWrap, { width: capped.w, height: capped.h }]}>
-                                <Image
-                                  source={{ uri: displayThumbUri }}
-                                  style={[styles.mediaFill]}
-                                  resizeMode="cover"
-                                />
-                                <View style={styles.videoPlayOverlay}>
-                                  <Text style={styles.videoPlayText}>▶</Text>
-                                </View>
-                              </View>
-                            </Pressable>
-                          ) : !isDm && (mediaLooksImage || mediaLooksVideo) ? (
-                            // If the thumbnail URL isn't resolved yet, show a compact loading placeholder
-                            // (instead of exposing the attachment link text).
-                            (() => {
-                              const keyPath = (media as any)?.thumbPath || (media as any)?.path;
-                              const isResolving =
-                                !storageSessionReady ||
-                                (keyPath && inFlightMediaUrlRef.current.has(String(keyPath)));
-                              if (!isResolving) return null;
-                              const textColor = isOutgoing
-                                ? 'rgba(255,255,255,0.9)'
-                                : isDark
-                                  ? '#b7b7c2'
-                                  : '#555';
-                              return (
-                                <Pressable
-                                  onPress={() => void openMedia(media.path)}
-                                  accessibilityRole="button"
-                                  accessibilityLabel="Open media"
-                                >
-                                  <View
-                                    style={[
-                                      styles.imageThumbWrap,
-                                      {
-                                        width: capped.w,
-                                        height: capped.h,
-                                        justifyContent: 'center',
-                                        alignItems: 'center',
-                                      },
-                                    ]}
-                                  >
-                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                      <Text style={{ color: textColor, fontWeight: '700', fontSize: 14 }}>Loading</Text>
-                                      <AnimatedDots color={textColor} size={16} />
-                                    </View>
-                                  </View>
-                                </Pressable>
-                              );
-                            })()
-                          ) : isDm && (mediaLooksImage || mediaLooksVideo) ? (
-                            <Pressable onPress={() => void openDmMediaViewer(item)} accessibilityRole="button">
-                              <View
-                                style={[
-                                  styles.imageThumbWrap,
-                                  {
-                                    width: capped.w,
-                                    height: capped.h,
-                                    justifyContent: 'center',
-                                    alignItems: 'center',
-                                  },
-                                ]}
-                              >
-                                {(() => {
-                                  const textColor = isOutgoing
-                                    ? 'rgba(255,255,255,0.9)'
-                                    : isDark
-                                      ? '#b7b7c2'
-                                      : '#555';
-                                  return (
-                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                                      <Text style={{ color: textColor, fontWeight: '700', fontSize: 14 }}>Loading</Text>
-                                      <AnimatedDots color={textColor} size={16} />
-                                    </View>
-                                  );
-                                })()}
-                              </View>
-                            </Pressable>
-                          ) : (
-                            <Pressable onPress={() => void openMedia(media.path)}>
-                              <Text style={styles.attachmentLink}>
-                                {`Attachment: ${media.kind}${media.fileName ? ` · ${media.fileName}` : ''} (tap to open)`}
-                              </Text>
-                            </Pressable>
-                          )
+                        {mediaList.length ? (
+                          <MediaStackCarousel
+                            messageId={item.id}
+                            mediaList={mediaList}
+                            width={capped.w}
+                            height={capped.h}
+                            isDm={isDm}
+                            isDark={isDark}
+                            isOutgoing={isOutgoing}
+                            mediaUrlByPath={mediaUrlByPath}
+                            dmThumbUriByPath={dmThumbUriByPath}
+                            onOpen={(idx, media) => {
+                              if (isDm) void openDmMediaViewer(item, idx);
+                              else openViewer(mediaList, idx);
+                            }}
+                          />
                         ) : null}
 
                       </View>
@@ -5111,7 +5523,7 @@ export default function ChatScreen({
                                   isOutgoing ? 'rgba(255,255,255,0.95)' : isDark ? '#ffffff' : '#111'
                                 }
                               />
-                              {inlineEditAttachmentMode === 'replace' && pendingMedia ? (
+                              {inlineEditAttachmentMode === 'replace' && pendingMedia.length ? (
                                 <Text
                                   style={[
                                     styles.mediaEditHint,
@@ -5324,14 +5736,18 @@ export default function ChatScreen({
                 </Text>
               </Pressable>
             </View>
-          ) : pendingMedia ? (
+          ) : pendingMedia.length ? (
             <Pressable
               style={[styles.attachmentPill, isDark ? styles.attachmentPillDark : null]}
-              onPress={() => setPendingMedia(null)}
+              onPress={() => setPendingMedia([])}
               disabled={isUploading}
             >
               <Text style={[styles.attachmentPillText, isDark ? styles.attachmentPillTextDark : null]}>
-                {`Attached: ${pendingMedia.displayName || pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
+                {pendingMedia.length === 1
+                  ? `Attached: ${
+                      pendingMedia[0].displayName || pendingMedia[0].fileName || pendingMedia[0].kind
+                    } (tap to remove)`
+                  : `Attached: ${pendingMedia.length} items (tap to remove)`}
               </Text>
             </Pressable>
           ) : null}
@@ -5373,7 +5789,7 @@ export default function ChatScreen({
                 placeholder={
                   inlineEditTargetId
                     ? 'Finish editing above…'
-                    : pendingMedia
+                    : pendingMedia.length
                       ? 'Add a caption (optional)…'
                       : 'Type a message'
                 }
@@ -5890,13 +6306,15 @@ export default function ChatScreen({
                       );
                     }
                     const dmEnv = parseDmMediaEnvelope(String(t.decryptedText));
-                    if (dmEnv?.media?.path) {
+                    const dmItems = dmEnv ? normalizeDmMediaItems(dmEnv) : [];
+                    if (dmItems.length) {
                       hasMedia = true;
-                      caption = String(dmEnv.caption || '');
-                      kind = (dmEnv.media.kind as any) || 'file';
+                      caption = String(dmEnv?.caption || '');
+                      const first = dmItems[0].media;
+                      kind = (first.kind as any) || 'file';
                       thumbUri =
-                        dmEnv.media.thumbPath && dmThumbUriByPath[dmEnv.media.thumbPath]
-                          ? dmThumbUriByPath[dmEnv.media.thumbPath]
+                        first.thumbPath && dmThumbUriByPath[first.thumbPath]
+                          ? dmThumbUriByPath[first.thumbPath]
                           : null;
                     } else {
                       caption = String(t.decryptedText || '');
@@ -5904,11 +6322,13 @@ export default function ChatScreen({
                   } else {
                     const raw = String(t.rawText ?? t.text ?? '');
                     const env = !isDm ? parseChatEnvelope(raw) : null;
-                    if (env?.media?.path) {
+                    const envList = env ? normalizeChatMediaList(env.media) : [];
+                    if (envList.length) {
                       hasMedia = true;
-                      caption = String(env.text || '');
-                      kind = (env.media.kind as any) || 'file';
-                      const key = String(env.media.thumbPath || env.media.path);
+                      caption = String(env?.text || '');
+                      const first = envList[0];
+                      kind = (first.kind as any) || 'file';
+                      const key = String(first.thumbPath || first.path);
                       thumbUri = mediaUrlByPath[key] ? mediaUrlByPath[key] : null;
                     } else {
                       caption = raw;
@@ -6038,11 +6458,11 @@ export default function ChatScreen({
                   if (t.encrypted) {
                     if (!t.decryptedText) return false;
                     const dmEnv = parseDmMediaEnvelope(String(t.decryptedText));
-                    return !!dmEnv?.media?.path;
+                    return !!(dmEnv && normalizeDmMediaItems(dmEnv).length);
                   }
                   if (isDm) return false;
                   const env = parseChatEnvelope(String(t.rawText ?? t.text ?? ''));
-                  return !!env?.media?.path;
+                  return !!(env && normalizeChatMediaList(env.media).length);
                 })();
                 return (
                   <>
@@ -6079,8 +6499,8 @@ export default function ChatScreen({
                       <Pressable
                         onPress={() => {
                           setInlineEditAttachmentMode('remove');
-                          setPendingMedia(null);
-                          pendingMediaRef.current = null;
+                          setPendingMedia([]);
+                          pendingMediaRef.current = [];
                           beginInlineEdit(t);
                         }}
                         style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
@@ -6402,7 +6822,7 @@ export default function ChatScreen({
         animationType="fade"
         onRequestClose={() => {
           setViewerOpen(false);
-          setViewerMedia(null);
+          setViewerState(null);
         }}
       >
         <View style={styles.viewerOverlay}>
@@ -6414,7 +6834,24 @@ export default function ChatScreen({
                 { height: 52 + insets.top, paddingTop: insets.top, opacity: viewerChromeOpacity },
               ]}
             >
-              <Text style={styles.viewerTitle}>{viewerMedia?.fileName || 'Attachment'}</Text>
+              {(() => {
+                const vs = viewerState;
+                const count =
+                  vs?.mode === 'global'
+                    ? (vs.globalItems?.length ?? 0)
+                    : vs?.mode === 'dm'
+                      ? (vs.dmItems?.length ?? 0)
+                      : 0;
+                const idx = vs ? vs.index : 0;
+                const name =
+                  vs?.mode === 'global'
+                    ? vs.globalItems?.[idx]?.fileName
+                    : vs?.mode === 'dm'
+                      ? vs.dmItems?.[idx]?.media?.fileName
+                      : undefined;
+                const title = name || (count > 1 ? `Attachment ${idx + 1}/${count}` : 'Attachment');
+                return <Text style={styles.viewerTitle}>{title}</Text>;
+              })()}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                 <Pressable
                   style={[styles.viewerCloseBtn, viewerSaving ? { opacity: 0.6 } : null]}
@@ -6427,7 +6864,7 @@ export default function ChatScreen({
                   style={styles.viewerCloseBtn}
                   onPress={() => {
                     setViewerOpen(false);
-                    setViewerMedia(null);
+                    setViewerState(null);
                   }}
                 >
                   <Text style={styles.viewerCloseText}>Close</Text>
@@ -6435,32 +6872,106 @@ export default function ChatScreen({
               </View>
             </Animated.View>
             <View style={styles.viewerBody}>
-              {viewerMedia?.kind === 'image' && viewerMedia?.url ? (
-                <Pressable
-                  style={styles.viewerTapArea}
-                  onPress={() => setViewerChromeVisible((v) => !v)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Toggle controls"
-                >
-                  <Image source={{ uri: viewerMedia.url }} style={styles.viewerImage} />
-                </Pressable>
-              ) : viewerMedia?.kind === 'video' && viewerMedia?.url ? (
-                <View
-                  style={styles.viewerTapArea}
-                  // IMPORTANT:
-                  // On Android, adding an overlay Pressable prevents the VideoView from receiving the tap that
-                  // shows native playback controls. Instead, we "listen" in the capture phase but do NOT claim
-                  // the responder, so the VideoView still receives the same tap.
-                  onStartShouldSetResponderCapture={() => {
-                    if (!viewerChromeVisible) showViewerChromeBriefly();
-                    return false;
-                  }}
-                >
-                  <FullscreenVideo url={viewerMedia.url} />
-                </View>
-              ) : (
-                <Text style={styles.viewerFallback}>No preview available.</Text>
-              )}
+              {(() => {
+                const vs = viewerState;
+                if (!vs) return <Text style={styles.viewerFallback}>No preview available.</Text>;
+                const count =
+                  vs.mode === 'global'
+                    ? (vs.globalItems?.length ?? 0)
+                    : vs.mode === 'dm'
+                      ? (vs.dmItems?.length ?? 0)
+                      : 0;
+                if (!count) return <Text style={styles.viewerFallback}>No preview available.</Text>;
+
+                const onMomentumEnd = (e: any) => {
+                  const x = Number(e?.nativeEvent?.contentOffset?.x ?? 0);
+                  const w = Number(Dimensions.get('window')?.width ?? 1);
+                  const next = Math.max(0, Math.min(count - 1, Math.round(x / Math.max(1, w))));
+                  setViewerState((prev) => (prev ? { ...prev, index: next } : prev));
+                };
+
+                const pageW = Dimensions.get('window').width;
+                const pageH = Dimensions.get('window').height - (52 + insets.top);
+
+                return (
+                  <ScrollView
+                    horizontal
+                    pagingEnabled
+                    showsHorizontalScrollIndicator={false}
+                    onMomentumScrollEnd={onMomentumEnd}
+                    contentOffset={{ x: pageW * (vs.index || 0), y: 0 }}
+                    style={{ width: pageW, height: pageH }}
+                  >
+                    {Array.from({ length: count }).map((_, i) => {
+                      const item =
+                        vs.mode === 'global'
+                          ? vs.globalItems?.[i]
+                          : vs.mode === 'dm'
+                            ? (() => {
+                                const it = vs.dmItems?.[i];
+                                if (!it?.media?.path) return null;
+                                const url = dmFileUriByPath[it.media.path] || '';
+                                const kind =
+                                  it.media.kind === 'video' ? 'video' : it.media.kind === 'image' ? 'image' : 'file';
+                                return { url, kind, fileName: it.media.fileName };
+                              })()
+                            : null;
+
+                      const url = item?.url || '';
+                      const kind = item?.kind;
+                      if (!url) {
+                        return (
+                          <View
+                            key={`viewer:${i}`}
+                            style={[styles.viewerTapArea, { width: pageW, height: pageH, justifyContent: 'center', alignItems: 'center' }]}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>Loading</Text>
+                              <AnimatedDots color="#fff" size={18} />
+                            </View>
+                          </View>
+                        );
+                      }
+
+                      if (kind === 'image') {
+                        return (
+                          <Pressable
+                            key={`viewer:${i}`}
+                            style={[styles.viewerTapArea, { width: pageW, height: pageH }]}
+                            onPress={() => setViewerChromeVisible((v) => !v)}
+                            accessibilityRole="button"
+                            accessibilityLabel="Toggle controls"
+                          >
+                            <Image source={{ uri: url }} style={styles.viewerImage} />
+                          </Pressable>
+                        );
+                      }
+
+                      if (kind === 'video') {
+                        return (
+                          <View
+                            key={`viewer:${i}`}
+                            style={[styles.viewerTapArea, { width: pageW, height: pageH }]}
+                            // IMPORTANT: don't steal taps from native controls
+                            onStartShouldSetResponderCapture={() => {
+                              if (!viewerChromeVisible) showViewerChromeBriefly();
+                              return false;
+                            }}
+                          >
+                            <FullscreenVideo url={url} />
+                          </View>
+                        );
+                      }
+
+                      return (
+                        <View key={`viewer:${i}`} style={[styles.viewerTapArea, { width: pageW, height: pageH, justifyContent: 'center', alignItems: 'center' }]}>
+                          <Text style={styles.viewerFallback}>No preview available.</Text>
+                        </View>
+                      );
+                    })}
+                  </ScrollView>
+                );
+              })()}
             </View>
           </View>
         </View>
@@ -6921,6 +7432,89 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 6,
+  },
+  extraThumbRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  extraThumb: {
+    width: 56,
+    height: 56,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,0,0,0.08)',
+  },
+  extraThumbMediaWrap: { width: '100%', height: '100%' },
+  extraThumbImage: { width: '100%', height: '100%' },
+  extraThumbPlayOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  extraThumbPlayText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  extraThumbPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  extraThumbPlaceholderText: { fontSize: 12, fontWeight: '800', color: '#444' },
+  mediaStackCard: {
+    position: 'absolute',
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  mediaCountBadge: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    zIndex: 5,
+  },
+  mediaCountBadgeText: { color: '#fff', fontWeight: '900', fontSize: 12 },
+  mediaDotsOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 6,
+  },
+  mediaDotsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+  },
+  mediaDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.55)',
+  },
+  mediaDotActive: {
+    width: 16,
+    backgroundColor: 'rgba(255,255,255,0.95)',
   },
   seenText: {
     marginTop: 6,

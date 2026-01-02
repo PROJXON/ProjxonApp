@@ -101,10 +101,14 @@ const extractChatMediaPathsFromText = (rawText) => {
     const obj = JSON.parse(t);
     if (!obj || typeof obj !== 'object') return [];
     if (obj.type !== 'chat') return [];
-    const media = obj.media && typeof obj.media === 'object' ? obj.media : null;
     const out = [];
-    if (media && typeof media.path === 'string') out.push(String(media.path));
-    if (media && typeof media.thumbPath === 'string') out.push(String(media.thumbPath));
+    const rawMedia = obj.media;
+    const list = Array.isArray(rawMedia) ? rawMedia : rawMedia && typeof rawMedia === 'object' ? [rawMedia] : [];
+    for (const m of list) {
+      if (!m || typeof m !== 'object') continue;
+      if (typeof m.path === 'string') out.push(String(m.path));
+      if (typeof m.thumbPath === 'string') out.push(String(m.thumbPath));
+    }
     return normalizeMediaPaths(out);
   } catch {
     return [];
