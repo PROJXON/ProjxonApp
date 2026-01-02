@@ -54,6 +54,7 @@ import { InAppCameraModal } from '../components/InAppCameraModal';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as MediaLibrary from 'expo-media-library';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { fromByteArray, toByteArray } from 'base64-js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
@@ -526,6 +527,9 @@ export default function ChatScreen({
     fileName?: string;
   } | null>(null);
   const [viewerSaving, setViewerSaving] = React.useState<boolean>(false);
+  const [viewerChromeVisible, setViewerChromeVisible] = React.useState<boolean>(true);
+  const viewerChromeHideTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const viewerChromeOpacity = React.useRef(new Animated.Value(1)).current;
   const [toast, setToast] = React.useState<null | { message: string; kind: 'success' | 'error' }>(null);
   const toastAnim = React.useRef(new Animated.Value(0)).current;
   const toastTimerRef = React.useRef<any>(null);
@@ -536,6 +540,64 @@ export default function ChatScreen({
     [conversationId]
   );
   const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+
+  // Allow rotating the device while the fullscreen media viewer is open,
+  // but keep the rest of the app portrait-locked.
+  React.useEffect(() => {
+    if (!viewerOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await ScreenOrientation.unlockAsync();
+      } catch {
+        // ignore (some platforms/devices may not support it)
+      }
+    })();
+    return () => {
+      cancelled = true;
+      (async () => {
+        if (cancelled) {
+          // no-op marker; keep structure symmetrical
+        }
+        try {
+          await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+        } catch {
+          // ignore
+        }
+      })();
+    };
+  }, [viewerOpen]);
+
+  // Fullscreen viewer chrome: show briefly on open, then hide for a clean view.
+  React.useEffect(() => {
+    if (!viewerOpen) {
+      if (viewerChromeHideTimerRef.current) clearTimeout(viewerChromeHideTimerRef.current);
+      viewerChromeHideTimerRef.current = null;
+      setViewerChromeVisible(true);
+      return;
+    }
+    setViewerChromeVisible(true);
+    if (viewerChromeHideTimerRef.current) clearTimeout(viewerChromeHideTimerRef.current);
+    viewerChromeHideTimerRef.current = setTimeout(() => setViewerChromeVisible(false), 1500);
+    return () => {
+      if (viewerChromeHideTimerRef.current) clearTimeout(viewerChromeHideTimerRef.current);
+      viewerChromeHideTimerRef.current = null;
+    };
+  }, [viewerOpen]);
+
+  // If the user taps Save, keep chrome visible while saving.
+  React.useEffect(() => {
+    if (viewerSaving) setViewerChromeVisible(true);
+  }, [viewerSaving]);
+
+  // Animate viewer chrome (fast fade in/out).
+  React.useEffect(() => {
+    Animated.timing(viewerChromeOpacity, {
+      toValue: viewerChromeVisible ? 1 : 0,
+      duration: 160,
+      useNativeDriver: true,
+    }).start();
+  }, [viewerChromeVisible, viewerChromeOpacity]);
 
   React.useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -566,6 +628,14 @@ export default function ChatScreen({
       if (!API_URL) return;
       const base = API_URL.replace(/\/$/, '');
       const missing: string[] = [];
+      // Always try to include my own profile so I can see my avatar in the header,
+      // even if there are no messages yet in this conversation.
+      if (myUserId) {
+        const sub = String(myUserId);
+        if (!avatarProfileBySub[sub] && !inFlightAvatarProfileRef.current.has(sub)) {
+          missing.push(sub);
+        }
+      }
       for (const m of messages) {
         const sub = m.userSub ? String(m.userSub) : '';
         if (!sub) continue;
@@ -612,7 +682,7 @@ export default function ChatScreen({
     return () => {
       cancelled = true;
     };
-  }, [API_URL, messages, avatarProfileBySub]);
+  }, [API_URL, messages, avatarProfileBySub, myUserId]);
 
   React.useEffect(() => {
     pendingMediaRef.current = pendingMedia;
@@ -3972,16 +4042,36 @@ export default function ChatScreen({
             </View>
           </View>
           <View style={styles.headerSubRow}>
-            <Text
-              style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null, styles.welcomeTextFlex]}
-              numberOfLines={1}
-            >
-              {`Welcome ${displayName}!`}
-            </Text>
+            {(() => {
+              const myProf = myUserId ? avatarProfileBySub[String(myUserId)] : undefined;
+              const myAvatarImageUri =
+                myProf?.avatarImagePath ? avatarUrlByPath[String(myProf.avatarImagePath)] : undefined;
+              return (
+                <View style={styles.welcomeRow}>
+                  <AvatarBubble
+                    size={34}
+                    seed={String(myUserId || displayName || 'me')}
+                    label={displayName || 'me'}
+                    backgroundColor={myProf?.avatarBgColor}
+                    textColor={myProf?.avatarTextColor}
+                    imageUri={myAvatarImageUri}
+                    imageBgColor={isDark ? '#1c1c22' : '#f2f2f7'}
+                    style={styles.welcomeAvatar}
+                  />
+                  <Text
+                    style={[styles.welcomeText, isDark ? styles.welcomeTextDark : null, styles.welcomeTextFlex]}
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                  >
+                    {`Welcome ${displayName}!`}
+                  </Text>
+                </View>
+              );
+            })()}
             {isDm ? (
               <View style={styles.dmHeaderControls}>
                 <View style={styles.dmHeaderControl}>
-                  <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>Decrypt</Text>
+                  <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>Auto‑Decrypt</Text>
                   <Switch
                     value={autoDecrypt}
                     onValueChange={setAutoDecrypt}
@@ -5942,17 +6032,24 @@ export default function ChatScreen({
         </View>
       </Modal>
 
-      <Modal visible={viewerOpen} transparent animationType="fade">
+      <Modal
+        visible={viewerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setViewerOpen(false);
+          setViewerMedia(null);
+        }}
+      >
         <View style={styles.viewerOverlay}>
-          <Pressable
-            style={StyleSheet.absoluteFill}
-            onPress={() => {
-              setViewerOpen(false);
-              setViewerMedia(null);
-            }}
-          />
           <View style={styles.viewerCard}>
-            <View style={styles.viewerTopBar}>
+            <Animated.View
+              pointerEvents={viewerChromeVisible ? 'auto' : 'none'}
+              style={[
+                styles.viewerTopBar,
+                { height: 52 + insets.top, paddingTop: insets.top, opacity: viewerChromeOpacity },
+              ]}
+            >
               <Text style={styles.viewerTitle}>{viewerMedia?.fileName || 'Attachment'}</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                 <Pressable
@@ -5972,10 +6069,17 @@ export default function ChatScreen({
                   <Text style={styles.viewerCloseText}>Close</Text>
                 </Pressable>
               </View>
-            </View>
+            </Animated.View>
             <View style={styles.viewerBody}>
               {viewerMedia?.kind === 'image' && viewerMedia?.url ? (
-                <Image source={{ uri: viewerMedia.url }} style={styles.viewerImage} />
+                <Pressable
+                  style={styles.viewerTapArea}
+                  onPress={() => setViewerChromeVisible((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Toggle controls"
+                >
+                  <Image source={{ uri: viewerMedia.url }} style={styles.viewerImage} />
+                </Pressable>
               ) : viewerMedia?.kind === 'video' && viewerMedia?.url ? (
                 <FullscreenVideo url={viewerMedia.url} />
               ) : (
@@ -6056,7 +6160,9 @@ const styles = StyleSheet.create({
   titleDark: { color: '#fff' },
   welcomeText: { fontSize: 14, color: '#555', marginTop: 4, fontWeight: '700' },
   welcomeTextDark: { color: '#b7b7c2' },
-  welcomeTextFlex: { flexGrow: 1, flexShrink: 1, paddingRight: 10 },
+  welcomeTextFlex: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
+  welcomeRow: { flexDirection: 'row', alignItems: 'center', flexGrow: 1, flexShrink: 1, minWidth: 0 },
+  welcomeAvatar: { marginTop: 4, marginRight: 8, flexShrink: 0 },
   headerSubRow: {
     marginTop: 6,
     flexDirection: 'row',
@@ -6850,15 +6956,16 @@ const styles = StyleSheet.create({
   viewerOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: 'flex-start',
+    alignItems: 'stretch',
   },
   viewerCard: {
-    width: '94%',
-    height: '86%',
-    borderRadius: 14,
+    width: '100%',
+    height: '100%',
+    borderRadius: 0,
     overflow: 'hidden',
     backgroundColor: '#000',
+    position: 'relative',
   },
   viewerTopBar: {
     height: 52,
@@ -6866,12 +6973,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(0,0,0,0.65)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
   },
   viewerTitle: { color: '#fff', fontWeight: '700', flex: 1, marginRight: 12 },
-  viewerCloseBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#222' },
+  viewerCloseBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
   viewerCloseText: { color: '#fff', fontWeight: '700' },
   viewerBody: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  viewerTapArea: { flex: 1, width: '100%', height: '100%' },
   viewerImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   viewerVideo: { width: '100%', height: '100%' },
   viewerFallback: { color: '#fff' },
