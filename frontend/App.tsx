@@ -1562,7 +1562,14 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       </View>
 
       {searchOpen && (
-        <View style={styles.searchWrapper}>
+        <View
+          style={[
+            styles.searchWrapper,
+            // When there are no unread hints, add a bit more space before the chat title row.
+            // If there ARE unread hints, keep it tight so we don't "double pad" the header.
+            !unreadEntries.length ? { marginBottom: 6 } : null,
+          ]}
+        >
           <View style={styles.searchRow}>
             <TextInput
               value={peerInput}
@@ -3529,13 +3536,13 @@ const styles = StyleSheet.create({
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 0,
     gap: 8,
     zIndex: 1,
   },
   searchWrapper: {
-    marginTop: 10,
-    marginBottom: 8,
+    marginTop: 6,
+    marginBottom: 0,
   },
   searchInput: {
     flex: 1,
@@ -3599,14 +3606,15 @@ const styles = StyleSheet.create({
   },
   unreadList: {
     paddingHorizontal: 4,
+    paddingTop: 4,
   },
   unreadHintWrapper: {
-    paddingVertical: 2,
+    paddingVertical: 0,
   },
   unreadHint: {
     color: '#555',
     fontSize: 13,
-    marginTop: 4,
+    marginTop: 0,
     paddingHorizontal: 4,
   },
   unreadHintDark: {

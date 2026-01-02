@@ -6042,7 +6042,9 @@ const styles = StyleSheet.create({
     borderBottomColor: '#2a2a33',
   },
   headerTopSlot: {
-    marginBottom: 10,
+    // Small, consistent breathing room between the app-level headerTop controls
+    // (Global/DM switch, menu, DM search) and the chat title row.
+    marginBottom: 3,
   },
   titleRow: {
     flexDirection: 'row',
