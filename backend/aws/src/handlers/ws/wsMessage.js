@@ -14,12 +14,109 @@ const {
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
+// Self-contained best-effort SQS enqueue (so this Lambda can be copy/pasted into AWS).
+const DEFAULT_DELETE_ALLOWED_PREFIXES = ['uploads/public/avatars/', 'uploads/channels/', 'uploads/dm/'];
+const normalizeS3Key = (k) => {
+  const s = typeof k === 'string' ? String(k).trim() : '';
+  if (!s) return '';
+  if (/^[a-z]+:\/\//i.test(s)) return '';
+  return s.replace(/^\/+/, '');
+};
+const uniqStrings = (arr) => {
+  const out = [];
+  const seen = new Set();
+  for (const v of arr || []) {
+    const s = typeof v === 'string' ? v.trim() : '';
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+};
+const enqueueMediaDeletes = async ({ keys, reason, allowedPrefixes, context }) => {
+  const queueUrl = String(process.env.MEDIA_DELETE_QUEUE_URL || '').trim();
+  if (!queueUrl) return;
+  const pfx = Array.isArray(allowedPrefixes) && allowedPrefixes.length ? allowedPrefixes : DEFAULT_DELETE_ALLOWED_PREFIXES;
+  const safeKeys = uniqStrings((keys || []).map(normalizeS3Key))
+    .filter(Boolean)
+    .filter((k) => pfx.some((p) => k.startsWith(p)));
+  if (!safeKeys.length) return;
+
+  const body = JSON.stringify({
+    v: 1,
+    keys: safeKeys,
+    reason: typeof reason === 'string' ? reason : 'unspecified',
+    context: context && typeof context === 'object' ? context : undefined,
+    createdAt: Date.now(),
+  });
+
+  // Prefer AWS SDK v3 if present, fall back to aws-sdk v2.
+  try {
+    // eslint-disable-next-line import/no-extraneous-dependencies
+    const { SQSClient, SendMessageCommand } = require('@aws-sdk/client-sqs');
+    const sqs = new SQSClient({});
+    await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: body }));
+    return;
+  } catch {
+    // ignore
+  }
+  try {
+    // eslint-disable-next-line import/no-extraneous-dependencies
+    const AWS = require('aws-sdk');
+    const sqs = new AWS.SQS();
+    await sqs.sendMessage({ QueueUrl: queueUrl, MessageBody: body }).promise();
+  } catch {
+    // ignore
+  }
+};
+
 // Connections TTL refresh window (must match your DynamoDB TTL attribute "expiresAt")
 const CONN_TTL_SECONDS = 6 * 60 * 60; // 6 hours
 
 const safeString = (v) => {
   if (typeof v !== 'string') return '';
   return String(v).trim();
+};
+
+const normalizeMediaPaths = (input) => {
+  const arr = Array.isArray(input) ? input : [];
+  const out = [];
+  const seen = new Set();
+  for (const v of arr) {
+    const s = typeof v === 'string' ? String(v).trim().replace(/^\/+/, '') : '';
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+};
+
+// For global/channel (plaintext), attachments are embedded in the JSON envelope stored in `text`.
+const extractChatMediaPathsFromText = (rawText) => {
+  const t = typeof rawText === 'string' ? String(rawText).trim() : '';
+  if (!t) return [];
+  try {
+    const obj = JSON.parse(t);
+    if (!obj || typeof obj !== 'object') return [];
+    if (obj.type !== 'chat') return [];
+    const media = obj.media && typeof obj.media === 'object' ? obj.media : null;
+    const out = [];
+    if (media && typeof media.path === 'string') out.push(String(media.path));
+    if (media && typeof media.thumbPath === 'string') out.push(String(media.thumbPath));
+    return normalizeMediaPaths(out);
+  } catch {
+    return [];
+  }
+};
+
+const setDiff = (a, b) => {
+  const A = new Set(Array.isArray(a) ? a : []);
+  const B = new Set(Array.isArray(b) ? b : []);
+  const removed = [];
+  for (const x of A) if (!B.has(x)) removed.push(x);
+  return removed;
 };
 
 const isLikelyExpoToken = (token) => {
@@ -595,15 +692,47 @@ exports.handler = async (event) => {
       if (String(msg.userSub || '') !== senderSub) return { statusCode: 403, body: 'Forbidden.' };
       if (msg.deletedAt) return { statusCode: 409, body: 'Message already deleted.' };
 
+      // Async cleanup for attachments on edit:
+      // - Global/channel: compare old/new envelopes.
+      // - DM: use mediaPaths stored on the message row; allow client to provide updated mediaPaths.
+      const isDm = conversationId !== 'global';
+      const oldMediaPaths = isDm
+        ? normalizeMediaPaths(msg.mediaPaths)
+        : extractChatMediaPathsFromText(typeof msg.text === 'string' ? msg.text : '');
+      const incomingMediaPaths = Object.prototype.hasOwnProperty.call(body, 'mediaPaths')
+        ? normalizeMediaPaths(body.mediaPaths)
+        : undefined; // undefined => keep existing
+      const newMediaPaths = isDm
+        ? incomingMediaPaths === undefined
+          ? oldMediaPaths
+          : incomingMediaPaths
+        : extractChatMediaPathsFromText(newText);
+      const toDelete = setDiff(oldMediaPaths, newMediaPaths);
+
       await ddb.send(
         new UpdateCommand({
           TableName: process.env.MESSAGES_TABLE,
           Key: { conversationId, createdAt: messageCreatedAt },
-          UpdateExpression: 'SET #t = :t, editedAt = :ea, updatedAt = :ua',
+          UpdateExpression:
+            isDm && incomingMediaPaths !== undefined
+              ? 'SET #t = :t, mediaPaths = :mp, editedAt = :ea, updatedAt = :ua'
+              : 'SET #t = :t, editedAt = :ea, updatedAt = :ua',
           ExpressionAttributeNames: { '#t': 'text' },
-          ExpressionAttributeValues: { ':t': newText, ':ea': nowMs, ':ua': nowMs },
+          ExpressionAttributeValues:
+            isDm && incomingMediaPaths !== undefined
+              ? { ':t': newText, ':mp': newMediaPaths, ':ea': nowMs, ':ua': nowMs }
+              : { ':t': newText, ':ea': nowMs, ':ua': nowMs },
         })
       );
+
+      if (toDelete.length) {
+        enqueueMediaDeletes({
+          keys: toDelete,
+          reason: isDm ? 'dm_attachment_replaced' : 'attachment_replaced',
+          allowedPrefixes: isDm ? ['uploads/dm/'] : ['uploads/channels/'],
+          context: { conversationId, messageCreatedAt },
+        }).catch((err) => console.warn('enqueueMediaDeletes(edit) failed (ignored)', err));
+      }
 
       await broadcast(mgmt, recipientConnIds, {
         type: 'edit',
@@ -637,6 +766,22 @@ exports.handler = async (event) => {
       if (!msg) return { statusCode: 404, body: 'Message not found.' };
       if (String(msg.userSub || '') !== senderSub) return { statusCode: 403, body: 'Forbidden.' };
       if (msg.deletedAt) return { statusCode: 200, body: 'Already deleted.' };
+
+      // Async cleanup for attachments on delete:
+      // - Global/channel: parse msg.text envelope before we REMOVE it.
+      // - DM: use msg.mediaPaths (stored out-of-band).
+      const isDm = conversationId !== 'global';
+      const mediaPaths = isDm
+        ? normalizeMediaPaths(msg.mediaPaths)
+        : extractChatMediaPathsFromText(typeof msg.text === 'string' ? msg.text : '');
+      if (mediaPaths.length) {
+        enqueueMediaDeletes({
+          keys: mediaPaths,
+          reason: isDm ? 'dm_message_deleted' : 'message_deleted',
+          allowedPrefixes: isDm ? ['uploads/dm/'] : ['uploads/channels/'],
+          context: { conversationId, messageCreatedAt },
+        }).catch((err) => console.warn('enqueueMediaDeletes(delete) failed (ignored)', err));
+      }
 
       // Preserve audit fields, but remove message contents
       await ddb.send(
@@ -833,6 +978,10 @@ exports.handler = async (event) => {
         ? clientMessageId
         : `${nowMs}-${Math.random().toString(36).slice(2)}`;
 
+    const incomingMediaPaths = Object.prototype.hasOwnProperty.call(body, 'mediaPaths')
+      ? normalizeMediaPaths(body.mediaPaths)
+      : undefined;
+
     // Persist (store display + stable key)
     await ddb.send(
       new PutCommand({
@@ -845,6 +994,9 @@ exports.handler = async (event) => {
           user: senderDisplayName,
           userLower: senderUsernameLower,
           userSub: senderSub,
+          ...(conversationId !== 'global' && incomingMediaPaths && incomingMediaPaths.length
+            ? { mediaPaths: incomingMediaPaths }
+            : {}),
           ...(ttlSeconds ? { ttlSeconds } : {}),
         },
       })

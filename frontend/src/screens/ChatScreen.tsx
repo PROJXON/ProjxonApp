@@ -187,6 +187,9 @@ function FullscreenVideo({ url }: { url: string }): React.JSX.Element {
       style={styles.viewerVideo}
       contentFit="contain"
       nativeControls
+      // On Android, SurfaceView can ignore zIndex and cover overlays (like our Save/Close chrome).
+      // TextureView keeps the video in the normal view hierarchy so overlays render correctly.
+      {...(Platform.OS === 'android' ? ({ surfaceType: 'textureView' } as any) : null)}
     />
   );
 }
@@ -615,6 +618,12 @@ export default function ChatScreen({
       useNativeDriver: true,
     }).start();
   }, [viewerChromeVisible, viewerChromeOpacity]);
+
+  const showViewerChromeBriefly = React.useCallback(() => {
+    setViewerChromeVisible(true);
+    if (viewerChromeHideTimerRef.current) clearTimeout(viewerChromeHideTimerRef.current);
+    viewerChromeHideTimerRef.current = setTimeout(() => setViewerChromeVisible(false), 1500);
+  }, []);
 
   React.useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -1112,7 +1121,8 @@ export default function ChatScreen({
           .replace(/[^\w.\-() ]+/g, '_')
           .slice(0, 120) || `file-${Date.now()}`;
       const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const path = `uploads/dm/${conversationKey}/${uploadId}-${safeName}.enc`;
+      // Keep DM object keys opaque (do not embed filenames).
+      const path = `uploads/dm/${conversationKey}/${uploadId}.enc`;
       // NOTE: avoid Blob construction on RN (can throw). uploadData supports Uint8Array directly.
       await uploadData({ path, data: fileCipher, options: { contentType: 'application/octet-stream' } }).result;
 
@@ -2804,6 +2814,7 @@ export default function ChatScreen({
     const originalPendingMedia = currentPendingMedia;
 
     let outgoingText = originalInput.trim();
+    let dmMediaPathsToSend: string[] | undefined = undefined;
 
     const clearDraftImmediately = () => {
       // Force-remount the TextInput to fully reset native state.
@@ -2848,6 +2859,8 @@ export default function ChatScreen({
       }
 
       // DM media: encrypt + upload ciphertext, then encrypt the envelope as a normal DM message.
+      // We also include opaque S3 keys as `mediaPaths` so the backend can delete attachments later
+      // without decrypting message text.
       if (originalPendingMedia) {
         try {
           setIsUploading(true);
@@ -2860,6 +2873,7 @@ export default function ChatScreen({
           const plaintextEnvelope = JSON.stringify(dmEnv);
           const enc = encryptChatMessageV1(plaintextEnvelope, myPrivateKey, peerPublicKey);
           outgoingText = JSON.stringify(enc);
+          dmMediaPathsToSend = [dmEnv.media.path, dmEnv.media.thumbPath].filter(Boolean) as string[];
         } catch (e: any) {
           Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
           restoreDraftIfUnchanged();
@@ -2943,6 +2957,7 @@ export default function ChatScreen({
       createdAt: Date.now(),
       // TTL-from-read: we send a duration, and the countdown starts when the recipient decrypts.
       ttlSeconds: isDm && TTL_OPTIONS[ttlIdx]?.seconds ? TTL_OPTIONS[ttlIdx].seconds : undefined,
+      ...(isDm && typeof dmMediaPathsToSend !== 'undefined' ? { mediaPaths: dmMediaPathsToSend } : {}),
     };
     try {
     wsRef.current.send(JSON.stringify(outgoing));
@@ -3389,6 +3404,11 @@ export default function ChatScreen({
           conversationId: activeConversationId,
           messageCreatedAt: target.createdAt,
           text: outgoingText,
+          ...(needsEncryption && inlineEditAttachmentMode === 'remove'
+            ? { mediaPaths: [] }
+            : needsEncryption && inlineEditAttachmentMode === 'replace'
+              ? { mediaPaths: [dmMediaSent?.path, dmMediaSent?.thumbPath].filter(Boolean) }
+              : {}),
           createdAt: Date.now(),
         })
       );
@@ -4082,6 +4102,19 @@ export default function ChatScreen({
                   >
                     {`Welcome ${displayName}!`}
                   </Text>
+                  <View style={styles.welcomeStatusRow}>
+                    {isConnecting ? <ActivityIndicator size="small" /> : null}
+                    <Text
+                      style={[
+                        styles.welcomeStatusText,
+                        isDark ? styles.statusTextDark : null,
+                        !isConnecting ? (isConnected ? styles.ok : styles.err) : null,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {isConnecting ? 'Connecting…' : isConnected ? 'Connected' : 'Disconnected'}
+                    </Text>
+                  </View>
                 </View>
               );
             })()}
@@ -4118,24 +4151,6 @@ export default function ChatScreen({
               </View>
             ) : null}
           </View>
-          {isConnecting ? (
-            <View style={styles.statusRow}>
-              <ActivityIndicator size="small" />
-              <Text style={[styles.statusText, isDark ? styles.statusTextDark : null]}>
-                Connecting…
-              </Text>
-            </View>
-          ) : (
-            <Text
-              style={[
-                styles.statusText,
-                isDark ? styles.statusTextDark : null,
-                isConnected ? styles.ok : styles.err,
-              ]}
-            >
-              {isConnected ? 'Connected' : 'Disconnected'}
-            </Text>
-          )}
           {error ? (
             <Text style={[styles.error, isDark ? styles.errorDark : null]}>{error}</Text>
           ) : null}
@@ -6123,7 +6138,19 @@ export default function ChatScreen({
                   <Image source={{ uri: viewerMedia.url }} style={styles.viewerImage} />
                 </Pressable>
               ) : viewerMedia?.kind === 'video' && viewerMedia?.url ? (
-                <FullscreenVideo url={viewerMedia.url} />
+                <View
+                  style={styles.viewerTapArea}
+                  // IMPORTANT:
+                  // On Android, adding an overlay Pressable prevents the VideoView from receiving the tap that
+                  // shows native playback controls. Instead, we "listen" in the capture phase but do NOT claim
+                  // the responder, so the VideoView still receives the same tap.
+                  onStartShouldSetResponderCapture={() => {
+                    if (!viewerChromeVisible) showViewerChromeBriefly();
+                    return false;
+                  }}
+                >
+                  <FullscreenVideo url={viewerMedia.url} />
+                </View>
               ) : (
                 <Text style={styles.viewerFallback}>No preview available.</Text>
               )}
@@ -6208,6 +6235,8 @@ const styles = StyleSheet.create({
   welcomeTextFlex: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   welcomeRow: { flexDirection: 'row', alignItems: 'center', flexGrow: 1, flexShrink: 1, minWidth: 0 },
   welcomeAvatar: { marginTop: 4, marginRight: 8, flexShrink: 0 },
+  welcomeStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, flexShrink: 0 },
+  welcomeStatusText: { fontSize: 12, color: '#666', fontWeight: '800' },
   headerSubRow: {
     marginTop: 6,
     flexDirection: 'row',
@@ -6215,6 +6244,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 10,
   },
+  // (legacy) statusRow/statusText were used when connection status lived below the welcome line.
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   statusText: { fontSize: 12, color: '#666', marginTop: 6 },
   statusTextDark: { color: '#a7a7b4' },
