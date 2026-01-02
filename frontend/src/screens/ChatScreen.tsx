@@ -205,6 +205,14 @@ type ChatScreenProps = {
   blockedUserSubs?: string[];
   // Bump this when keys are generated/recovered/reset so ChatScreen reloads them from storage.
   keyEpoch?: number;
+  // Optional app-level themed prompt helpers (preferred over native `Alert.alert`).
+  // If not provided, ChatScreen will fall back to `Alert.alert`.
+  promptAlert?: (title: string, message: string) => void | Promise<void>;
+  promptConfirm?: (
+    title: string,
+    message: string,
+    opts?: { confirmText?: string; cancelText?: string; destructive?: boolean }
+  ) => Promise<boolean>;
 };
 
 type ChatMessage = {
@@ -369,6 +377,7 @@ export default function ChatScreen({
   chatBackground,
   blockedUserSubs = [],
   keyEpoch,
+  promptAlert,
 }: ChatScreenProps): React.JSX.Element {
   const isDark = theme === 'dark';
   const insets = useSafeAreaInsets();
@@ -812,11 +821,30 @@ export default function ChatScreen({
     };
   }, []);
 
+  const showAlert = React.useCallback(
+    (title: string, message: string) => {
+      if (typeof promptAlert === 'function') {
+        try {
+          void Promise.resolve(promptAlert(title, message));
+          return;
+        } catch {
+          // fall through to native alert
+        }
+      }
+      Alert.alert(title, message);
+    },
+    [promptAlert]
+  );
+
   const pickFromLibrary = React.useCallback(async () => {
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert('Permission needed', 'Please allow photo library access to pick media.');
+        // Keep permission prompts as a native system alert (more appropriate than themed modals).
+        Alert.alert(
+          'Permission needed',
+          'Please allow photo library access to pick media.\n\nIf you previously denied this permission, enable it in Settings.'
+        );
         return;
       }
 
@@ -849,9 +877,9 @@ export default function ChatScreen({
         size,
       });
     } catch (e: any) {
-      Alert.alert('Picker failed', e?.message ?? 'Unknown error');
+      showAlert('Picker failed', e?.message ?? 'Unknown error');
     }
-  }, []);
+  }, [showAlert]);
 
   const openCamera = React.useCallback(() => {
     setCameraOpen(true);
@@ -903,24 +931,24 @@ export default function ChatScreen({
         size: typeof first.size === 'number' ? first.size : undefined,
       });
     } catch (e: any) {
-      Alert.alert('File picker failed', e?.message ?? 'Unknown error');
+      showAlert('File picker failed', e?.message ?? 'Unknown error');
     }
-  }, []);
+  }, [showAlert]);
 
   // Attachments: Global = plaintext S3; DM = E2EE (client-side encryption before upload)
   const handlePickMedia = React.useCallback(() => {
     if (isDm) {
       if (!myPrivateKey) {
-        Alert.alert('Encryption not ready', 'Missing your private key on this device.');
+        showAlert('Encryption not ready', 'Missing your private key on this device.');
         return;
       }
       if (!peerPublicKey) {
-        Alert.alert('Encryption not ready', "Can't find the recipient's public key.");
+        showAlert('Encryption not ready', "Can't find the recipient's public key.");
         return;
       }
     }
     setAttachOpen(true);
-  }, [isDm, myPrivateKey, peerPublicKey]);
+  }, [isDm, myPrivateKey, peerPublicKey, showAlert]);
 
   const uploadPendingMedia = React.useCallback(
     async (
@@ -1204,9 +1232,9 @@ export default function ChatScreen({
       if (!s) throw new Error('CDN_URL not configured');
       await Linking.openURL(s);
     } catch (e: any) {
-      Alert.alert('Open failed', e?.message ?? 'Could not open attachment');
+      showAlert('Open failed', e?.message ?? 'Could not open attachment');
     }
-  }, []);
+  }, [showAlert]);
 
   // Ensure we have credentials before trying to resolve signed URLs for media.
   // Without this, `getUrl()` can fail right after sign-in and thumbnails get stuck without a URL.
@@ -1915,10 +1943,10 @@ export default function ChatScreen({
         });
         setViewerOpen(true);
       } catch (e: any) {
-        Alert.alert('Open failed', e?.message ?? 'Could not decrypt attachment');
+        showAlert('Open failed', e?.message ?? 'Could not decrypt attachment');
       }
     },
-    [isDm, decryptDmFileToCacheUri]
+    [isDm, decryptDmFileToCacheUri, showAlert]
   );
 
   const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
@@ -2848,12 +2876,12 @@ export default function ChatScreen({
     await new Promise((r) => setTimeout(r, 0));
     if (isDm) {
       if (!myPrivateKey) {
-        Alert.alert('Encryption not ready', 'Missing your private key on this device.');
+        showAlert('Encryption not ready', 'Missing your private key on this device.');
         restoreDraftIfUnchanged();
         return;
       }
       if (!peerPublicKey) {
-        Alert.alert('Encryption not ready', "Can't find the recipient's public key.");
+        showAlert('Encryption not ready', "Can't find the recipient's public key.");
         restoreDraftIfUnchanged();
         return;
       }
@@ -2875,7 +2903,7 @@ export default function ChatScreen({
           outgoingText = JSON.stringify(enc);
           dmMediaPathsToSend = [dmEnv.media.path, dmEnv.media.thumbPath].filter(Boolean) as string[];
         } catch (e: any) {
-          Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
+          showAlert('Upload failed', e?.message ?? 'Failed to upload media');
           restoreDraftIfUnchanged();
           return;
         } finally {
@@ -2896,7 +2924,7 @@ export default function ChatScreen({
         };
         outgoingText = JSON.stringify(envelope);
       } catch (e: any) {
-        Alert.alert('Upload failed', e?.message ?? 'Failed to upload media');
+        showAlert('Upload failed', e?.message ?? 'Failed to upload media');
         restoreDraftIfUnchanged();
         return;
       } finally {
@@ -3331,7 +3359,7 @@ export default function ChatScreen({
     const needsEncryption = isDm && !!target.encrypted;
     if (needsEncryption) {
       if (!myPrivateKey || !peerPublicKey) {
-        Alert.alert('Encryption not ready', 'Missing keys for editing.');
+        showAlert('Encryption not ready', 'Missing keys for editing.');
         return;
       }
       // If this is a DM media message:
@@ -3447,7 +3475,7 @@ export default function ChatScreen({
       );
       cancelInlineEdit();
     } catch (e: any) {
-      Alert.alert('Edit failed', e?.message ?? 'Failed to edit message');
+      showAlert('Edit failed', e?.message ?? 'Failed to edit message');
     }
   }, [
     inlineEditTargetId,
@@ -3463,6 +3491,7 @@ export default function ChatScreen({
     uploadPendingMediaDmEncrypted,
     uploadPendingMedia,
     openInfo,
+    showAlert,
   ]);
 
   const sendDelete = React.useCallback(async () => {
@@ -3499,9 +3528,9 @@ export default function ChatScreen({
       );
       closeMessageActions();
     } catch (e: any) {
-      Alert.alert('Delete failed', e?.message ?? 'Failed to delete message');
+      showAlert('Delete failed', e?.message ?? 'Failed to delete message');
     }
-  }, [messageActionTarget, activeConversationId, closeMessageActions]);
+  }, [messageActionTarget, activeConversationId, closeMessageActions, showAlert]);
 
   const sendReaction = React.useCallback(
     (target: ChatMessage, emoji: string) => {
@@ -3653,7 +3682,7 @@ export default function ChatScreen({
 
   const summarize = React.useCallback(async () => {
     if (!API_URL) {
-      Alert.alert('AI not configured', 'API_URL is not configured.');
+      showAlert('AI not configured', 'API_URL is not configured.');
       return;
     }
     try {
@@ -3702,12 +3731,12 @@ export default function ChatScreen({
       const data = await resp.json();
       setSummaryText(String(data.summary ?? ''));
     } catch (e: any) {
-      Alert.alert('Summary failed', e?.message ?? 'Unknown error');
+      showAlert('Summary failed', e?.message ?? 'Unknown error');
       setSummaryOpen(false);
     } finally {
       setSummaryLoading(false);
     }
-  }, [messages, activeConversationId, peer]);
+  }, [API_URL, messages, activeConversationId, peer, showAlert]);
 
   const openAiHelper = React.useCallback(() => {
     setHelperOpen(true);
@@ -5262,6 +5291,7 @@ export default function ChatScreen({
       <InAppCameraModal
         visible={cameraOpen}
         onClose={() => setCameraOpen(false)}
+        onAlert={showAlert}
         onCaptured={(cap) => {
           setCameraOpen(false);
           handleInAppCameraCaptured(cap);

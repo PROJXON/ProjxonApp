@@ -26,11 +26,13 @@ export function InAppCameraModal({
   initialMode,
   onClose,
   onCaptured,
+  onAlert,
 }: {
   visible: boolean;
   initialMode?: InAppCameraMode;
   onClose: () => void;
   onCaptured: (capture: InAppCameraCapture) => void;
+  onAlert?: (title: string, message: string) => void | Promise<void>;
 }): React.JSX.Element {
   const insets = useSafeAreaInsets();
   const cameraRef = React.useRef<any>(null);
@@ -41,6 +43,21 @@ export function InAppCameraModal({
   const [mode, setMode] = React.useState<InAppCameraMode>(initialMode ?? 'photo');
   const [camPerm, requestCamPerm] = useCameraPermissions();
   const [micPerm, requestMicPerm] = useMicrophonePermissions();
+
+  const showAlert = React.useCallback(
+    (title: string, message: string) => {
+      if (typeof onAlert === 'function') {
+        try {
+          void Promise.resolve(onAlert(title, message));
+          return;
+        } catch {
+          // fall through to native alert
+        }
+      }
+      Alert.alert(title, message);
+    },
+    [onAlert]
+  );
 
   React.useEffect(() => {
     if (!visible) return;
@@ -55,13 +72,17 @@ export function InAppCameraModal({
         if (!camPerm?.granted) {
           const p = await requestCamPerm();
           if (!p.granted && !cancelled) {
-            Alert.alert('Permission needed', 'Please allow camera access to capture media.');
+            // Keep permission prompts as a native system alert (more appropriate than themed modals).
+            Alert.alert(
+              'Permission needed',
+              'Please allow camera access to capture media.\n\nIf you previously denied this permission, enable it in Settings.'
+            );
             onClose();
             return;
           }
         }
       } catch (e: any) {
-        if (!cancelled) Alert.alert('Camera failed', e?.message ?? 'Unknown error');
+        if (!cancelled) showAlert('Camera failed', e?.message ?? 'Unknown error');
         onClose();
       }
     })();
@@ -69,7 +90,7 @@ export function InAppCameraModal({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
+  }, [visible, showAlert]);
 
   React.useEffect(() => {
     if (!visible) return;
@@ -119,15 +140,19 @@ export function InAppCameraModal({
       if (!res?.uri) return;
       setCaptured({ uri: String(res.uri), mode: 'photo' });
     } catch (e: any) {
-      Alert.alert('Camera failed', e?.message ?? 'Unknown error');
+      showAlert('Camera failed', e?.message ?? 'Unknown error');
     }
-  }, []);
+  }, [showAlert]);
 
   const startVideo = React.useCallback(async () => {
     try {
       const ok = await ensureMicPerm();
       if (!ok) {
-        Alert.alert('Permission needed', 'Please allow microphone access to record video.');
+        // Keep permission prompts as a native system alert (more appropriate than themed modals).
+        Alert.alert(
+          'Permission needed',
+          'Please allow microphone access to record video.\n\nIf you previously denied this permission, enable it in Settings.'
+        );
         return;
       }
       const cam = cameraRef.current;
@@ -136,11 +161,11 @@ export function InAppCameraModal({
       const res = await cam.recordAsync();
       if (res?.uri) setCaptured({ uri: String(res.uri), mode: 'video' });
     } catch (e: any) {
-      Alert.alert('Camera failed', e?.message ?? 'Unknown error');
+      showAlert('Camera failed', e?.message ?? 'Unknown error');
     } finally {
       setIsRecording(false);
     }
-  }, []);
+  }, [ensureMicPerm, showAlert]);
 
   const stopVideo = React.useCallback(() => {
     try {
@@ -172,13 +197,17 @@ export function InAppCameraModal({
       if (next === 'video') {
         const ok = await ensureMicPerm();
         if (!ok) {
-          Alert.alert('Permission needed', 'Please allow microphone access to record video.');
+          // Keep permission prompts as a native system alert (more appropriate than themed modals).
+          Alert.alert(
+            'Permission needed',
+            'Please allow microphone access to record video.\n\nIf you previously denied this permission, enable it in Settings.'
+          );
           return;
         }
       }
       setMode(next);
     },
-    [ensureMicPerm, isRecording, mode, stopVideo]
+    [ensureMicPerm, isRecording, mode, stopVideo, showAlert]
   );
 
   return (
@@ -204,7 +233,7 @@ export function InAppCameraModal({
               pointerEvents="none"
               onMountError={(e: any) => {
                 const msg = e?.nativeEvent?.message ?? e?.message ?? 'Camera failed to start';
-                Alert.alert('Camera failed', String(msg));
+                showAlert('Camera failed', String(msg));
               }}
             />
           )}

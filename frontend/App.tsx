@@ -2988,6 +2988,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           chatBackground={chatBackground}
           blockedUserSubs={blockedSubs}
           keyEpoch={keyEpoch}
+          promptAlert={promptAlert}
+          promptConfirm={promptConfirm}
         />
       </View>
     </View>
