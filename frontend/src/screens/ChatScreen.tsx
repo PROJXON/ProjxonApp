@@ -4514,15 +4514,32 @@ export default function ChatScreen({
                                 </Pressable>
                               );
                             })()
-                          ) : isDm && mediaLooksImage ? (
-                            <Pressable onPress={() => void openDmMediaViewer(item)}>
-                              <View style={[styles.imageThumbWrap, { width: capped.w, height: capped.h }]}>
-                                <View style={[styles.mediaFill, { backgroundColor: '#ddd' }]} />
-                                <View style={styles.videoPlayOverlay}>
-                                  <Text style={[styles.attachmentLink, { color: '#555', textDecorationLine: 'none' }]}>
-                                    Encrypted media
-                                  </Text>
-                                </View>
+                          ) : isDm && (mediaLooksImage || mediaLooksVideo) ? (
+                            <Pressable onPress={() => void openDmMediaViewer(item)} accessibilityRole="button">
+                              <View
+                                style={[
+                                  styles.imageThumbWrap,
+                                  {
+                                    width: capped.w,
+                                    height: capped.h,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                  },
+                                ]}
+                              >
+                                {(() => {
+                                  const textColor = isOutgoing
+                                    ? 'rgba(255,255,255,0.9)'
+                                    : isDark
+                                      ? '#b7b7c2'
+                                      : '#555';
+                                  return (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                      <Text style={{ color: textColor, fontWeight: '700', fontSize: 14 }}>Loading</Text>
+                                      <AnimatedDots color={textColor} size={16} />
+                                    </View>
+                                  );
+                                })()}
                               </View>
                             </Pressable>
                           ) : (
