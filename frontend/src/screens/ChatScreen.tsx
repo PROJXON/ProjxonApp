@@ -198,6 +198,7 @@ type ChatScreenProps = {
   onNewDmNotification?: (conversationId: string, user: string, userSub?: string) => void;
   headerTop?: React.ReactNode;
   theme?: 'light' | 'dark';
+  chatBackground?: { mode: 'default' | 'color' | 'image'; color?: string; uri?: string; blur?: number; opacity?: number };
   blockedUserSubs?: string[];
   // Bump this when keys are generated/recovered/reset so ChatScreen reloads them from storage.
   keyEpoch?: number;
@@ -362,6 +363,7 @@ export default function ChatScreen({
   onNewDmNotification,
   headerTop,
   theme = 'light',
+  chatBackground,
   blockedUserSubs = [],
   keyEpoch,
 }: ChatScreenProps): React.JSX.Element {
@@ -540,6 +542,21 @@ export default function ChatScreen({
     [conversationId]
   );
   const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+  const resolvedChatBg = React.useMemo(() => {
+    const bg = chatBackground;
+    if (!bg || bg.mode === 'default') return { mode: 'default' as const };
+    if (bg.mode === 'color' && typeof bg.color === 'string' && bg.color.trim()) {
+      return { mode: 'color' as const, color: bg.color.trim() };
+    }
+    if (bg.mode === 'image' && typeof bg.uri === 'string' && bg.uri.trim()) {
+      const blurRaw = typeof bg.blur === 'number' ? bg.blur : 0;
+      const opacityRaw = typeof bg.opacity === 'number' ? bg.opacity : 1;
+      const blur = Math.max(0, Math.min(10, Math.round(blurRaw)));
+      const opacity = Math.max(0.2, Math.min(1, Math.round(opacityRaw * 100) / 100));
+      return { mode: 'image' as const, uri: bg.uri.trim(), blur, opacity };
+    }
+    return { mode: 'default' as const };
+  }, [chatBackground]);
 
   // Allow rotating the device while the fullscreen media viewer is open,
   // but keep the rest of the app portrait-locked.
@@ -4123,51 +4140,75 @@ export default function ChatScreen({
             <Text style={[styles.error, isDark ? styles.errorDark : null]}>{error}</Text>
           ) : null}
         </View>
-        <FlatList
-          data={visibleMessages}
-          keyExtractor={(m) => m.id}
-          inverted
-          keyboardShouldPersistTaps="handled"
-          onEndReached={() => {
-            if (!API_URL) return;
-            if (!historyHasMore) return;
-            loadOlderHistory();
-          }}
-          onEndReachedThreshold={0.2}
-          ListFooterComponent={
-            API_URL ? (
-              <View style={{ paddingVertical: 10, alignItems: 'center' }}>
-                {historyHasMore ? (
-                  <Pressable
-                    onPress={loadOlderHistory}
-                    disabled={historyLoading}
-                    style={{
-                      paddingHorizontal: 14,
-                      paddingVertical: 9,
-                      borderRadius: 999,
-                      backgroundColor: isDark ? '#2a2a33' : '#e9e9ee',
-                      opacity: historyLoading ? 0.6 : 1,
-                    }}
-                  >
-                    <Text style={{ color: isDark ? '#fff' : '#111', fontWeight: '700' }}>
-                      {historyLoading ? 'Loading older…' : 'Load older messages'}
+        <View style={styles.chatBody}>
+          <View
+            pointerEvents="none"
+            style={[
+              styles.chatBgBase,
+              resolvedChatBg.mode === 'default'
+                ? { backgroundColor: isDark ? '#0b0b0f' : '#fff' }
+                : resolvedChatBg.mode === 'color'
+                  ? { backgroundColor: resolvedChatBg.color }
+                  : null,
+            ]}
+          />
+          {resolvedChatBg.mode === 'image' ? (
+            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+              <Image
+                source={{ uri: resolvedChatBg.uri }}
+                style={[StyleSheet.absoluteFill, { opacity: resolvedChatBg.opacity ?? 1 }]}
+                resizeMode="cover"
+                blurRadius={resolvedChatBg.blur ?? 0}
+              />
+            </View>
+          ) : null}
+
+          <FlatList
+            style={styles.messageList}
+            data={visibleMessages}
+            keyExtractor={(m) => m.id}
+            inverted
+            keyboardShouldPersistTaps="handled"
+            onEndReached={() => {
+              if (!API_URL) return;
+              if (!historyHasMore) return;
+              loadOlderHistory();
+            }}
+            onEndReachedThreshold={0.2}
+            ListFooterComponent={
+              API_URL ? (
+                <View style={{ paddingVertical: 10, alignItems: 'center' }}>
+                  {historyHasMore ? (
+                    <Pressable
+                      onPress={loadOlderHistory}
+                      disabled={historyLoading}
+                      style={{
+                        paddingHorizontal: 14,
+                        paddingVertical: 9,
+                        borderRadius: 999,
+                        backgroundColor: isDark ? '#2a2a33' : '#e9e9ee',
+                        opacity: historyLoading ? 0.6 : 1,
+                      }}
+                    >
+                      <Text style={{ color: isDark ? '#fff' : '#111', fontWeight: '700' }}>
+                        {historyLoading ? 'Loading older…' : 'Load older messages'}
+                      </Text>
+                    </Pressable>
+                  ) : (
+                    <Text style={{ color: isDark ? '#aaa' : '#666' }}>
+                      {visibleMessages.length === 0 ? 'Start the Conversation!' : 'No older messages'}
                     </Text>
-                  </Pressable>
-                ) : (
-                  <Text style={{ color: isDark ? '#aaa' : '#666' }}>
-                    {visibleMessages.length === 0 ? 'Start the Conversation!' : 'No older messages'}
-                  </Text>
-                )}
-              </View>
-            ) : null
-          }
-          // Perf tuning (especially on Android):
-          removeClippedSubviews={Platform.OS === 'android'}
-          initialNumToRender={18}
-          maxToRenderPerBatch={12}
-          updateCellsBatchingPeriod={50}
-          windowSize={7}
-          renderItem={({ item, index }) => {
+                  )}
+                </View>
+              ) : null
+            }
+            // Perf tuning (especially on Android):
+            removeClippedSubviews={Platform.OS === 'android'}
+            initialNumToRender={18}
+            maxToRenderPerBatch={12}
+            updateCellsBatchingPeriod={50}
+            windowSize={7}
+            renderItem={({ item, index }) => {
             const timestamp = new Date(item.createdAt);
             const now = new Date();
             const isToday =
@@ -4941,112 +4982,113 @@ export default function ChatScreen({
                 </View>
               </Pressable>
             );
-          }}
-          contentContainerStyle={styles.listContent}
-        />
-        {inlineEditTargetId ? (
-          <View style={[styles.editingBar, isDark ? styles.editingBarDark : null]}>
-            <Text style={[styles.editingBarText, isDark ? styles.editingBarTextDark : null]}>Editing message</Text>
+            }}
+            contentContainerStyle={styles.listContent}
+          />
+          {inlineEditTargetId ? (
+            <View style={[styles.editingBar, isDark ? styles.editingBarDark : null]}>
+              <Text style={[styles.editingBarText, isDark ? styles.editingBarTextDark : null]}>Editing message</Text>
+              <Pressable
+                onPress={cancelInlineEdit}
+                disabled={inlineEditUploading}
+                style={({ pressed }) => [
+                  styles.editingBarCancelBtn,
+                  isDark ? styles.editingBarCancelBtnDark : null,
+                  inlineEditUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+                  pressed ? { opacity: 0.85 } : null,
+                ]}
+              >
+                <Text style={[styles.editingBarCancelText, isDark ? styles.editingBarCancelTextDark : null]}>
+                  Cancel
+                </Text>
+              </Pressable>
+            </View>
+          ) : pendingMedia ? (
             <Pressable
-              onPress={cancelInlineEdit}
-              disabled={inlineEditUploading}
-              style={({ pressed }) => [
-                styles.editingBarCancelBtn,
-                isDark ? styles.editingBarCancelBtnDark : null,
-                inlineEditUploading ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
-                pressed ? { opacity: 0.85 } : null,
-              ]}
+              style={[styles.attachmentPill, isDark ? styles.attachmentPillDark : null]}
+              onPress={() => setPendingMedia(null)}
+              disabled={isUploading}
             >
-              <Text style={[styles.editingBarCancelText, isDark ? styles.editingBarCancelTextDark : null]}>
-                Cancel
+              <Text style={[styles.attachmentPillText, isDark ? styles.attachmentPillTextDark : null]}>
+                {`Attached: ${pendingMedia.displayName || pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
               </Text>
             </Pressable>
-          </View>
-        ) : pendingMedia ? (
-          <Pressable
-            style={[styles.attachmentPill, isDark ? styles.attachmentPillDark : null]}
-            onPress={() => setPendingMedia(null)}
-            disabled={isUploading}
+          ) : null}
+          {typingIndicatorText ? (
+            <View style={styles.typingRow}>
+              <TypingIndicator
+                text={typingIndicatorText}
+                color={isDark ? styles.typingTextDark.color : styles.typingText.color}
+              />
+            </View>
+          ) : null}
+          {/* Inline edit happens inside the bubble (Signal-style). */}
+          <View
+            style={[
+              styles.inputRow,
+              isDark ? styles.inputRowDark : null,
+              // Fill the safe area with the bar background, but keep the inner content vertically centered.
+              { paddingBottom: insets.bottom },
+            ]}
           >
-            <Text style={[styles.attachmentPillText, isDark ? styles.attachmentPillTextDark : null]}>
-              {`Attached: ${pendingMedia.displayName || pendingMedia.fileName || pendingMedia.kind} (tap to remove)`}
-            </Text>
-          </Pressable>
-        ) : null}
-        {typingIndicatorText ? (
-          <View style={styles.typingRow}>
-            <TypingIndicator
-              text={typingIndicatorText}
-              color={isDark ? styles.typingTextDark.color : styles.typingText.color}
-            />
-          </View>
-        ) : null}
-        {/* Inline edit happens inside the bubble (Signal-style). */}
-        <View
-          style={[
-            styles.inputRow,
-            isDark ? styles.inputRowDark : null,
-            // Fill the safe area with the bar background, but keep the inner content vertically centered.
-            { paddingBottom: insets.bottom },
-          ]}
-        >
-          <View style={styles.inputRowInner}>
-            <Pressable
-              style={[
-                styles.pickBtn,
-                isDark ? styles.pickBtnDark : null,
-                isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
-              ]}
-              onPress={handlePickMedia}
-              disabled={isUploading || !!inlineEditTargetId}
-            >
-              <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
-            </Pressable>
-            <TextInput
-              ref={(r) => {
-                textInputRef.current = r;
-              }}
-              key={`chat-input-${inputEpoch}`}
-              style={[styles.input, isDark ? styles.inputDark : null]}
-              placeholder={
-                inlineEditTargetId
-                  ? 'Finish editing above…'
-                  : pendingMedia
-                    ? 'Add a caption (optional)…'
-                    : 'Type a message'
-              }
-              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
-              selectionColor={isDark ? '#ffffff' : '#111'}
-              cursorColor={isDark ? '#ffffff' : '#111'}
-              value={input}
-              onChangeText={onChangeInput}
-              editable={!inlineEditTargetId && !isUploading}
-              onBlur={() => {
-                if (isTypingRef.current) sendTyping(false);
-              }}
-              onSubmitEditing={sendMessage}
-              returnKeyType="send"
-            />
-            <Pressable
-              style={[
-                styles.sendBtn,
-                isDark ? styles.sendBtnDark : null,
-                isUploading
-                  ? (isDark ? styles.sendBtnUploadingDark : styles.sendBtnUploading)
-                  : (inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null),
-              ]}
-              onPress={sendMessage}
-              disabled={isUploading || !!inlineEditTargetId}
-            >
-              {isUploading ? (
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
-                  <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
-                  <AnimatedDots color="#fff" size={18} />
-                </View>
-              ) : (
-                <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>Send</Text>
-              )}
-            </Pressable>
+            <View style={styles.inputRowInner}>
+              <Pressable
+                style={[
+                  styles.pickBtn,
+                  isDark ? styles.pickBtnDark : null,
+                  isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+                ]}
+                onPress={handlePickMedia}
+                disabled={isUploading || !!inlineEditTargetId}
+              >
+                <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
+              </Pressable>
+              <TextInput
+                ref={(r) => {
+                  textInputRef.current = r;
+                }}
+                key={`chat-input-${inputEpoch}`}
+                style={[styles.input, isDark ? styles.inputDark : null]}
+                placeholder={
+                  inlineEditTargetId
+                    ? 'Finish editing above…'
+                    : pendingMedia
+                      ? 'Add a caption (optional)…'
+                      : 'Type a message'
+                }
+                placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+                selectionColor={isDark ? '#ffffff' : '#111'}
+                cursorColor={isDark ? '#ffffff' : '#111'}
+                value={input}
+                onChangeText={onChangeInput}
+                editable={!inlineEditTargetId && !isUploading}
+                onBlur={() => {
+                  if (isTypingRef.current) sendTyping(false);
+                }}
+                onSubmitEditing={sendMessage}
+                returnKeyType="send"
+              />
+              <Pressable
+                style={[
+                  styles.sendBtn,
+                  isDark ? styles.sendBtnDark : null,
+                  isUploading
+                    ? (isDark ? styles.sendBtnUploadingDark : styles.sendBtnUploading)
+                    : (inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null),
+                ]}
+                onPress={sendMessage}
+                disabled={isUploading || !!inlineEditTargetId}
+              >
+                {isUploading ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                    <Text style={{ color: '#fff', fontWeight: '800' }}>Uploading</Text>
+                    <AnimatedDots color="#fff" size={18} />
+                  </View>
+                ) : (
+                  <Text style={[styles.sendTxt, isDark ? styles.sendTxtDark : null]}>Send</Text>
+                )}
+              </Pressable>
+            </View>
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -6134,6 +6176,9 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#fff' },
   safeDark: { backgroundColor: '#0b0b0f' },
   container: { flex: 1 },
+  chatBody: { flex: 1, position: 'relative' },
+  chatBgBase: { ...StyleSheet.absoluteFillObject },
+  messageList: { flex: 1 },
   header: {
     paddingHorizontal: 16,
     paddingVertical: 12,

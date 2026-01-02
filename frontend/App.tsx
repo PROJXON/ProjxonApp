@@ -15,6 +15,7 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
+import Slider from '@react-native-community/slider';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import ChatScreen from './src/screens/ChatScreen';
 import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
@@ -116,6 +117,22 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const [avatarDraft, setAvatarDraft] = React.useState<AvatarState>(() => ({ textColor: '#fff' }));
   const [avatarDraftImageUri, setAvatarDraftImageUri] = React.useState<string | null>(null);
   const [avatarDraftRemoveImage, setAvatarDraftRemoveImage] = React.useState<boolean>(false);
+
+  type ChatBackgroundState =
+    | { mode: 'default' }
+    | { mode: 'color'; color: string }
+    | { mode: 'image'; uri: string; blur?: number; opacity?: number };
+  const [chatBackground, setChatBackground] = React.useState<ChatBackgroundState>({ mode: 'default' });
+  const [backgroundOpen, setBackgroundOpen] = React.useState<boolean>(false);
+  const [backgroundSaving, setBackgroundSaving] = React.useState<boolean>(false);
+  const backgroundSavingRef = React.useRef<boolean>(false);
+  const [backgroundError, setBackgroundError] = React.useState<string | null>(null);
+  const [backgroundDraft, setBackgroundDraft] = React.useState<ChatBackgroundState>({ mode: 'default' });
+  const [backgroundDraftImageUri, setBackgroundDraftImageUri] = React.useState<string | null>(null);
+  // Background "effects" are local draft controls for photo backgrounds.
+  // Applied immediately to the preview; saved only on "Save".
+  const [bgEffectBlur, setBgEffectBlur] = React.useState<number>(0);
+  const [bgEffectOpacity, setBgEffectOpacity] = React.useState<number>(1);
   const [passphrasePrompt, setPassphrasePrompt] = useState<{
     mode: 'setup' | 'restore' | 'change' | 'reset';
     resolve: (value: string) => void;
@@ -162,6 +179,55 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     setAvatarDraftImageUri(null);
     setAvatarDraftRemoveImage(false);
   }, [avatarOpen, myAvatar]);
+
+  // Load global chat background (local-only).
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem('ui:chatBackground');
+        if (cancelled) return;
+        if (!raw) return;
+        const obj = JSON.parse(raw);
+        if (obj && obj.mode === 'color' && typeof obj.color === 'string') {
+          setChatBackground({ mode: 'color', color: obj.color });
+        } else if (obj && obj.mode === 'image' && typeof obj.uri === 'string') {
+          setChatBackground({
+            mode: 'image',
+            uri: obj.uri,
+            blur: typeof obj.blur === 'number' ? Math.max(0, Math.min(10, Math.round(obj.blur))) : 0,
+            opacity: typeof obj.opacity === 'number' ? obj.opacity : 1,
+          });
+        } else if (obj && obj.mode === 'default') {
+          setChatBackground({ mode: 'default' });
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Initialize draft state when opening Background modal.
+  React.useEffect(() => {
+    if (!backgroundOpen) return;
+    setBackgroundDraft(chatBackground);
+    setBackgroundDraftImageUri(null);
+    setBackgroundError(null);
+    if (chatBackground?.mode === 'image') {
+      const blur = typeof chatBackground.blur === 'number' ? chatBackground.blur : 0;
+      const opacity = typeof chatBackground.opacity === 'number' ? chatBackground.opacity : 1;
+      const clampedBlur = Math.max(0, Math.min(10, Math.round(blur)));
+      const clampedOpacity = Math.max(0.2, Math.min(1, Math.round(opacity * 100) / 100));
+      setBgEffectBlur(clampedBlur);
+      setBgEffectOpacity(clampedOpacity);
+    } else {
+      setBgEffectBlur(0);
+      setBgEffectOpacity(1);
+    }
+  }, [backgroundOpen, chatBackground]);
 
   const promptPassphrase = (mode: 'setup' | 'restore' | 'change' | 'reset'): Promise<string> =>
     new Promise<string>((resolve, reject) => {
@@ -1681,6 +1747,15 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             },
           },
           {
+            key: 'background',
+            label: 'Background',
+            onPress: () => {
+              setMenuOpen(false);
+              setBackgroundError(null);
+              setBackgroundOpen(true);
+            },
+          },
+          {
             key: 'recovery',
             label: 'Recovery',
             onPress: async () => {
@@ -1974,6 +2049,319 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                   setAvatarDraftRemoveImage(false);
                 }}
                 disabled={avatarSaving}
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={backgroundOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (backgroundSavingRef.current) return;
+          setBackgroundOpen(false);
+          setBackgroundDraft(chatBackground);
+          setBackgroundDraftImageUri(null);
+          setBackgroundError(null);
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            disabled={backgroundSaving}
+            onPress={() => {
+              if (backgroundSavingRef.current) return;
+              setBackgroundOpen(false);
+              setBackgroundDraft(chatBackground);
+              setBackgroundDraftImageUri(null);
+              setBackgroundError(null);
+            }}
+          />
+          <View style={[styles.profileCard, isDark ? styles.profileCardDark : null]}>
+            <View style={styles.chatsTopRow}>
+              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Background</Text>
+            </View>
+
+            <View style={styles.profilePreviewRow}>
+              <View style={styles.bgPreviewBox}>
+                {(() => {
+                  const effective =
+                    backgroundDraftImageUri
+                      ? ({ mode: 'image', uri: backgroundDraftImageUri } as const)
+                      : backgroundDraft;
+                  if (effective.mode === 'image') {
+                    return (
+                      <Image
+                        source={{ uri: effective.uri }}
+                        style={[styles.bgPreviewImage, { opacity: bgEffectOpacity }]}
+                        resizeMode="cover"
+                        blurRadius={bgEffectBlur}
+                      />
+                    );
+                  }
+                  if (effective.mode === 'color') {
+                    return <View style={[StyleSheet.absoluteFill, { backgroundColor: effective.color }]} />;
+                  }
+                  return (
+                    <View
+                      style={[
+                        StyleSheet.absoluteFill,
+                        { backgroundColor: isDark ? '#0b0b0f' : '#ffffff' },
+                      ]}
+                    />
+                  );
+                })()}
+              </View>
+              <View style={styles.profilePreviewMeta}>
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+                  Choose a chat background
+                </Text>
+              </View>
+            </View>
+
+            {backgroundError ? (
+              <Text style={[styles.errorText, isDark && styles.errorTextDark]}>{backgroundError}</Text>
+            ) : null}
+
+            {!backgroundDraftImageUri && backgroundDraft.mode !== 'image' ? (
+              <>
+                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
+                  Color
+                </Text>
+                <View style={styles.avatarPaletteRow}>
+                  {[
+                    '#ffffff',
+                    '#f2f2f7',
+                    '#e9e9ee',
+                    '#111111',
+                    '#0b0b0f',
+                    ...AVATAR_DEFAULT_COLORS,
+                  ].map((c) => {
+                    const selected = backgroundDraft.mode === 'color' && backgroundDraft.color === c;
+                    return (
+                      <Pressable
+                        key={`bgc:${c}`}
+                        onPress={() => setBackgroundDraft({ mode: 'color', color: c })}
+                        style={[
+                          styles.avatarColorDot,
+                          { backgroundColor: c },
+                          selected ? (isDark ? styles.avatarColorDotSelectedDark : styles.avatarColorDotSelected) : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Select background color ${c}`}
+                      />
+                    );
+                  })}
+                </View>
+              </>
+            ) : (
+              <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, { marginTop: 6 }]}>
+                Photo background enabled - remove the photo to use a solid color
+              </Text>
+            )}
+
+            {(backgroundDraftImageUri || backgroundDraft.mode === 'image') ? (
+              <>
+                <View style={styles.bgEffectsHeaderRow}>
+                  <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null, styles.profileSectionTitle]}>
+                    Photo effects
+                  </Text>
+                  <Pressable
+                    disabled={backgroundSaving}
+                    style={({ pressed }) => [styles.bgEffectsResetBtn, pressed ? { opacity: 0.85 } : null]}
+                    onPress={() => {
+                      setBgEffectBlur(0);
+                      setBgEffectOpacity(1);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Reset background effects"
+                  >
+                    <Text style={[styles.bgEffectsResetText, isDark ? styles.bgEffectsResetTextDark : null]}>Reset</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.bgSliderSection}>
+                  <View style={styles.bgSliderLabelRow}>
+                    <Text style={[styles.bgSliderLabel, isDark ? styles.bgSliderLabelDark : null]}>Blur</Text>
+                    <Text style={[styles.bgSliderValue, isDark ? styles.bgSliderValueDark : null]}>{bgEffectBlur}</Text>
+                  </View>
+                  <Slider
+                    style={styles.bgSlider}
+                    minimumValue={0}
+                    maximumValue={10}
+                    step={1}
+                    value={bgEffectBlur}
+                    onValueChange={(v: number) => setBgEffectBlur(v)}
+                    onSlidingComplete={(v: number) => setBgEffectBlur(Math.max(0, Math.min(10, Math.round(v))))}
+                    minimumTrackTintColor={isDark ? '#fff' : '#111'}
+                    maximumTrackTintColor={isDark ? '#2a2a33' : '#d6d6de'}
+                    thumbTintColor={isDark ? '#fff' : '#111'}
+                  />
+                </View>
+
+                <View style={styles.bgSliderSection}>
+                  <View style={styles.bgSliderLabelRow}>
+                    <Text style={[styles.bgSliderLabel, isDark ? styles.bgSliderLabelDark : null]}>Opacity</Text>
+                    <Text style={[styles.bgSliderValue, isDark ? styles.bgSliderValueDark : null]}>
+                      {`${Math.round(bgEffectOpacity * 100)}%`}
+                    </Text>
+                  </View>
+                  <Slider
+                    style={styles.bgSlider}
+                    minimumValue={0.2}
+                    maximumValue={1}
+                    step={0.01}
+                    value={bgEffectOpacity}
+                    onValueChange={(v: number) => setBgEffectOpacity(Math.round(v * 100) / 100)}
+                    onSlidingComplete={(v: number) =>
+                      setBgEffectOpacity(Math.max(0.2, Math.min(1, Math.round(v * 100) / 100)))
+                    }
+                    minimumTrackTintColor={isDark ? '#fff' : '#111'}
+                    maximumTrackTintColor={isDark ? '#2a2a33' : '#d6d6de'}
+                    thumbTintColor={isDark ? '#fff' : '#111'}
+                  />
+                </View>
+              </>
+            ) : null}
+
+            <View style={styles.profileActionsRow}>
+              <Pressable
+                disabled={backgroundSaving}
+                style={({ pressed }) => [
+                  styles.toolBtn,
+                  isDark && styles.toolBtnDark,
+                  backgroundSaving ? { opacity: 0.5 } : null,
+                  pressed && !backgroundSaving ? { opacity: 0.92 } : null,
+                ]}
+                onPress={async () => {
+                  try {
+                    setBackgroundError(null);
+                    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                    if (!perm.granted) {
+                      setBackgroundError('Please allow photo library access to choose a background.');
+                      return;
+                    }
+                    const result = await ImagePicker.launchImageLibraryAsync({
+                      mediaTypes: ['images'] as any,
+                      allowsEditing: true,
+                      aspect: [9, 16],
+                      quality: 0.9,
+                    });
+                    if (result.canceled) return;
+                    const uri = result.assets?.[0]?.uri;
+                    if (!uri) return;
+                    setBackgroundDraftImageUri(uri);
+                    setBackgroundDraft({ mode: 'image', uri, blur: bgEffectBlur, opacity: bgEffectOpacity });
+                  } catch (e: any) {
+                    setBackgroundError(e?.message || 'Could not pick image.');
+                  }
+                }}
+                accessibilityRole="button"
+              >
+                <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Choose image</Text>
+              </Pressable>
+
+              <Pressable
+                disabled={backgroundSaving || (!backgroundDraftImageUri && backgroundDraft.mode !== 'image')}
+                style={({ pressed }) => [
+                  styles.toolBtn,
+                  isDark && styles.toolBtnDark,
+                  (backgroundSaving || (!backgroundDraftImageUri && backgroundDraft.mode !== 'image')) ? { opacity: 0.5 } : null,
+                  pressed && !(backgroundSaving || (!backgroundDraftImageUri && backgroundDraft.mode !== 'image')) ? { opacity: 0.92 } : null,
+                ]}
+                onPress={() => {
+                  setBackgroundDraftImageUri(null);
+                  setBackgroundDraft({ mode: 'default' });
+                }}
+                accessibilityRole="button"
+              >
+                <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Remove image</Text>
+              </Pressable>
+
+              <Pressable
+                disabled={backgroundSaving}
+                style={({ pressed }) => [
+                  styles.toolBtn,
+                  isDark && styles.toolBtnDark,
+                  backgroundSaving ? { opacity: 0.5 } : null,
+                  pressed && !backgroundSaving ? { opacity: 0.92 } : null,
+                ]}
+                onPress={() => {
+                  setBackgroundDraftImageUri(null);
+                  setBackgroundDraft({ mode: 'default' });
+                }}
+                accessibilityRole="button"
+              >
+                <Text style={[styles.toolBtnText, isDark && styles.toolBtnTextDark]}>Default</Text>
+              </Pressable>
+            </View>
+
+            <View style={[styles.modalButtons, { marginTop: 10 }]}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  isDark ? styles.modalButtonDark : null,
+                  pressed ? { opacity: 0.92 } : null,
+                ]}
+                onPress={async () => {
+                  backgroundSavingRef.current = true;
+                  setBackgroundSaving(true);
+                  setBackgroundError(null);
+                  try {
+                    let effective: ChatBackgroundState;
+                    if (backgroundDraftImageUri) {
+                      effective = { mode: 'image', uri: backgroundDraftImageUri, blur: bgEffectBlur, opacity: bgEffectOpacity };
+                    } else if (backgroundDraft.mode === 'image') {
+                      effective = {
+                        ...backgroundDraft,
+                        blur: bgEffectBlur,
+                        opacity: bgEffectOpacity,
+                      };
+                    } else {
+                      effective = backgroundDraft;
+                    }
+                    setChatBackground(effective);
+                    await AsyncStorage.setItem('ui:chatBackground', JSON.stringify(effective));
+                    setBackgroundOpen(false);
+                  } catch (e: any) {
+                    setBackgroundError(e?.message || 'Failed to save background.');
+                  } finally {
+                    backgroundSavingRef.current = false;
+                    setBackgroundSaving(false);
+                  }
+                }}
+                disabled={backgroundSaving}
+              >
+                {backgroundSaving ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                    <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Saving</Text>
+                    <AnimatedDots color={isDark ? '#fff' : '#111'} size={18} />
+                  </View>
+                ) : (
+                  <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Save</Text>
+                )}
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  isDark ? styles.modalButtonDark : null,
+                  pressed ? { opacity: 0.92 } : null,
+                ]}
+                onPress={() => {
+                  if (backgroundSavingRef.current) return;
+                  setBackgroundOpen(false);
+                  setBackgroundDraft(chatBackground);
+                  setBackgroundDraftImageUri(null);
+                  setBackgroundError(null);
+                }}
+                disabled={backgroundSaving}
               >
                 <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>Close</Text>
               </Pressable>
@@ -2597,6 +2985,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           onNewDmNotification={handleNewDmNotification}
           headerTop={headerTop}
           theme={theme}
+          chatBackground={chatBackground}
           blockedUserSubs={blockedSubs}
           keyEpoch={keyEpoch}
         />
@@ -3847,6 +4236,14 @@ const styles = StyleSheet.create({
   profileCardDark: { backgroundColor: '#14141a', borderColor: '#2a2a33' },
   profilePreviewRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 6 },
   profilePreviewMeta: { flex: 1 },
+  bgPreviewBox: {
+    width: 72,
+    height: 54,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+  },
+  bgPreviewImage: { width: '100%', height: '100%' },
   profileSectionTitle: { marginTop: 10, marginBottom: 6, fontWeight: '900' },
   avatarPaletteRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
   avatarColorDot: {
@@ -3889,6 +4286,18 @@ const styles = StyleSheet.create({
   toolBtnDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
   toolBtnText: { fontWeight: '800', color: '#111' },
   toolBtnTextDark: { color: '#fff' },
+  bgEffectsHeaderRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginTop: 10 },
+  bgEffectsResetBtn: { paddingHorizontal: 6, paddingVertical: 4 },
+  bgEffectsResetText: { fontWeight: '900', color: '#111', opacity: 0.7 },
+  bgEffectsResetTextDark: { fontWeight: '900', color: '#fff', opacity: 0.75 },
+  // Keep sliders comfortably narrow (about ~2/3 modal width).
+  bgSliderSection: { marginTop: 10, alignSelf: 'center', width: '64%', maxWidth: 320 },
+  bgSliderLabelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 4 },
+  bgSliderLabel: { fontWeight: '900', color: '#111' },
+  bgSliderLabelDark: { color: '#fff' },
+  bgSliderValue: { fontWeight: '900', color: '#111', opacity: 0.75 },
+  bgSliderValueDark: { color: '#fff', opacity: 0.8 },
+  bgSlider: { width: '100%', height: 34, marginLeft: 4, marginRight: 4 },
   chatsTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   chatsCloseBtn: {
     paddingHorizontal: 12,
