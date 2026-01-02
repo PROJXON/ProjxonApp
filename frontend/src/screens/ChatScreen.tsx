@@ -4488,7 +4488,11 @@ export default function ChatScreen({
                                 !storageSessionReady ||
                                 (keyPath && inFlightMediaUrlRef.current.has(String(keyPath)));
                               if (!isResolving) return null;
-                              const textColor = isDark ? '#b7b7c2' : '#555';
+                              const textColor = isOutgoing
+                                ? 'rgba(255,255,255,0.9)'
+                                : isDark
+                                  ? '#b7b7c2'
+                                  : '#555';
                               return (
                                 <Pressable
                                   onPress={() => void openMedia(media.path)}
