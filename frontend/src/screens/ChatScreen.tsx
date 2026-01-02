@@ -1,12 +1,12 @@
 import React from 'react';
 import {
-  ActivityIndicator,
   Alert,
   Animated,
   AppState,
   AppStateStatus,
   Easing,
   findNodeHandle,
+  LayoutAnimation,
   UIManager,
   useWindowDimensions,
   FlatList,
@@ -59,6 +59,7 @@ import { fromByteArray, toByteArray } from 'base64-js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { getDmMediaSignedUrl } from '../utils/dmSignedUrl';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 
 function toCdnUrl(path: string): string {
   const base = (CDN_URL || '').trim();
@@ -191,6 +192,45 @@ function FullscreenVideo({ url }: { url: string }): React.JSX.Element {
       // TextureView keeps the video in the normal view hierarchy so overlays render correctly.
       {...(Platform.OS === 'android' ? ({ surfaceType: 'textureView' } as any) : null)}
     />
+  );
+}
+
+function MiniToggle({
+  value,
+  onValueChange,
+  disabled,
+  isDark,
+}: {
+  value: boolean;
+  onValueChange: (v: boolean) => void;
+  disabled?: boolean;
+  isDark: boolean;
+}): React.JSX.Element {
+  return (
+    <Pressable
+      onPress={() => {
+        if (disabled) return;
+        onValueChange(!value);
+      }}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: value, disabled: !!disabled }}
+      style={({ pressed }) => [
+        styles.miniToggleTrack,
+        isDark ? styles.miniToggleTrackDark : null,
+        value ? styles.miniToggleTrackOn : null,
+        value && isDark ? styles.miniToggleTrackOnDark : null,
+        disabled ? styles.miniToggleDisabled : null,
+        pressed && !disabled ? styles.miniTogglePressed : null,
+      ]}
+    >
+      <View
+        style={[
+          styles.miniToggleThumb,
+          isDark ? styles.miniToggleThumbDark : null,
+          value ? styles.miniToggleThumbOn : null,
+        ]}
+      />
+    </Pressable>
   );
 }
 
@@ -383,6 +423,8 @@ export default function ChatScreen({
   const insets = useSafeAreaInsets();
   const { user } = useAuthenticator();
   const { width: windowWidth } = useWindowDimensions();
+  const dmSettingsCompact = windowWidth < 420;
+  const [dmSettingsOpen, setDmSettingsOpen] = React.useState<boolean>(true);
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [historyCursor, setHistoryCursor] = React.useState<number | null>(null);
   const [historyHasMore, setHistoryHasMore] = React.useState<boolean>(true);
@@ -455,6 +497,11 @@ export default function ChatScreen({
   const [mySeenAtByCreatedAt, setMySeenAtByCreatedAt] = React.useState<Record<string, number>>({});
   const pendingReadCreatedAtSetRef = React.useRef<Set<number>>(new Set());
   const sentReadCreatedAtSetRef = React.useRef<Set<number>>(new Set());
+  const [sendReadReceipts, setSendReadReceipts] = React.useState<boolean>(true);
+  // If read receipts are disabled when we read/decrypt messages, record the highest messageCreatedAt
+  // we've read so we don't retroactively send receipts later when the user re-enables them.
+  const [readReceiptSuppressUpTo, setReadReceiptSuppressUpTo] = React.useState<number>(0);
+  const readReceiptSuppressUpToRef = React.useRef<number>(0);
   const [nowSec, setNowSec] = React.useState<number>(() => Math.floor(Date.now() / 1000));
   const TTL_OPTIONS = React.useMemo(
     () => [
@@ -487,6 +534,102 @@ export default function ChatScreen({
     Array<{ role: 'user' | 'assistant'; text: string; thinking?: boolean }>
   >([]);
   const [helperResetThread, setHelperResetThread] = React.useState<boolean>(false);
+
+  // Enable LayoutAnimation for Android (for collapsing DM settings row).
+  React.useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (UIManager as any)?.setLayoutAnimationEnabledExperimental?.(true);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Persist DM settings visibility per-device, per-account.
+  React.useEffect(() => {
+    (async () => {
+      if (!myUserId) return;
+      try {
+        const key = `chat:dmSettingsOpen:${myUserId}`;
+        const v = await AsyncStorage.getItem(key);
+        if (v === '0') setDmSettingsOpen(false);
+        if (v === '1') setDmSettingsOpen(true);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [myUserId]);
+
+  React.useEffect(() => {
+    (async () => {
+      if (!myUserId) return;
+      try {
+        const key = `chat:dmSettingsOpen:${myUserId}`;
+        await AsyncStorage.setItem(key, dmSettingsOpen ? '1' : '0');
+      } catch {
+        // ignore
+      }
+    })();
+  }, [myUserId, dmSettingsOpen]);
+
+  // Persist "send read receipts" per-device, per-account.
+  React.useEffect(() => {
+    (async () => {
+      if (!myUserId) return;
+      try {
+        const key = `chat:readReceiptsEnabled:${myUserId}`;
+        const v = await AsyncStorage.getItem(key);
+        if (v === '0') setSendReadReceipts(false);
+        if (v === '1') setSendReadReceipts(true);
+      } catch {
+        // ignore
+      }
+    })();
+  }, [myUserId]);
+
+  React.useEffect(() => {
+    (async () => {
+      if (!myUserId) return;
+      try {
+        const key = `chat:readReceiptsEnabled:${myUserId}`;
+        await AsyncStorage.setItem(key, sendReadReceipts ? '1' : '0');
+      } catch {
+        // ignore
+      }
+    })();
+  }, [myUserId, sendReadReceipts]);
+
+  // Persist suppression watermark per-conversation (prevents late receipts after toggling back on).
+  React.useEffect(() => {
+    readReceiptSuppressUpToRef.current = readReceiptSuppressUpTo;
+  }, [readReceiptSuppressUpTo]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const convKey = conversationId && conversationId.length > 0 ? conversationId : 'global';
+        const key = `chat:readReceiptSuppressUpTo:${convKey}`;
+        const raw = await AsyncStorage.getItem(key);
+        const v = raw ? Number(raw) : 0;
+        setReadReceiptSuppressUpTo(Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+      } catch {
+        setReadReceiptSuppressUpTo(0);
+      }
+    })();
+  }, [conversationId]);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const convKey = conversationId && conversationId.length > 0 ? conversationId : 'global';
+        const key = `chat:readReceiptSuppressUpTo:${convKey}`;
+        await AsyncStorage.setItem(key, String(Math.max(0, Math.floor(readReceiptSuppressUpTo || 0))));
+      } catch {
+        // ignore
+      }
+    })();
+  }, [conversationId, readReceiptSuppressUpTo]);
   const [helperMode, setHelperMode] = React.useState<'ask' | 'reply'>('ask');
   const helperScrollRef = React.useRef<ScrollView | null>(null);
   const helperScrollViewportHRef = React.useRef<number>(0);
@@ -1962,6 +2105,15 @@ export default function ChatScreen({
     (messageCreatedAt: number) => {
       if (!isDm) return;
       if (!Number.isFinite(messageCreatedAt) || messageCreatedAt <= 0) return;
+
+      // If user disabled read receipts, remember we've read up to this point so we don't send later.
+      if (!sendReadReceipts) {
+        setReadReceiptSuppressUpTo((prev) => (messageCreatedAt > prev ? messageCreatedAt : prev));
+        return;
+      }
+      // If receipts were disabled when this message was read, never send retroactively.
+      if (messageCreatedAt <= readReceiptSuppressUpToRef.current) return;
+
       // Avoid duplicate sends/queues per conversation.
       if (sentReadCreatedAtSetRef.current.has(messageCreatedAt)) return;
       if (pendingReadCreatedAtSetRef.current.has(messageCreatedAt)) return;
@@ -1985,11 +2137,12 @@ export default function ChatScreen({
         })
       );
     },
-    [isDm, activeConversationId, displayName]
+    [isDm, activeConversationId, displayName, sendReadReceipts]
   );
 
   const flushPendingRead = React.useCallback(() => {
     if (!isDm) return;
+    if (!sendReadReceipts) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     const pending = Array.from(pendingReadCreatedAtSetRef.current);
     if (!pending.length) return;
@@ -1997,6 +2150,7 @@ export default function ChatScreen({
     // send oldest-first (nice-to-have)
     pending.sort((a, b) => a - b);
     for (const mc of pending) {
+      if (mc <= readReceiptSuppressUpToRef.current) continue;
       if (sentReadCreatedAtSetRef.current.has(mc)) continue;
       sentReadCreatedAtSetRef.current.add(mc);
       try {
@@ -2017,7 +2171,7 @@ export default function ChatScreen({
         break;
       }
     }
-  }, [isDm, sendReadReceipt]);
+  }, [isDm, sendReadReceipts, sendReadReceipt]);
 
   const refreshMyKeys = React.useCallback(async (sub: string) => {
     const kp = await loadKeyPair(sub);
@@ -4132,7 +4286,6 @@ export default function ChatScreen({
                     {`Welcome ${displayName}!`}
                   </Text>
                   <View style={styles.welcomeStatusRow}>
-                    {isConnecting ? <ActivityIndicator size="small" /> : null}
                     <Text
                       style={[
                         styles.welcomeStatusText,
@@ -4141,45 +4294,169 @@ export default function ChatScreen({
                       ]}
                       numberOfLines={1}
                     >
-                      {isConnecting ? 'Connecting…' : isConnected ? 'Connected' : 'Disconnected'}
+                      {isConnecting ? 'Connecting' : isConnected ? 'Connected' : 'Disconnected'}
                     </Text>
+                    {isConnecting ? (
+                      <AnimatedDots
+                        // Don't read colors off StyleSheet objects (can be numeric in prod).
+                        color={isDark ? '#a7a7b4' : '#666'}
+                        size={16}
+                      />
+                    ) : null}
+                    {isDm ? (
+                      <Pressable
+                        style={({ pressed }) => [
+                          styles.dmSettingsCaretBtn,
+                          pressed ? { opacity: 0.65 } : null,
+                        ]}
+                        onPress={() => {
+                          try {
+                            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                          } catch {
+                            // ignore
+                          }
+                          setDmSettingsOpen((v) => !v);
+                        }}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        accessibilityRole="button"
+                        accessibilityLabel={dmSettingsOpen ? 'Hide message options' : 'Show message options'}
+                      >
+                        <MaterialIcons
+                          name={dmSettingsOpen ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
+                          size={18}
+                          color={isDark ? '#b7b7c2' : '#555'}
+                        />
+                      </Pressable>
+                    ) : null}
                   </View>
                 </View>
               );
             })()}
-            {isDm ? (
-              <View style={styles.dmHeaderControls}>
-                <View style={styles.dmHeaderControl}>
-                  <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>Auto‑Decrypt</Text>
-                  <Switch
-                    value={autoDecrypt}
-                    onValueChange={setAutoDecrypt}
-                    disabled={!myPrivateKey}
-                    trackColor={{
-                      false: '#d1d1d6',
-                      true: '#d1d1d6',
-                    }}
-                    thumbColor={isDark ? '#2a2a33' : '#ffffff'}
-                    ios_backgroundColor="#d1d1d6"
-                  />
-                </View>
-                <View style={styles.dmHeaderControl}>
-                  <Text style={[styles.decryptLabel, isDark ? styles.decryptLabelDark : null]}>Self‑Destruct</Text>
-                  <Pressable
-                    style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
-                    onPress={() => {
-                      setTtlIdxDraft(ttlIdx);
-                      setTtlPickerOpen(true);
-                    }}
-                  >
-                    <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
-                      {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+          </View>
+
+          {isDm ? (
+            <>
+              {dmSettingsOpen ? (
+                <View style={styles.dmSettingsRow}>
+                <View style={styles.dmSettingSlotLeft}>
+                  <View style={styles.dmSettingGroup}>
+                    <Text
+                      style={[
+                        styles.decryptLabel,
+                        isDark ? styles.decryptLabelDark : null,
+                        styles.dmSettingLabel,
+                        dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      Auto‑Decrypt
                     </Text>
-                  </Pressable>
+                    {dmSettingsCompact ? (
+                      <MiniToggle
+                        value={autoDecrypt}
+                        onValueChange={setAutoDecrypt}
+                        disabled={!myPrivateKey}
+                        isDark={isDark}
+                      />
+                    ) : (
+                      <Switch
+                        value={autoDecrypt}
+                        onValueChange={setAutoDecrypt}
+                        disabled={!myPrivateKey}
+                        trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+                        thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                        ios_backgroundColor="#d1d1d6"
+                      />
+                    )}
+                  </View>
+                </View>
+
+                <View style={styles.dmSettingSlotCenter}>
+                  <View style={styles.dmSettingGroup}>
+                    <Text
+                      style={[
+                        styles.decryptLabel,
+                        isDark ? styles.decryptLabelDark : null,
+                        styles.dmSettingLabel,
+                        dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      Self‑Destruct
+                    </Text>
+                    <Pressable
+                      style={[
+                        styles.ttlChip,
+                        isDark ? styles.ttlChipDark : null,
+                        dmSettingsCompact ? styles.ttlChipCompact : null,
+                      ]}
+                      onPress={() => {
+                        setTtlIdxDraft(ttlIdx);
+                        setTtlPickerOpen(true);
+                      }}
+                    >
+                      <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
+                        {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+
+                <View style={styles.dmSettingSlotRight}>
+                  <View style={styles.dmSettingGroup}>
+                    <Text
+                      style={[
+                        styles.decryptLabel,
+                        isDark ? styles.decryptLabelDark : null,
+                        styles.dmSettingLabel,
+                        dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      Read Receipts
+                    </Text>
+                    {dmSettingsCompact ? (
+                      <MiniToggle
+                        value={sendReadReceipts}
+                        isDark={isDark}
+                        onValueChange={(v) => {
+                          // If turning OFF, also suppress any queued receipts so they won't send later.
+                          if (!v) {
+                            const pending = Array.from(pendingReadCreatedAtSetRef.current || []);
+                            const maxPending = pending.length ? Math.max(...pending) : 0;
+                            if (Number.isFinite(maxPending) && maxPending > 0) {
+                              setReadReceiptSuppressUpTo((prev) => (maxPending > prev ? maxPending : prev));
+                            }
+                            pendingReadCreatedAtSetRef.current = new Set();
+                          }
+                          setSendReadReceipts(v);
+                        }}
+                      />
+                    ) : (
+                      <Switch
+                        value={sendReadReceipts}
+                        onValueChange={(v) => {
+                          if (!v) {
+                            const pending = Array.from(pendingReadCreatedAtSetRef.current || []);
+                            const maxPending = pending.length ? Math.max(...pending) : 0;
+                            if (Number.isFinite(maxPending) && maxPending > 0) {
+                              setReadReceiptSuppressUpTo((prev) => (maxPending > prev ? maxPending : prev));
+                            }
+                            pendingReadCreatedAtSetRef.current = new Set();
+                          }
+                          setSendReadReceipts(v);
+                        }}
+                        trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+                        thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                        ios_backgroundColor="#d1d1d6"
+                      />
+                    )}
+                  </View>
                 </View>
               </View>
-            ) : null}
-          </View>
+              ) : null}
+            </>
+          ) : null}
           {error ? (
             <Text style={[styles.error, isDark ? styles.errorDark : null]}>{error}</Text>
           ) : null}
@@ -6298,18 +6575,55 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
     marginTop: 8,
-    flexWrap: 'wrap',
+    // Keep DM settings on a single horizontal line (no stacking).
+    flexWrap: 'nowrap',
   },
-  dmSettingCell: {
+  dmSettingSlotLeft: { flex: 1, alignItems: 'flex-start', minWidth: 0 },
+  dmSettingSlotCenter: { flex: 1, alignItems: 'center', minWidth: 0 },
+  dmSettingSlotRight: { flex: 1, alignItems: 'flex-end', minWidth: 0 },
+  dmSettingGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-    flexGrow: 1,
-    flexBasis: 220,
+    gap: 6,
+    flexShrink: 1,
+    minWidth: 0,
   },
+  dmSettingLabel: { flexShrink: 1, minWidth: 0 },
+  dmSettingLabelCompact: { fontSize: 11 },
+  ttlChipCompact: { paddingHorizontal: 8, paddingVertical: 4 },
+  // Keep layout tight; use hitSlop on Pressable for tap area.
+  dmSettingsCaretBtn: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniToggleTrack: {
+    width: 28,
+    height: 18,
+    borderRadius: 999,
+    backgroundColor: '#cfd2d8',
+    padding: 2,
+    justifyContent: 'center',
+  },
+  miniToggleTrackDark: { backgroundColor: '#3a3a46' },
+  // Theme-neutral: match light/dark UI (no blue/green accent).
+  // Light: ON = near-black. Dark: ON = white.
+  miniToggleTrackOn: { backgroundColor: '#111' },
+  miniToggleTrackOnDark: { backgroundColor: '#fff' },
+  miniToggleThumb: {
+    width: 14,
+    height: 14,
+    borderRadius: 999,
+    backgroundColor: '#fff',
+    transform: [{ translateX: 0 }],
+  },
+  // In dark mode, use a dark thumb so it stays visible on the white "ON" track.
+  miniToggleThumbDark: { backgroundColor: '#0b0b0f' },
+  miniToggleThumbOn: { transform: [{ translateX: 10 }] },
+  miniToggleDisabled: { opacity: 0.6 },
+  miniTogglePressed: { opacity: 0.85 },
   ttlChip: {
     paddingHorizontal: 10,
     paddingVertical: 6,
