@@ -19,7 +19,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../config/env';
-import { getUrl } from 'aws-amplify/storage';
+import { CDN_URL } from '../config/env';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import Feather from '@expo/vector-icons/Feather';
 import { HeaderMenuModal } from '../components/HeaderMenuModal';
@@ -313,9 +313,12 @@ export default function GuestGlobalScreen({
       if (!path) return null;
       const cached = urlByPath[path];
       if (cached) return cached;
+      const base = (CDN_URL || '').trim();
+      const p = String(path || '').replace(/^\/+/, '');
+      if (!base || !p) return null;
       try {
-        const { url } = await getUrl({ path });
-        const s = url.toString();
+        const b = base.endsWith('/') ? base : `${base}/`;
+        const s = new URL(p, b).toString();
         setUrlByPath((prev) => (prev[path] ? prev : { ...prev, [path]: s }));
         return s;
       } catch {

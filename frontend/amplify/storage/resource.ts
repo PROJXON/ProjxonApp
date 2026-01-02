@@ -1,9 +1,12 @@
 import { defineStorage } from '@aws-amplify/backend';
 
 /**
- * Auth-only S3 storage for Global chat attachments.
+ * S3 storage for chat media.
  *
- * Objects are written under `uploads/*` and are readable/writable by authenticated users.
+ * Layout (prefixes):
+ * - `uploads/channels/<channelId>/...`   Public channels (readable by guests; writeable by authed users)
+ * - `uploads/public/avatars/...`        Public avatars (readable by guests; writeable by authed users)
+ * - `uploads/dm/<conversationId>/...`   Private DM/group-DM media (writeable by authed users; reads should go via CloudFront signed URLs)
  */
 export const storage = defineStorage({
   name: 'chatMedia',
@@ -13,14 +16,17 @@ export const storage = defineStorage({
     // for any given path, only ONE other path may be a prefix of it.
     // So avoid broad prefixes like `uploads/*` if we also want granular subpaths.
 
-    // ---- Global chat (plaintext attachments) ----
-    // NOTE: the trailing `*` matches the entire suffix (including nested keys), so this covers
-    // both `uploads/global/<file>` and `uploads/global/thumbs/<file>.jpg`.
-    'uploads/global/*': [allow.authenticated.to(['read', 'write']), allow.guest.to(['read'])],
+    // ---- Public channels (plaintext attachments) ----
+    // NOTE: trailing `*` matches the entire suffix (including nested keys), so this covers thumbs too.
+    'uploads/channels/*': [allow.authenticated.to(['read', 'write']), allow.guest.to(['read'])],
+
+    // ---- Public avatars ----
+    'uploads/public/*': [allow.authenticated.to(['read', 'write']), allow.guest.to(['read'])],
 
     // ---- DM chat (E2EE encrypted blobs) ----
-    // Keep these auth-only (includes nested keys like thumbs/).
-    'uploads/dm/*': [allow.authenticated.to(['read', 'write'])],
+    // Keep these auth-only. Reads should happen via CloudFront signed URLs/cookies.
+    // (This prevents bypassing CloudFront by minting S3 presigned URLs.)
+    'uploads/dm/*': [allow.authenticated.to(['write'])],
   }),
 });
 

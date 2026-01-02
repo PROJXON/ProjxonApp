@@ -54,6 +54,54 @@ ProjxonApp/
 - **Expo Go** app on your mobile device (for testing)
 - **Git** for version control
 
+## 🔐 CloudFront media (public + DM)
+
+Projxon stores media in **S3**, but serves it via **CloudFront**:
+
+- Public channel media + public avatars: **CloudFront (unsigned)** via `CDN_URL`
+- DM media: **CloudFront (signed URLs)** via the `POST /media/dm/signed-url` signer endpoint
+
+### CloudFront key pair (DM signed URLs)
+
+DM media requires CloudFront signed URLs. You need an RSA key pair:
+
+```bash
+openssl genrsa -out cloudfront_private_key.pem 2048
+openssl rsa -pubout -in cloudfront_private_key.pem -out cloudfront_public_key.pem
+```
+
+These files are intentionally ignored by git (see `.gitignore`). **Never commit private keys.**
+
+### Deploy CloudFront DM behavior in Amplify sandbox
+
+The Amplify backend only creates the DM-protected CloudFront behavior if you provide the **public key PEM** at deploy time:
+
+```bash
+# from repo root (bash)
+export DM_CLOUDFRONT_PUBLIC_KEY_PEM="$(tr -d '\r' < cloudfront_public_key.pem)"
+cd frontend
+npx ampx sandbox
+```
+
+After deploy, check `frontend/amplify_outputs.json` for:
+- `custom.cdnUrl`
+- `custom.dmKeyPairId`
+
+### Configure the signer Lambda env vars
+
+The signer Lambda behind `POST /media/dm/signed-url` must have:
+
+- `CDN_URL` = `custom.cdnUrl`
+- `CLOUDFRONT_KEY_PAIR_ID` = `custom.dmKeyPairId`
+- `CLOUDFRONT_PRIVATE_KEY_PEM` = contents of `cloudfront_private_key.pem`
+
+### Verify
+
+When working correctly, DM media downloads should use a CloudFront URL that includes:
+- `Expires=...`
+- `Signature=...`
+- `Key-Pair-Id=...`
+
 ## 🚀 Getting Started
 
 ### 1. Clone and Setup

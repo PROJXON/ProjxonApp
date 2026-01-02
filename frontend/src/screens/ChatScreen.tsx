@@ -27,7 +27,7 @@ import {
 import { AnimatedDots } from '../components/AnimatedDots';
 import { AvatarBubble } from '../components/AvatarBubble';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { WS_URL, API_URL } from '../config/env';
+import { WS_URL, API_URL, CDN_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
 // const WS_URL = "wss://ws.ifelse.io"
 import { useAuthenticator } from '@aws-amplify/ui-react-native';
@@ -53,10 +53,23 @@ import { VideoView, useVideoPlayer } from 'expo-video';
 import { InAppCameraModal } from '../components/InAppCameraModal';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import * as FileSystem from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library';
 import { fromByteArray, toByteArray } from 'base64-js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
+import { getDmMediaSignedUrl } from '../utils/dmSignedUrl';
+
+function toCdnUrl(path: string): string {
+  const base = (CDN_URL || '').trim();
+  const p = String(path || '').replace(/^\/+/, '');
+  if (!base || !p) return '';
+  try {
+    const b = base.endsWith('/') ? base : `${base}/`;
+    return new URL(p, b).toString();
+  } catch {
+    return '';
+  }
+}
 
 function TypingIndicator({
   text,
@@ -512,6 +525,10 @@ export default function ChatScreen({
     kind: 'image' | 'video' | 'file';
     fileName?: string;
   } | null>(null);
+  const [viewerSaving, setViewerSaving] = React.useState<boolean>(false);
+  const [toast, setToast] = React.useState<null | { message: string; kind: 'success' | 'error' }>(null);
+  const toastAnim = React.useRef(new Animated.Value(0)).current;
+  const toastTimerRef = React.useRef<any>(null);
   const [attachOpen, setAttachOpen] = React.useState<boolean>(false);
   const [cameraOpen, setCameraOpen] = React.useState<boolean>(false);
   const activeConversationId = React.useMemo(
@@ -813,6 +830,38 @@ export default function ChatScreen({
     async (
       media: NonNullable<typeof pendingMedia>
     ): Promise<ChatEnvelope['media']> => {
+      const readUriBytes = async (uri: string): Promise<Uint8Array> => {
+        // Prefer fetch(...).arrayBuffer() (works for http(s) and often for file://),
+        // fallback to FileSystem Base64 read for cases where Blob/arrayBuffer is missing.
+        try {
+          const resp: any = await fetch(uri);
+          if (resp && typeof resp.arrayBuffer === 'function') {
+            return new Uint8Array(await resp.arrayBuffer());
+          }
+          if (resp && typeof resp.blob === 'function') {
+            const b: any = await resp.blob();
+            if (b && typeof b.arrayBuffer === 'function') {
+              return new Uint8Array(await b.arrayBuffer());
+            }
+          }
+        } catch {
+          // fall through
+        }
+        const fsAny: any = require('expo-file-system');
+        const File = fsAny?.File;
+        if (!File) throw new Error('File API not available');
+        const f: any = new File(uri);
+        if (typeof f?.bytes === 'function') {
+          const bytes = await f.bytes();
+          return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        }
+        if (typeof f?.base64 === 'function') {
+          const b64 = await f.base64();
+          return toByteArray(String(b64 || ''));
+        }
+        throw new Error('File read API not available');
+      };
+
       const declaredSize = typeof media.size === 'number' ? media.size : undefined;
       const hardLimit =
         media.kind === 'image' ? MAX_IMAGE_BYTES : media.kind === 'video' ? MAX_VIDEO_BYTES : MAX_FILE_BYTES;
@@ -822,11 +871,10 @@ export default function ChatScreen({
         );
       }
 
-      const res = await fetch(media.uri);
-      const blob = await res.blob();
-      if (blob.size > hardLimit) {
+      const bytes = await readUriBytes(media.uri);
+      if (bytes.byteLength > hardLimit) {
         throw new Error(
-          `File too large (${formatBytes(blob.size)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
+          `File too large (${formatBytes(bytes.byteLength)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
         );
       }
 
@@ -837,12 +885,13 @@ export default function ChatScreen({
       // NOTE: current Amplify Storage auth policies (from amplify_outputs.json) allow `uploads/*`.
       // Keep uploads under that prefix so authenticated users can PUT.
       const baseKey = `${Date.now()}-${safeName}`;
-      const path = `uploads/global/${baseKey}`;
-      const thumbPath = `uploads/global/thumbs/${baseKey}.webp`;
+      const channelId = String(activeConversationId || 'global');
+      const path = `uploads/channels/${channelId}/${baseKey}`;
+      const thumbPath = `uploads/channels/${channelId}/thumbs/${baseKey}.webp`;
 
       await uploadData({
         path,
-        data: blob,
+        data: bytes,
         options: {
           contentType: media.contentType,
         },
@@ -858,11 +907,10 @@ export default function ChatScreen({
             [{ resize: { width: THUMB_MAX_DIM } }],
             { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
           );
-          const thumbRes = await fetch(thumb.uri);
-          const thumbBlob = await thumbRes.blob();
+          const thumbBytes = await readUriBytes(thumb.uri);
           await uploadData({
             path: thumbPath,
-            data: thumbBlob,
+            data: thumbBytes,
             options: { contentType: 'image/webp' },
           }).result;
           uploadedThumbPath = thumbPath;
@@ -882,11 +930,10 @@ export default function ChatScreen({
             [{ resize: { width: THUMB_MAX_DIM } }],
             { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
           );
-          const thumbRes = await fetch(converted.uri);
-          const thumbBlob = await thumbRes.blob();
+          const thumbBytes = await readUriBytes(converted.uri);
           await uploadData({
             path: thumbPath,
-            data: thumbBlob,
+            data: thumbBytes,
             options: { contentType: 'image/webp' },
           }).result;
           uploadedThumbPath = thumbPath;
@@ -906,7 +953,7 @@ export default function ChatScreen({
         size: media.size,
       };
     },
-    [pendingMedia]
+    [pendingMedia, activeConversationId]
   );
 
   const uploadPendingMediaDmEncrypted = React.useCallback(
@@ -933,10 +980,19 @@ export default function ChatScreen({
         } catch {
           // fall through
         }
-        const b64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        return toByteArray(b64);
+        const fsAny: any = require('expo-file-system');
+        const File = fsAny?.File;
+        if (!File) throw new Error('File API not available');
+        const f: any = new File(uri);
+        if (typeof f?.bytes === 'function') {
+          const bytes = await f.bytes();
+          return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        }
+        if (typeof f?.base64 === 'function') {
+          const b64 = await f.base64();
+          return toByteArray(String(b64 || ''));
+        }
+        throw new Error('File read API not available');
       };
 
       const declaredSize = typeof media.size === 'number' ? media.size : undefined;
@@ -1047,8 +1103,9 @@ export default function ChatScreen({
 
   const openMedia = React.useCallback(async (path: string) => {
     try {
-      const { url } = await getUrl({ path });
-      await Linking.openURL(url.toString());
+      const s = toCdnUrl(path);
+      if (!s) throw new Error('CDN_URL not configured');
+      await Linking.openURL(s);
     } catch (e: any) {
       Alert.alert('Open failed', e?.message ?? 'Could not open attachment');
     }
@@ -1090,10 +1147,9 @@ export default function ChatScreen({
     };
   }, [user]);
 
-  // Lazily resolve signed URLs for any media we see in message list (Global only).
+  // Lazily resolve public (unsigned) CDN URLs for any media we see in message list (non-DM only).
   React.useEffect(() => {
     if (isDm) return;
-    if (!storageSessionReady) return;
     let cancelled = false;
     const needed: string[] = [];
 
@@ -1120,15 +1176,8 @@ export default function ChatScreen({
       try {
         for (const path of uniqueNeeded) {
           try {
-            // One short retry helps with transient network hiccups (without adding complex state).
-            try {
-              const { url } = await getUrl({ path });
-              pairs.push([path, url.toString()]);
-            } catch {
-              await new Promise((r) => setTimeout(r, 300));
-              const { url } = await getUrl({ path });
-              pairs.push([path, url.toString()]);
-            }
+            const s = toCdnUrl(path);
+            if (s) pairs.push([path, s]);
           } catch {
             // ignore; user can still tap to open, and future renders may re-trigger resolution
           }
@@ -1152,12 +1201,10 @@ export default function ChatScreen({
       // Also clear any remaining in-flight flags for this run.
       for (const p of uniqueNeeded) inFlightMediaUrlRef.current.delete(p);
     };
-  }, [isDm, messages, mediaUrlByPath, storageSessionReady]);
+  }, [isDm, messages, mediaUrlByPath]);
 
-  // Lazily resolve avatar image URLs (public-ish paths like uploads/global/avatars/*).
+  // Lazily resolve avatar image URLs (public paths like uploads/public/avatars/*).
   React.useEffect(() => {
-    // Avatars are intended to be broadly visible (guests see them too). If identity credentials
-    // are temporarily unavailable, getUrl() may throw; we still want to retry on future renders.
     let cancelled = false;
     const needed: string[] = [];
 
@@ -1178,14 +1225,8 @@ export default function ChatScreen({
       try {
         for (const path of uniqueNeeded) {
           try {
-            try {
-              const { url } = await getUrl({ path });
-              pairs.push([path, url.toString()]);
-            } catch {
-              await new Promise((r) => setTimeout(r, 300));
-              const { url } = await getUrl({ path });
-              pairs.push([path, url.toString()]);
-            }
+            const s = toCdnUrl(path);
+            if (s) pairs.push([path, s]);
           } catch (e) {
             // eslint-disable-next-line no-console
             console.log('avatar getUrl failed', path, (e as any)?.message || String(e));
@@ -1207,7 +1248,7 @@ export default function ChatScreen({
       cancelled = true;
       for (const p of uniqueNeeded) inFlightAvatarUrlRef.current.delete(p);
     };
-  }, [avatarProfileBySub, avatarUrlByPath, storageSessionReady]);
+  }, [avatarProfileBySub, avatarUrlByPath]);
 
   // Lazily fetch image aspect ratios so thumbnails can render without letterboxing (and thus can be truly rounded).
   React.useEffect(() => {
@@ -1266,6 +1307,110 @@ export default function ChatScreen({
     },
     [mediaUrlByPath, openMedia]
   );
+
+  const showToast = React.useCallback(
+    (message: string, kind: 'success' | 'error' = 'success') => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToast({ message, kind });
+      toastAnim.stopAnimation();
+      toastAnim.setValue(0);
+      Animated.timing(toastAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+      toastTimerRef.current = setTimeout(() => {
+        Animated.timing(toastAnim, { toValue: 0, duration: 180, useNativeDriver: true }).start(() => {
+          setToast(null);
+        });
+      }, 1800);
+    },
+    [toastAnim]
+  );
+
+  React.useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  const saveViewerMediaToDevice = React.useCallback(async () => {
+    const vm = viewerMedia;
+    if (!vm?.url) return;
+    if (viewerSaving) return;
+    setViewerSaving(true);
+    try {
+      const perm = await MediaLibrary.requestPermissionsAsync();
+      if (!perm.granted) {
+        showToast('Allow Photos permission to save.', 'error');
+        return;
+      }
+
+      // Download to cache first.
+      const safeNameWithExt = (vm.fileName || `attachment-${Date.now()}`)
+        .replace(/[^\w.\-() ]+/g, '_')
+        .slice(0, 120);
+      const extFromName = (() => {
+        const m = safeNameWithExt.match(/\.([a-zA-Z0-9]{1,8})$/);
+        return m ? m[1].toLowerCase() : '';
+      })();
+      const ext =
+        extFromName ||
+        (vm.kind === 'image' ? 'jpg' : vm.kind === 'video' ? 'mp4' : 'bin');
+
+      const baseName = safeNameWithExt.replace(/\.[^.]+$/, '') || `attachment-${Date.now()}`;
+
+      // Handle data URIs (used for decrypted DM previews sometimes).
+      if (vm.url.startsWith('data:')) {
+        const comma = vm.url.indexOf(',');
+        if (comma < 0) throw new Error('Invalid data URI');
+        const header = vm.url.slice(0, comma);
+        const b64 = vm.url.slice(comma + 1);
+        const isBase64 = /;base64/i.test(header);
+        if (!isBase64) throw new Error('Unsupported data URI encoding');
+        const fsAny: any = require('expo-file-system');
+        const Paths = fsAny?.Paths;
+        const File = fsAny?.File;
+        const root = (Paths?.cache || Paths?.document) as any;
+        if (!root) throw new Error('No writable cache directory');
+        if (!File) throw new Error('File API not available');
+        const dest = new File(root, `${baseName}.${ext}`);
+        if (typeof dest?.write !== 'function') throw new Error('File write API not available');
+        await dest.write(b64, { encoding: 'base64' });
+        await MediaLibrary.saveToLibraryAsync(dest.uri);
+        showToast('Saved to your device.', 'success');
+        return;
+      }
+
+      // If it's already a local file, save it directly.
+      if (vm.url.startsWith('file:')) {
+        await MediaLibrary.saveToLibraryAsync(vm.url);
+        showToast('Saved to your device.', 'success');
+        return;
+      }
+
+      // Modern Expo FileSystem API (SDK 54+).
+      const fsAny: any = require('expo-file-system');
+      const Paths = fsAny?.Paths;
+      const File = fsAny?.File;
+      const root = (Paths?.cache || Paths?.document) as any;
+      if (!root) throw new Error('No writable cache directory');
+      if (!File) throw new Error('File API not available');
+      const dest = new File(root, `${baseName}.${ext}`);
+      // The docs support either instance or static download; support both for safety.
+      if (typeof dest?.downloadFileAsync === 'function') {
+        await dest.downloadFileAsync(vm.url);
+      } else if (typeof File?.downloadFileAsync === 'function') {
+        await File.downloadFileAsync(vm.url, dest);
+      } else {
+        throw new Error('File download API not available');
+      }
+
+      await MediaLibrary.saveToLibraryAsync(dest.uri);
+      showToast('Saved to your device.', 'success');
+    } catch (e: any) {
+      const msg = String(e?.message || 'Could not save attachment');
+      showToast(msg.length > 120 ? `${msg.slice(0, 120)}…` : msg, 'error');
+    } finally {
+      setViewerSaving(false);
+    }
+  }, [viewerMedia, viewerSaving, showToast]);
 
   // Reset per-conversation read bookkeeping
   React.useEffect(() => {
@@ -1542,10 +1687,24 @@ export default function ChatScreen({
       const chatKey = buildDmMediaKey(msg);
       const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext); // 32 bytes
 
-      const { url } = await getUrl({ path: env.media.thumbPath });
-      const encResp = await fetch(url.toString());
+      const signedUrl = await getDmMediaSignedUrl(env.media.thumbPath, 300);
+      const encResp = await fetch(signedUrl);
+      if (!encResp.ok) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download failed (${encResp.status}): ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const respCt = String(encResp.headers.get('content-type') || '');
+      if (respCt.includes('text') || respCt.includes('xml') || respCt.includes('json') || respCt.includes('html')) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
+      }
       const encBytes = new Uint8Array(await encResp.arrayBuffer());
-      const plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
+      let plainThumbBytes: Uint8Array;
+      try {
+        plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(env.media.thumbIv))).decrypt(encBytes);
+      } catch {
+        throw new Error('DM decrypt failed (bad key or corrupted download)');
+      }
 
       const b64 = fromByteArray(plainThumbBytes);
       const ct =
@@ -1576,11 +1735,25 @@ export default function ChatScreen({
       const chatKey = buildDmMediaKey(msg);
       const fileKey = aesGcmDecryptBytes(chatKey, env.wrap.iv, env.wrap.ciphertext);
 
-      const { url } = await getUrl({ path: env.media.path });
-      const encResp = await fetch(url.toString());
+      const signedUrl = await getDmMediaSignedUrl(env.media.path, 300);
+      const encResp = await fetch(signedUrl);
+      if (!encResp.ok) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download failed (${encResp.status}): ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const respCt = String(encResp.headers.get('content-type') || '');
+      if (respCt.includes('text') || respCt.includes('xml') || respCt.includes('json') || respCt.includes('html')) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`DM download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
+      }
       const encBytes = new Uint8Array(await encResp.arrayBuffer());
       const fileIvBytes = hexToBytes(env.media.iv);
-      const plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
+      let plainBytes: Uint8Array;
+      try {
+        plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
+      } catch {
+        throw new Error('DM decrypt failed (bad key or corrupted download)');
+      }
 
       const ct = env.media.contentType || 'application/octet-stream';
       const ext =
@@ -1590,12 +1763,18 @@ export default function ChatScreen({
             ? ct.split('/')[1] || 'mp4'
             : 'bin';
       const fileNameSafe = (env.media.fileName || `dm-${Date.now()}`).replace(/[^\w.\-() ]+/g, '_');
-      const outUri = `${FileSystem.cacheDirectory}dm-${fileNameSafe}.${ext}`;
-      const b64 = fromByteArray(plainBytes);
-      await FileSystem.writeAsStringAsync(outUri, b64, { encoding: FileSystem.EncodingType.Base64 });
+      const fsAny: any = require('expo-file-system');
+      const Paths = fsAny?.Paths;
+      const File = fsAny?.File;
+      const root = (Paths?.cache || Paths?.document) as any;
+      if (!root) throw new Error('No writable cache directory');
+      if (!File) throw new Error('File API not available');
+      const outFile = new File(root, `dm-${fileNameSafe}.${ext}`);
+      if (typeof outFile?.write !== 'function') throw new Error('File write API not available');
+      await outFile.write(plainBytes);
 
-      setDmFileUriByPath((prev) => ({ ...prev, [cacheKey]: outUri }));
-      return outUri;
+      setDmFileUriByPath((prev) => ({ ...prev, [cacheKey]: outFile.uri }));
+      return outFile.uri;
     },
     [aesGcmDecryptBytes, buildDmMediaKey, dmFileUriByPath]
   );
@@ -3510,8 +3689,8 @@ export default function ChatScreen({
           let thumbUrl = resolvedThumbUrlByKey[thumbKey] || mediaUrlByPath[thumbKey] || '';
           if (!thumbUrl) {
             try {
-              const { url } = await getUrl({ path: thumbKey });
-              thumbUrl = String(url || '');
+              const s = toCdnUrl(thumbKey);
+              thumbUrl = String(s || '');
               if (thumbUrl) {
                 resolvedThumbUrlByKey[thumbKey] = thumbUrl;
                 // Keep the global cache warm for future UI and AI calls.
@@ -4309,7 +4488,11 @@ export default function ChatScreen({
                                 !storageSessionReady ||
                                 (keyPath && inFlightMediaUrlRef.current.has(String(keyPath)));
                               if (!isResolving) return null;
-                              const textColor = isDark ? '#b7b7c2' : '#555';
+                              const textColor = isOutgoing
+                                ? 'rgba(255,255,255,0.9)'
+                                : isDark
+                                  ? '#b7b7c2'
+                                  : '#555';
                               return (
                                 <Pressable
                                   onPress={() => void openMedia(media.path)}
@@ -4335,15 +4518,32 @@ export default function ChatScreen({
                                 </Pressable>
                               );
                             })()
-                          ) : isDm && mediaLooksImage ? (
-                            <Pressable onPress={() => void openDmMediaViewer(item)}>
-                              <View style={[styles.imageThumbWrap, { width: capped.w, height: capped.h }]}>
-                                <View style={[styles.mediaFill, { backgroundColor: '#ddd' }]} />
-                                <View style={styles.videoPlayOverlay}>
-                                  <Text style={[styles.attachmentLink, { color: '#555', textDecorationLine: 'none' }]}>
-                                    Encrypted media
-                                  </Text>
-                                </View>
+                          ) : isDm && (mediaLooksImage || mediaLooksVideo) ? (
+                            <Pressable onPress={() => void openDmMediaViewer(item)} accessibilityRole="button">
+                              <View
+                                style={[
+                                  styles.imageThumbWrap,
+                                  {
+                                    width: capped.w,
+                                    height: capped.h,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                  },
+                                ]}
+                              >
+                                {(() => {
+                                  const textColor = isOutgoing
+                                    ? 'rgba(255,255,255,0.9)'
+                                    : isDark
+                                      ? '#b7b7c2'
+                                      : '#555';
+                                  return (
+                                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                      <Text style={{ color: textColor, fontWeight: '700', fontSize: 14 }}>Loading</Text>
+                                      <AnimatedDots color={textColor} size={16} />
+                                    </View>
+                                  );
+                                })()}
                               </View>
                             </Pressable>
                           ) : (
@@ -5754,15 +5954,24 @@ export default function ChatScreen({
           <View style={styles.viewerCard}>
             <View style={styles.viewerTopBar}>
               <Text style={styles.viewerTitle}>{viewerMedia?.fileName || 'Attachment'}</Text>
-              <Pressable
-                style={styles.viewerCloseBtn}
-                onPress={() => {
-                  setViewerOpen(false);
-                  setViewerMedia(null);
-                }}
-              >
-                <Text style={styles.viewerCloseText}>Close</Text>
-              </Pressable>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <Pressable
+                  style={[styles.viewerCloseBtn, viewerSaving ? { opacity: 0.6 } : null]}
+                  disabled={viewerSaving}
+                  onPress={() => void saveViewerMediaToDevice()}
+                >
+                  <Text style={styles.viewerCloseText}>{viewerSaving ? 'Saving…' : 'Save'}</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.viewerCloseBtn}
+                  onPress={() => {
+                    setViewerOpen(false);
+                    setViewerMedia(null);
+                  }}
+                >
+                  <Text style={styles.viewerCloseText}>Close</Text>
+                </Pressable>
+              </View>
             </View>
             <View style={styles.viewerBody}>
               {viewerMedia?.kind === 'image' && viewerMedia?.url ? (
@@ -5776,6 +5985,37 @@ export default function ChatScreen({
           </View>
         </View>
       </Modal>
+
+      {toast ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.toastWrap,
+            {
+              bottom: Math.max(16, insets.bottom + 12),
+              opacity: toastAnim,
+              transform: [
+                {
+                  translateY: toastAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [12, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.toast,
+              isDark ? styles.toastDark : null,
+              toast.kind === 'error' ? (isDark ? styles.toastErrorDark : styles.toastError) : null,
+            ]}
+          >
+            <Text style={styles.toastText}>{toast.message}</Text>
+          </View>
+        </Animated.View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -6159,11 +6399,11 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 12,
     borderRadius: 10,
-    backgroundColor: '#e8eefc',
+    backgroundColor: '#f2f2f7',
     borderWidth: 1,
-    borderColor: '#c7d6ff',
+    borderColor: '#e3e3e3',
   },
-  attachmentPillText: { color: '#1b3a7a', fontWeight: '700' },
+  attachmentPillText: { color: '#111', fontWeight: '700' },
   attachmentPillDark: {
     backgroundColor: '#1c1c22',
     borderColor: '#2a2a33',
@@ -6477,8 +6717,9 @@ const styles = StyleSheet.create({
     elevation: 0,
   },
   reactionMiniChipMine: {
-    backgroundColor: 'rgba(25,118,210,0.12)',
-    borderColor: 'rgba(25,118,210,0.35)',
+    // Higher-contrast "selected by me" in light theme
+    backgroundColor: 'rgba(17,17,17,0.18)',
+    borderColor: 'rgba(17,17,17,0.65)',
   },
   reactionMiniChipMineDark: {
     backgroundColor: 'rgba(25,118,210,0.22)',
@@ -6516,8 +6757,8 @@ const styles = StyleSheet.create({
     borderColor: '#2a2a33',
   },
   reactionQuickBtnMine: {
-    backgroundColor: 'rgba(25,118,210,0.15)',
-    borderColor: 'rgba(25,118,210,0.35)',
+    backgroundColor: 'rgba(17,17,17,0.20)',
+    borderColor: 'rgba(17,17,17,0.70)',
   },
   reactionQuickBtnMineDark: {
     backgroundColor: 'rgba(25,118,210,0.25)',
@@ -6561,8 +6802,8 @@ const styles = StyleSheet.create({
     borderColor: '#2a2a33',
   },
   reactionPickerBtnMine: {
-    backgroundColor: 'rgba(25,118,210,0.15)',
-    borderColor: 'rgba(25,118,210,0.35)',
+    backgroundColor: 'rgba(17,17,17,0.20)',
+    borderColor: 'rgba(17,17,17,0.70)',
   },
   reactionPickerBtnMineDark: {
     backgroundColor: 'rgba(25,118,210,0.25)',
@@ -6602,6 +6843,41 @@ const styles = StyleSheet.create({
   viewerImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   viewerVideo: { width: '100%', height: '100%' },
   viewerFallback: { color: '#fff' },
+
+  toastWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toast: {
+    maxWidth: 340,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: '#111',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  toastDark: {
+    backgroundColor: '#1c1c22',
+    borderColor: '#2a2a33',
+  },
+  toastError: {
+    backgroundColor: '#b00020',
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  toastErrorDark: {
+    backgroundColor: '#7f0015',
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  toastText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 13,
+    textAlign: 'center',
+  },
 });
 
 

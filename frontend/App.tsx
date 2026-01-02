@@ -44,7 +44,7 @@ import { useFieldValues } from '@aws-amplify/ui-react-native/src/Authenticator/h
 import { fetchUserAttributes } from 'aws-amplify/auth';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { getUrl, uploadData } from 'aws-amplify/storage';
-import { API_URL } from './src/config/env';
+import { API_URL, CDN_URL } from './src/config/env';
 import {
   registerForDmPushNotifications,
   setForegroundNotificationPolicy,
@@ -80,6 +80,18 @@ try {
 } catch {
   // amplify_outputs.json not present yet; run `npx ampx sandbox` to generate it.
 }
+
+const toCdnUrl = (path: string): string => {
+  const base = (CDN_URL || '').trim();
+  const p = String(path || '').replace(/^\/+/, '');
+  if (!base || !p) return '';
+  try {
+    const b = base.endsWith('/') ? base : `${base}/`;
+    return new URL(p, b).toString();
+  } catch {
+    return '';
+  }
+};
 
 const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   const { user } = useAuthenticator();
@@ -647,8 +659,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       if (!myAvatar?.imagePath) return;
       if (myAvatar.imageUri) return;
       try {
-        const { url } = await getUrl({ path: myAvatar.imagePath });
-        if (!cancelled) setMyAvatar((prev) => ({ ...prev, imageUri: url.toString() }));
+        const s = toCdnUrl(myAvatar.imagePath);
+        if (s && !cancelled) setMyAvatar((prev) => ({ ...prev, imageUri: s }));
       } catch (e: any) {
         // eslint-disable-next-line no-console
         console.log('avatar preview getUrl failed', myAvatar?.imagePath, e?.message || String(e));
@@ -1900,7 +1912,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
                       const blob = await (await fetch(normalized.uri)).blob();
                       // Store avatars under uploads/global/* so both authenticated users and guests
                       // can resolve them via Amplify Storage permissions (and later behind CloudFront).
-                      const path = `uploads/global/avatars/${myUserSub}/${Date.now()}.jpg`;
+                      const path = `uploads/public/avatars/${myUserSub}/${Date.now()}.jpg`;
                       await uploadData({ path, data: blob, options: { contentType: 'image/jpeg' } }).result;
                       nextImagePath = path;
                       setAvatarDraftImageUri(null);

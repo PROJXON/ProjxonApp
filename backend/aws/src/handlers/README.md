@@ -113,6 +113,14 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
   - **Body**: `{ blockedSub }`
   - **Notes**: removes a user from your blocklist
 
+- **POST `/media/dm/signed-url`** → `http/getDmSignedUrl.js`
+  - **Auth**: JWT
+  - **Body**: `{ path: "uploads/dm/<conversationId>/...", ttlSeconds?: number }`
+  - **Returns**: `{ url, expires }`
+  - **Notes**:
+    - validates the caller is a participant of the DM (based on `dm#<subA>#<subB>` in the path)
+    - signs CloudFront URLs using a trusted key group (canned policy, short TTL)
+
 ### WebSocket API (API Gateway WebSockets)
 
 > **Auth**: WebSocket connections are authorized by `ws/wsAuthorizer.js` (Cognito JWT).

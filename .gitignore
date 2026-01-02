@@ -9,6 +9,10 @@ yarn-error.log*
 .env.local
 .env.production
 
+# CloudFront signing keys (DO NOT COMMIT)
+cloudfront_private_key.pem
+cloudfront_public_key.pem
+
 # TypeScript
 *.tsbuildinfo
 dist/

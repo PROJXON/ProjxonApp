@@ -69,9 +69,7 @@ exports.handler = async (event) => {
     } else if (typeof imgRaw === 'string') {
       const path = String(imgRaw).trim();
       // Prevent arbitrary bucket reads; avatars are expected to live under one of these prefixes.
-      // NOTE: We prefer uploads/global/avatars/* because Amplify Storage policies already grant
-      // guest+authenticated read access to uploads/global/*.
-      const allowedPrefixes = ['uploads/global/avatars/', 'public/avatars/'];
+      const allowedPrefixes = ['uploads/public/avatars/'];
       const ok = !path || allowedPrefixes.some((pfx) => path.startsWith(pfx));
       if (!ok) {
         return {

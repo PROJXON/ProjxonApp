@@ -12,7 +12,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "We use your camera to capture photos and videos to attach to messages.",
         "NSMicrophoneUsageDescription": "We use your microphone when recording video attachments.",
-        "NSPhotoLibraryUsageDescription": "We use your photo library to pick media to attach to messages."
+        "NSPhotoLibraryUsageDescription": "We use your photo library to pick media to attach to messages.",
+        "NSPhotoLibraryAddUsageDescription": "We save attachments you download to your photo library."
       },
       "icon": {
         "dark": "./assets/icons/ios-dark.png",
