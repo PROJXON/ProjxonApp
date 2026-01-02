@@ -37,21 +37,27 @@ type GuestMessage = {
   editedAt?: number;
   reactions?: Record<string, { count: number; userSubs: string[] }>;
   reactionUsers?: Record<string, string>;
-  media?: {
-    path: string;
-    thumbPath?: string;
-    kind: 'image' | 'video' | 'file';
-    contentType?: string;
-    thumbContentType?: string;
-    fileName?: string;
-    size?: number;
-  };
+  // Backward-compat: historically we supported only a single attachment per message.
+  // New messages can include multiple attachments; use `mediaList` when present.
+  media?: GuestMediaItem;
+  mediaList?: GuestMediaItem[];
+};
+
+type GuestMediaItem = {
+  path: string;
+  thumbPath?: string;
+  kind: 'image' | 'video' | 'file';
+  contentType?: string;
+  thumbContentType?: string;
+  fileName?: string;
+  size?: number;
 };
 
 type ChatEnvelope = {
   type: 'chat';
   text?: string;
-  media?: GuestMessage['media'];
+  // Backward-compat: `media` may be a single object (v1) or an array (v2+).
+  media?: GuestMediaItem | GuestMediaItem[];
 };
 
 const GUEST_HISTORY_PAGE_SIZE = 50;
@@ -83,7 +89,28 @@ function normalizeGuestReactions(raw: any): Record<string, { count: number; user
   return Object.keys(out).length ? out : undefined;
 }
 
-function tryParseChatEnvelope(rawText: string): { text: string; media?: GuestMessage['media'] } | null {
+function normalizeGuestMediaList(raw: ChatEnvelope['media']): GuestMediaItem[] {
+  if (!raw) return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  const out: GuestMediaItem[] = [];
+  for (const m of arr as any[]) {
+    if (!m || typeof m !== 'object') continue;
+    if (typeof m.path !== 'string') continue;
+    const kind = m.kind === 'video' ? 'video' : m.kind === 'image' ? 'image' : 'file';
+    out.push({
+      path: String(m.path),
+      thumbPath: typeof m.thumbPath === 'string' ? String(m.thumbPath) : undefined,
+      kind,
+      contentType: typeof m.contentType === 'string' ? String(m.contentType) : undefined,
+      thumbContentType: typeof m.thumbContentType === 'string' ? String(m.thumbContentType) : undefined,
+      fileName: typeof m.fileName === 'string' ? String(m.fileName) : undefined,
+      size: typeof m.size === 'number' && Number.isFinite(m.size) ? m.size : undefined,
+    });
+  }
+  return out;
+}
+
+function tryParseChatEnvelope(rawText: string): { text: string; mediaList: GuestMediaItem[] } | null {
   const t = (rawText || '').trim();
   if (!t || !t.startsWith('{') || !t.endsWith('}')) return null;
   try {
@@ -92,9 +119,9 @@ function tryParseChatEnvelope(rawText: string): { text: string; media?: GuestMes
     if (obj.type !== 'chat') return null;
     const env = obj as ChatEnvelope;
     const text = typeof env.text === 'string' ? env.text : '';
-    const media = env.media && typeof env.media === 'object' ? (env.media as GuestMessage['media']) : undefined;
-    if (!text && !media) return null;
-    return { text, media };
+    const mediaList = normalizeGuestMediaList(env.media);
+    if (!text && mediaList.length === 0) return null;
+    return { text, mediaList };
   } catch {
     return null;
   }
@@ -115,8 +142,9 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
     const rawText = typeof it?.text === 'string' ? it.text : '';
     const parsed = tryParseChatEnvelope(rawText);
     const text = parsed ? parsed.text : rawText;
-    const media = parsed?.media;
-    if (!text.trim() && !media) continue;
+    const mediaList = parsed?.mediaList ?? [];
+    const media = mediaList.length ? mediaList[0] : undefined;
+    if (!text.trim() && mediaList.length === 0) continue;
     out.push({
       id: messageId,
       user,
@@ -133,6 +161,7 @@ function normalizeGuestMessages(items: any[]): GuestMessage[] {
           ? Object.fromEntries(Object.entries((it as any).reactionUsers).map(([k, v]) => [String(k), String(v)]))
           : undefined,
       media,
+      mediaList: mediaList.length ? mediaList : undefined,
     });
   }
 
@@ -894,7 +923,7 @@ function GuestMessageRow({
   isDark: boolean;
   resolvePathUrl: (path: string) => Promise<string | null>;
   onOpenReactionInfo: (emoji: string, subs: string[], namesBySub?: Record<string, string>) => void;
-  onOpenViewer: (media: GuestMessage['media']) => void;
+  onOpenViewer: (media: GuestMediaItem) => void;
   avatarSize: number;
   avatarGutter: number;
   avatarSeed: string;
@@ -909,10 +938,14 @@ function GuestMessageRow({
   const [usedFullUrl, setUsedFullUrl] = React.useState<boolean>(false);
   const [thumbAspect, setThumbAspect] = React.useState<number | null>(null);
 
+  const mediaList = item.mediaList ?? (item.media ? [item.media] : []);
+  const primaryMedia = mediaList.length ? mediaList[0] : null;
+  const extraCount = Math.max(0, mediaList.length - 1);
+
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      const preferredPath = item.media?.thumbPath || item.media?.path;
+      const preferredPath = primaryMedia?.thumbPath || primaryMedia?.path;
       if (!preferredPath) return;
       const u = await resolvePathUrl(preferredPath);
       if (!cancelled) setThumbUrl(u);
@@ -920,7 +953,7 @@ function GuestMessageRow({
     return () => {
       cancelled = true;
     };
-  }, [item.media?.path, item.media?.thumbPath, resolvePathUrl]);
+  }, [primaryMedia?.path, primaryMedia?.thumbPath, resolvePathUrl]);
 
   React.useEffect(() => {
     if (!thumbUrl) return;
@@ -941,7 +974,7 @@ function GuestMessageRow({
     };
   }, [thumbUrl]);
 
-  const hasMedia = !!item.media?.path;
+  const hasMedia = !!primaryMedia?.path;
   const ts = formatGuestTimestamp(item.createdAt);
   const metaLine = `${item.user}${ts ? ` · ${ts}` : ''}`;
   const isEdited = typeof item.editedAt === 'number' && Number.isFinite(item.editedAt);
@@ -960,7 +993,7 @@ function GuestMessageRow({
     // - S3 returns 403 because guest read policy isn't deployed yet
     // Try the full object as a fallback (especially useful if only the thumb is missing).
     if (usedFullUrl) return;
-    const fullPath = item.media?.path;
+    const fullPath = primaryMedia?.path;
     if (!fullPath) return;
     const u = await resolvePathUrl(fullPath);
     if (u) {
@@ -970,7 +1003,7 @@ function GuestMessageRow({
     }
     // If we couldn't resolve anything, drop the preview so we fall back to a file chip.
     setThumbUrl(null);
-  }, [item.media?.path, resolvePathUrl, usedFullUrl]);
+  }, [primaryMedia?.path, resolvePathUrl, usedFullUrl]);
 
   // Match ChatScreen-ish thumbnail sizing: capped max size, preserve aspect ratio, no crop.
   const CHAT_MEDIA_MAX_HEIGHT = 240;
@@ -1043,20 +1076,20 @@ function GuestMessageRow({
 
             <Pressable
               onPress={() => {
-                if (item.media) onOpenViewer(item.media);
+                if (primaryMedia) onOpenViewer(primaryMedia);
               }}
               style={({ pressed }) => [{ opacity: pressed ? 0.92 : 1 }]}
               accessibilityRole="button"
               accessibilityLabel="Open media"
             >
-              {item.media?.kind === 'image' && thumbUrl ? (
+              {primaryMedia?.kind === 'image' && thumbUrl ? (
                 <Image
                   source={{ uri: thumbUrl }}
                   style={{ width: capped.w, height: capped.h }}
                   resizeMode="contain"
                   onError={() => void onThumbError()}
                 />
-              ) : item.media?.kind === 'video' && thumbUrl ? (
+              ) : primaryMedia?.kind === 'video' && thumbUrl ? (
                 <View style={{ width: capped.w, height: capped.h }}>
                   <Image
                     source={{ uri: thumbUrl }}
@@ -1071,11 +1104,19 @@ function GuestMessageRow({
               ) : (
                 <View style={[styles.guestMediaFileChip, isDark && styles.guestMediaFileChipDark]}>
                   <Text style={[styles.guestMediaFileText, isDark && styles.guestMediaFileTextDark]} numberOfLines={1}>
-                    {item.media?.fileName ? item.media.fileName : item.media?.kind === 'video' ? 'Video' : 'File'}
+                    {primaryMedia?.fileName ? primaryMedia.fileName : primaryMedia?.kind === 'video' ? 'Video' : 'File'}
                   </Text>
                 </View>
               )}
             </Pressable>
+
+            {extraCount ? (
+              <View style={styles.guestExtraMediaRow}>
+                <Text style={[styles.guestExtraMediaText, isDark ? styles.guestExtraMediaTextDark : null]}>
+                  +{extraCount} more
+                </Text>
+              </View>
+            ) : null}
           </View>
 
           {reactionEntriesVisible.length ? (
@@ -1410,6 +1451,19 @@ const styles = StyleSheet.create({
   },
   guestMediaFileTextDark: {
     color: '#fff',
+  },
+  guestExtraMediaRow: {
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
+  guestExtraMediaText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#555',
+  },
+  guestExtraMediaTextDark: {
+    color: '#b7b7c2',
   },
   bottomBar: {
     borderTopWidth: StyleSheet.hairlineWidth,

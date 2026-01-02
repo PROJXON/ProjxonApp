@@ -26,7 +26,13 @@ export const storage = defineStorage({
     // ---- DM chat (E2EE encrypted blobs) ----
     // Keep these auth-only. Reads should happen via CloudFront signed URLs/cookies.
     // (This prevents bypassing CloudFront by minting S3 presigned URLs.)
-    'uploads/dm/*': [allow.authenticated.to(['write'])],
+    //
+    // NOTE:
+    // In practice, larger uploads (especially videos) may use S3 multipart upload under the hood,
+    // which requires list/read-style permissions in addition to object writes. Without this, clients
+    // can see 403 AccessDenied for DM video uploads even when smaller images succeed.
+    // DM blobs are end-to-end encrypted, so granting authenticated read here does not expose plaintext.
+    'uploads/dm/*': [allow.authenticated.to(['read', 'write'])],
   }),
 });
 
