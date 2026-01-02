@@ -671,6 +671,7 @@ const guessContentTypeFromName = (name?: string): string | undefined => {
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
 const MAX_VIDEO_BYTES = 75 * 1024 * 1024; // 75MB
 const MAX_FILE_BYTES = 25 * 1024 * 1024; // 25MB (GIFs/documents)
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const THUMB_MAX_DIM = 720; // px
 const THUMB_JPEG_QUALITY = 0.85; // preview-only; original stays untouched
 const HISTORY_PAGE_SIZE = 50;
@@ -1273,6 +1274,33 @@ export default function ChatScreen({
     [promptAlert]
   );
 
+  const addPendingMediaItems = React.useCallback(
+    (items: PendingMediaItem[]) => {
+      const incoming = Array.isArray(items) ? items : [];
+      if (!incoming.length) return;
+      setPendingMedia((prev) => {
+        const base = inlineEditAttachmentMode === 'replace' ? [] : prev;
+        const remaining = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - base.length);
+        if (remaining <= 0) {
+          showAlert('Attachment limit', `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} items per message.`);
+          pendingMediaRef.current = base;
+          return base;
+        }
+        const toAdd = incoming.slice(0, remaining);
+        if (incoming.length > remaining) {
+          showAlert(
+            'Attachment limit',
+            `Only the first ${remaining} item${remaining === 1 ? '' : 's'} were added (limit ${MAX_ATTACHMENTS_PER_MESSAGE})`
+          );
+        }
+        const next = [...base, ...toAdd];
+        pendingMediaRef.current = next;
+        return next;
+      });
+    },
+    [inlineEditAttachmentMode, showAlert]
+  );
+
   const pickFromLibrary = React.useCallback(async () => {
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -1313,15 +1341,21 @@ export default function ChatScreen({
         })
         .filter(Boolean) as PendingMediaItem[];
       if (!items.length) return;
-      setPendingMedia((prev) => {
-        const next = inlineEditAttachmentMode === 'replace' ? items : [...prev, ...items];
-        pendingMediaRef.current = next;
-        return next;
-      });
+      if (inlineEditAttachmentMode === 'replace') {
+        // Replace mode should still respect the max.
+        const capped = items.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+        setPendingMedia(capped);
+        pendingMediaRef.current = capped;
+        if (items.length > capped.length) {
+          showAlert('Attachment limit', `Only ${MAX_ATTACHMENTS_PER_MESSAGE} items allowed per message.`);
+        }
+      } else {
+        addPendingMediaItems(items);
+      }
     } catch (e: any) {
       showAlert('Picker failed', e?.message ?? 'Unknown error');
     }
-  }, [showAlert, inlineEditAttachmentMode]);
+  }, [showAlert, inlineEditAttachmentMode, addPendingMediaItems]);
 
   const openCamera = React.useCallback(() => {
     setCameraOpen(true);
@@ -1342,13 +1376,14 @@ export default function ChatScreen({
         source: 'camera',
         size: undefined,
       };
-      setPendingMedia((prev) => {
-        const next = inlineEditAttachmentMode === 'replace' ? [item] : [...prev, item];
-        pendingMediaRef.current = next;
-        return next;
-      });
+      if (inlineEditAttachmentMode === 'replace') {
+        setPendingMedia([item]);
+        pendingMediaRef.current = [item];
+      } else {
+        addPendingMediaItems([item]);
+      }
     },
-    [inlineEditAttachmentMode]
+    [inlineEditAttachmentMode, addPendingMediaItems]
   );
 
   const pickDocument = React.useCallback(async () => {
@@ -1382,15 +1417,20 @@ export default function ChatScreen({
         })
         .filter(Boolean) as PendingMediaItem[];
       if (!items.length) return;
-      setPendingMedia((prev) => {
-        const next = inlineEditAttachmentMode === 'replace' ? items : [...prev, ...items];
-        pendingMediaRef.current = next;
-        return next;
-      });
+      if (inlineEditAttachmentMode === 'replace') {
+        const capped = items.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+        setPendingMedia(capped);
+        pendingMediaRef.current = capped;
+        if (items.length > capped.length) {
+          showAlert('Attachment limit', `Only ${MAX_ATTACHMENTS_PER_MESSAGE} items allowed per message.`);
+        }
+      } else {
+        addPendingMediaItems(items);
+      }
     } catch (e: any) {
       showAlert('File picker failed', e?.message ?? 'Unknown error');
     }
-  }, [showAlert, inlineEditAttachmentMode]);
+  }, [showAlert, inlineEditAttachmentMode, addPendingMediaItems]);
 
   // Attachments: Global = plaintext S3; DM = E2EE (client-side encryption before upload)
   const handlePickMedia = React.useCallback(() => {
@@ -3375,7 +3415,13 @@ export default function ChatScreen({
 
     // Snapshot current input/media.
     const originalInput = currentInput;
-    const originalPendingMedia = currentPendingMedia;
+    const originalPendingMedia =
+      currentPendingMedia && currentPendingMedia.length > MAX_ATTACHMENTS_PER_MESSAGE
+        ? currentPendingMedia.slice(0, MAX_ATTACHMENTS_PER_MESSAGE)
+        : currentPendingMedia;
+    if (currentPendingMedia && currentPendingMedia.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+      showAlert('Attachment limit', `Only ${MAX_ATTACHMENTS_PER_MESSAGE} items allowed per message.`);
+    }
 
     let outgoingText = originalInput.trim();
     let dmMediaPathsToSend: string[] | undefined = undefined;
