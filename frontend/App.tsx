@@ -1562,7 +1562,14 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       </View>
 
       {searchOpen && (
-        <View style={styles.searchWrapper}>
+        <View
+          style={[
+            styles.searchWrapper,
+            // When there are no unread hints, add a bit more space before the chat title row.
+            // If there ARE unread hints, keep it tight so we don't "double pad" the header.
+            !unreadEntries.length ? { marginBottom: 6 } : null,
+          ]}
+        >
           <View style={styles.searchRow}>
             <TextInput
               value={peerInput}
@@ -2717,6 +2724,7 @@ const LinkedSignUpFormFields = ({
   caret: { selectionColor: string; cursorColor?: string };
 }): React.JSX.Element => {
   const [showPassword, setShowPassword] = React.useState(false);
+  const MAX_USERNAME_LEN = 21;
 
   const formFields = (fields ?? []).map(({ name, type, ...field }: any) => {
     const errors = validationErrors ? getErrors(validationErrors?.[name]) : [];
@@ -2740,6 +2748,12 @@ const LinkedSignUpFormFields = ({
       <React.Fragment key={name}>
         <FieldComp
           {...field}
+          {...(name === 'preferred_username'
+            ? {
+                // Prevent ultra-long usernames; backend enforces too.
+                maxLength: MAX_USERNAME_LEN,
+              }
+            : null)}
           disabled={isPending}
           error={hasError}
           fieldStyle={fieldStyle}
@@ -3529,24 +3543,29 @@ const styles = StyleSheet.create({
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 0,
     gap: 8,
     zIndex: 1,
   },
   searchWrapper: {
-    marginTop: 10,
-    marginBottom: 8,
+    marginTop: 6,
+    marginBottom: 0,
   },
   searchInput: {
     flex: 1,
     borderWidth: 1,
     borderColor: '#ccc',
-    borderRadius: 8,
+    borderRadius: 10,
     paddingHorizontal: 10,
-    height: 40,
+    // Keep compact, but make sure text/placeholder are vertically centered (esp. Android).
+    height: 36,
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     // Light mode: make the entry field white.
     backgroundColor: '#fff',
     color: '#111',
+    fontSize: 13,
+    lineHeight: 16,
   },
   searchInputDark: {
     backgroundColor: '#14141a',
@@ -3554,9 +3573,10 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   startDmBtn: {
-    height: 40,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    minHeight: 36,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#fff',
@@ -3570,15 +3590,17 @@ const styles = StyleSheet.create({
   startDmBtnText: {
     color: '#111',
     fontWeight: '700',
+    fontSize: 13,
     lineHeight: 16,
   },
   startDmBtnTextDark: {
     color: '#fff',
   },
   cancelBtn: {
-    height: 40,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    minHeight: 36,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: StyleSheet.hairlineWidth,
@@ -3592,6 +3614,7 @@ const styles = StyleSheet.create({
   cancelBtnText: {
     color: '#111',
     fontWeight: '700',
+    fontSize: 13,
     lineHeight: 16,
   },
   cancelBtnTextDark: {
@@ -3599,14 +3622,15 @@ const styles = StyleSheet.create({
   },
   unreadList: {
     paddingHorizontal: 4,
+    paddingTop: 4,
   },
   unreadHintWrapper: {
-    paddingVertical: 2,
+    paddingVertical: 0,
   },
   unreadHint: {
     color: '#555',
     fontSize: 13,
-    marginTop: 4,
+    marginTop: 0,
     paddingHorizontal: 4,
   },
   unreadHintDark: {
