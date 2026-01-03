@@ -1,4 +1,8 @@
 const crypto = require('crypto');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
+
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 function urlSafeBase64(inputB64) {
   return String(inputB64 || '')
@@ -16,6 +20,14 @@ function parseDmConversationId(convId) {
     .filter(Boolean);
   if (parts.length !== 3) return null;
   return { a: parts[1], b: parts[2] };
+}
+
+function parseGroupConversationId(convId) {
+  const raw = String(convId || '').trim();
+  if (!raw.startsWith('gdm#')) return null;
+  const groupId = raw.slice('gdm#'.length).trim();
+  if (!groupId) return null;
+  return { groupId };
 }
 
 function normalizePem(s) {
@@ -82,17 +94,38 @@ exports.handler = async (event) => {
       return { statusCode: 400, body: JSON.stringify({ message: 'path must start with uploads/dm/' }) };
     }
 
-    // Authorize: DM conversationId format is "dm#<minSub>#<maxSub>".
+    // Authorize:
+    // - 1:1 DM conversationId format is "dm#<minSub>#<maxSub>"
+    // - Group DM conversationId format is "gdm#<groupId>"
     // Media is stored under: uploads/dm/<conversationId>/...
     const rest = path.slice('uploads/dm/'.length);
     const slashIdx = rest.indexOf('/');
     const conversationId = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
-    const parsed = parseDmConversationId(conversationId);
-    if (!parsed) {
-      return { statusCode: 400, body: JSON.stringify({ message: 'Invalid DM conversationId in path' }) };
+    const parsedDm = parseDmConversationId(conversationId);
+    const parsedGroup = parsedDm ? null : parseGroupConversationId(conversationId);
+    if (!parsedDm && !parsedGroup) {
+      return { statusCode: 400, body: JSON.stringify({ message: 'Invalid conversationId in path' }) };
     }
-    if (sub !== parsed.a && sub !== parsed.b) {
-      return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden' }) };
+    if (parsedDm) {
+      if (sub !== parsedDm.a && sub !== parsedDm.b) {
+        return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden' }) };
+      }
+    } else if (parsedGroup) {
+      const membersTable = String(process.env.GROUP_MEMBERS_TABLE || '').trim();
+      if (!membersTable) {
+        return { statusCode: 500, body: JSON.stringify({ message: 'Server misconfigured: GROUP_MEMBERS_TABLE missing' }) };
+      }
+      const mem = await ddb.send(
+        new GetCommand({
+          TableName: membersTable,
+          Key: { groupId: parsedGroup.groupId, memberSub: sub },
+          ProjectionExpression: 'memberSub, #s',
+          ExpressionAttributeNames: { '#s': 'status' },
+        })
+      );
+      if (!mem?.Item?.memberSub) {
+        return { statusCode: 403, body: JSON.stringify({ message: 'Forbidden' }) };
+      }
     }
 
     // IMPORTANT: DM conversationIds contain '#', which is a URL fragment delimiter.

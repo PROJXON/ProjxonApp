@@ -141,6 +141,7 @@ exports.handler = async (event) => {
     const readsTable = safeString(process.env.READS_TABLE);
     const recoveryTable = safeString(process.env.RECOVERY_TABLE);
     const messagesTable = safeString(process.env.MESSAGES_TABLE);
+    const groupMembersTable = safeString(process.env.GROUP_MEMBERS_TABLE);
 
     const scanMessages = parseBool(process.env.DELETE_ACCOUNT_SCAN_MESSAGES || '');
     const maxScan = clampInt(process.env.DELETE_ACCOUNT_MAX_SCAN || 1500, 200, 5000, 1500);
@@ -234,6 +235,94 @@ exports.handler = async (event) => {
           )
         );
       } while (lastKey);
+    }
+
+    // Best-effort: if this user is the only active admin of any group DM, transfer admin
+    // to another active member before removing the user's membership (so the group isn't orphaned).
+    //
+    // This is especially important for account deletion, since we can't "block leaving" (Option A).
+    if (groupMembersTable && conversationIds.length) {
+      try {
+        const groupIds = Array.from(
+          new Set(
+            conversationIds
+              .map((cid) => safeString(cid))
+              .filter((cid) => cid.startsWith('gdm#'))
+              .map((cid) => cid.slice('gdm#'.length).trim())
+              .filter(Boolean)
+          )
+        );
+
+        const pickOldestTenured = (rows) => {
+          const sorted = rows
+            .slice()
+            .sort((a, b) => {
+              const aj = typeof a.joinedAt === 'number' ? a.joinedAt : Number.MAX_SAFE_INTEGER;
+              const bj = typeof b.joinedAt === 'number' ? b.joinedAt : Number.MAX_SAFE_INTEGER;
+              if (aj !== bj) return aj - bj;
+              return safeString(a.memberSub).localeCompare(safeString(b.memberSub));
+            });
+          return sorted[0] || null;
+        };
+
+        for (const groupId of groupIds) {
+          // eslint-disable-next-line no-await-in-loop
+          const membersResp = await ddb.send(
+            new QueryCommand({
+              TableName: groupMembersTable,
+              KeyConditionExpression: 'groupId = :g',
+              ExpressionAttributeValues: { ':g': groupId },
+              ProjectionExpression: 'memberSub, #s, isAdmin, joinedAt',
+              ExpressionAttributeNames: { '#s': 'status' },
+              Limit: 50,
+            })
+          );
+          const members = Array.isArray(membersResp.Items) ? membersResp.Items : [];
+          const myRow = members.find((m) => safeString(m?.memberSub) === String(sub)) || null;
+          if (!myRow) continue;
+
+          const activeMembers = members.filter((m) => safeString(m?.status) === 'active');
+          const activeAdmins = activeMembers.filter((m) => !!m.isAdmin);
+          const othersActive = activeMembers.filter((m) => safeString(m?.memberSub) !== String(sub));
+          const othersActiveAdmins = activeAdmins.filter((m) => safeString(m?.memberSub) !== String(sub));
+
+          if (safeString(myRow.status) === 'active' && !!myRow.isAdmin) {
+            // If I'm the only active admin and there are other active members, promote someone.
+            if (othersActive.length > 0 && othersActiveAdmins.length === 0) {
+              const candidate = pickOldestTenured(othersActive);
+              if (candidate && safeString(candidate.memberSub)) {
+                // eslint-disable-next-line no-await-in-loop
+                await ddb.send(
+                  new UpdateCommand({
+                    TableName: groupMembersTable,
+                    Key: { groupId, memberSub: safeString(candidate.memberSub) },
+                    UpdateExpression: 'SET isAdmin = :a, updatedAt = :u',
+                    ExpressionAttributeValues: { ':a': true, ':u': nowMs },
+                    ConditionExpression: 'attribute_exists(memberSub)',
+                  })
+                );
+              }
+            }
+          }
+
+          // Remove the deleted user from the group roster (treat as left, and ensure not admin).
+          // eslint-disable-next-line no-await-in-loop
+          await ddb
+            .send(
+              new UpdateCommand({
+                TableName: groupMembersTable,
+                Key: { groupId, memberSub: String(sub) },
+                UpdateExpression: 'SET #s = :s, leftAt = :t, updatedAt = :u, isAdmin = :ia REMOVE bannedAt',
+                ExpressionAttributeNames: { '#s': 'status' },
+                ExpressionAttributeValues: { ':s': 'left', ':t': nowMs, ':u': nowMs, ':ia': false },
+                ConditionExpression: 'attribute_exists(memberSub)',
+              })
+            )
+            .catch(() => {});
+        }
+      } catch {
+        // ignore best-effort group admin transfer
+      }
     }
 
     // Delete unread entries

@@ -63,6 +63,8 @@ exports.handler = async (event) => {
         conversationId: String(it.conversationId || ''),
         peerSub: it.peerSub ? String(it.peerSub) : undefined,
         peerDisplayName: it.peerDisplayName ? String(it.peerDisplayName) : undefined,
+        conversationKind: it.conversationKind ? String(it.conversationKind) : undefined,
+        memberStatus: it.memberStatus ? String(it.memberStatus) : undefined,
         lastMessageAt: Number(it.lastMessageAt ?? 0),
         lastSenderSub: it.lastSenderSub ? String(it.lastSenderSub) : undefined,
         lastSenderDisplayName: it.lastSenderDisplayName ? String(it.lastSenderDisplayName) : undefined,

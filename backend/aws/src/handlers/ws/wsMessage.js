@@ -193,7 +193,7 @@ const sendExpoPush = async (messages) => {
   }
 };
 
-const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderSub, conversationId }) => {
+const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderSub, conversationId, kind }) => {
   try {
     const tokens = await queryExpoPushTokensByUserSub(recipientSub);
     if (!tokens.length) return;
@@ -203,6 +203,7 @@ const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderS
     const body = 'New message';
     const convId = safeString(conversationId);
     const sSub = safeString(senderSub);
+    const k = safeString(kind) || 'dm';
 
     const base = {
       title,
@@ -211,7 +212,7 @@ const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderS
       priority: 'high',
       channelId: 'dm',
       data: {
-        kind: 'dm',
+        kind: k,
         conversationId: convId,
         senderDisplayName: safeString(senderDisplayName),
         senderSub: sSub,
@@ -312,6 +313,83 @@ const parseDmRecipientSub = (conversationId, senderSub) => {
   return null;
 };
 
+// Group DM conversationId format: "gdm#<groupId>"
+const parseGroupId = (conversationId) => {
+  if (!conversationId || conversationId === 'global') return null;
+  const raw = String(conversationId).trim();
+  if (!raw.startsWith('gdm#')) return null;
+  const groupId = raw.slice('gdm#'.length).trim();
+  return groupId || null;
+};
+
+const getGroupMember = async (groupId, memberSub) => {
+  const table = process.env.GROUP_MEMBERS_TABLE;
+  const gid = safeString(groupId);
+  const sub = safeString(memberSub);
+  if (!table || !gid || !sub) return null;
+  try {
+    const resp = await ddb.send(
+      new GetCommand({
+        TableName: table,
+        Key: { groupId: gid, memberSub: sub },
+        ProjectionExpression: 'memberSub, #s, isAdmin, leftAt, bannedAt',
+        ExpressionAttributeNames: { '#s': 'status' },
+      })
+    );
+    const it = resp?.Item;
+    if (!it) return null;
+    return {
+      status: safeString(it.status) || '',
+      isAdmin: !!it.isAdmin,
+      leftAt: typeof it.leftAt === 'number' ? it.leftAt : undefined,
+      bannedAt: typeof it.bannedAt === 'number' ? it.bannedAt : undefined,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const queryActiveGroupMemberSubs = async (groupId) => {
+  const table = process.env.GROUP_MEMBERS_TABLE;
+  const gid = safeString(groupId);
+  if (!table || !gid) return [];
+  const resp = await ddb.send(
+    new QueryCommand({
+      TableName: table,
+      KeyConditionExpression: 'groupId = :g',
+      ExpressionAttributeValues: { ':g': gid },
+      ProjectionExpression: 'memberSub, #s',
+      ExpressionAttributeNames: { '#s': 'status' },
+      Limit: 50,
+    })
+  );
+  return (resp.Items || [])
+    .filter((it) => safeString(it?.status) === 'active')
+    .map((it) => safeString(it.memberSub))
+    .filter(Boolean);
+};
+
+const getConversationTitleForUser = async (userSub, conversationId) => {
+  const table = process.env.CONVERSATIONS_TABLE;
+  const u = safeString(userSub);
+  const c = safeString(conversationId);
+  if (!table || !u || !c) return null;
+  try {
+    const resp = await ddb.send(
+      new GetCommand({
+        TableName: table,
+        Key: { userSub: u, conversationId: c },
+        ProjectionExpression: 'peerDisplayName',
+      })
+    );
+    const it = resp?.Item;
+    const t = it && typeof it.peerDisplayName === 'string' ? String(it.peerDisplayName).trim() : '';
+    return t || null;
+  } catch {
+    return null;
+  }
+};
+
 const getUserDisplayNameBySub = async (userSub) => {
   const usersTable = process.env.USERS_TABLE;
   const sub = safeString(userSub);
@@ -347,20 +425,51 @@ const upsertConversationIndex = async ({
   const convId = safeString(conversationId);
   if (!table || !owner || !convId) return;
 
+  const conversationKind = convId.startsWith('gdm#') ? 'group' : convId.startsWith('dm#') ? 'dm' : undefined;
   try {
+    const setParts = ['peerDisplayName = :pd', 'lastMessageAt = :lma'];
+    const removeParts = [];
+    const values = {
+      ':pd': safeString(peerDisplayName) || (convId.startsWith('gdm#') ? 'Group DM' : 'Direct Message'),
+      ':lma': Number(lastMessageAt) || 0,
+    };
+
+    const ps = safeString(peerSub);
+    if (ps) {
+      setParts.push('peerSub = :ps');
+      values[':ps'] = ps;
+    } else {
+      removeParts.push('peerSub');
+    }
+
+    const lss = safeString(lastSenderSub);
+    if (lss) {
+      setParts.push('lastSenderSub = :lss');
+      values[':lss'] = lss;
+    } else {
+      removeParts.push('lastSenderSub');
+    }
+
+    const lsd = safeString(lastSenderDisplayName);
+    if (lsd) {
+      setParts.push('lastSenderDisplayName = :lsd');
+      values[':lsd'] = lsd;
+    } else {
+      removeParts.push('lastSenderDisplayName');
+    }
+
+    if (conversationKind) {
+      setParts.push('conversationKind = :ck');
+      values[':ck'] = conversationKind;
+    }
+
+    const updateExpr = `SET ${setParts.join(', ')}${removeParts.length ? ` REMOVE ${removeParts.join(', ')}` : ''}`;
     await ddb.send(
       new UpdateCommand({
         TableName: table,
         Key: { userSub: owner, conversationId: convId },
-        UpdateExpression:
-          'SET peerSub = :ps, peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd',
-        ExpressionAttributeValues: {
-          ':ps': safeString(peerSub) || undefined,
-          ':pd': safeString(peerDisplayName) || undefined,
-          ':lma': Number(lastMessageAt) || 0,
-          ':lss': safeString(lastSenderSub) || undefined,
-          ':lsd': safeString(lastSenderDisplayName) || undefined,
-        },
+        UpdateExpression: updateExpr,
+        ExpressionAttributeValues: values,
       })
     );
   } catch (err) {
@@ -448,8 +557,10 @@ const markUnread = async (recipientSub, conversationId, sender) => {
       TableName: process.env.UNREADS_TABLE,
       Key: { userSub: recipientSub, conversationId },
       UpdateExpression:
-        'SET senderSub = :ss, senderDisplayName = :sd, lastMessageCreatedAt = :createdAt, messageCount = if_not_exists(messageCount, :zero) + :inc',
+        'SET #k = :k, senderSub = :ss, senderDisplayName = :sd, lastMessageCreatedAt = :createdAt, messageCount = if_not_exists(messageCount, :zero) + :inc',
+      ExpressionAttributeNames: { '#k': 'kind' },
       ExpressionAttributeValues: {
+        ':k': 'message',
         ':ss': sender.userSub,
         ':sd': sender.displayName,
         ':createdAt': sender.createdAtMs,
@@ -539,6 +650,9 @@ exports.handler = async (event) => {
     // Recipients (NO scans)
     let recipientConnIds = [];
     let dmRecipientSub = null;
+    let groupId = null;
+    let groupMember = null;
+    let groupActiveSubs = null;
 
     if (conversationId === 'global') {
       // Only broadcast to people who are currently "joined" to global
@@ -551,7 +665,7 @@ exports.handler = async (event) => {
         console.warn('byConversationWithUser unavailable; falling back to byConversation', err);
         recipientConnIds = await queryConnIdsByConversation('global');
       }
-    } else {
+    } else if (String(conversationId).startsWith('dm#')) {
       dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
       if (!dmRecipientSub) {
         return { statusCode: 400, body: 'Invalid DM conversationId (expected dm#minSub#maxSub).' };
@@ -559,6 +673,227 @@ exports.handler = async (event) => {
       const a = await queryConnIdsByUserSub(senderSub);
       const b = await queryConnIdsByUserSub(dmRecipientSub);
       recipientConnIds = Array.from(new Set([...a, ...b]));
+    } else if (String(conversationId).startsWith('gdm#')) {
+      groupId = parseGroupId(conversationId);
+      if (!groupId) return { statusCode: 400, body: 'Invalid group conversationId (expected gdm#<groupId>).' };
+      groupMember = await getGroupMember(groupId, senderSub);
+      if (!groupMember) return { statusCode: 403, body: 'Forbidden.' };
+
+      groupActiveSubs = await queryActiveGroupMemberSubs(groupId);
+      if (!Array.isArray(groupActiveSubs) || groupActiveSubs.length === 0) {
+        return { statusCode: 404, body: 'Group not found.' };
+      }
+      const activeSet = new Set(groupActiveSubs);
+      if (!activeSet.has(senderSub)) {
+        if (action !== 'read') return { statusCode: 403, body: 'Forbidden.' };
+      }
+
+      const connLists = await Promise.all(groupActiveSubs.map((s) => queryConnIdsByUserSub(s).catch(() => [])));
+      recipientConnIds = Array.from(new Set(connLists.flat().filter(Boolean)));
+    } else {
+      return { statusCode: 400, body: 'Invalid conversationId.' };
+    }
+
+    // ---- SYSTEM (group-only, audit/event message) ----
+    // Allows the client to request a server-validated system message (so it persists + broadcasts).
+    // Most system events are admin-only, except a user may publish their own "left" event.
+    if (action === 'system') {
+      if (!groupId) return { statusCode: 400, body: 'system only supported for group DMs.' };
+      const systemKind = safeString(body.systemKind);
+      const allowed = new Set(['ban', 'unban', 'kick', 'left', 'removed', 'added', 'update']);
+      if (!systemKind || !allowed.has(systemKind)) {
+        return { statusCode: 400, body: 'Invalid systemKind.' };
+      }
+
+      const targetSub = safeString(body.targetSub);
+      // Permission model:
+      // - Admin required for ban/unban/kick/removed/added
+      // - "left" is allowed for any active member, but only for themselves (targetSub === senderSub)
+      const isSelfLeft = systemKind === 'left' && targetSub && targetSub === senderSub;
+      if (systemKind === 'left' && !isSelfLeft) {
+        return { statusCode: 400, body: 'left requires targetSub = senderSub.' };
+      }
+      // Auth rules:
+      // - For admin-only events: require active admin.
+      // - For self-left event: allow either active OR already-left member (so the client can log the event
+      //   after a successful /groups/leave call without racing).
+      if (isSelfLeft) {
+        if (!groupMember || (groupMember.status !== 'active' && groupMember.status !== 'left')) {
+          return { statusCode: 403, body: 'Forbidden.' };
+        }
+      } else {
+        if (!groupMember || groupMember.status !== 'active' || !groupMember.isAdmin) {
+          return { statusCode: 403, body: 'Admin required.' };
+        }
+      }
+
+      let targetLabel = null;
+      if (targetSub) {
+        try {
+          targetLabel = await getUserDisplayNameBySub(targetSub);
+        } catch {
+          targetLabel = null;
+        }
+      }
+      const targetName = targetSub
+        ? (targetLabel || `${String(targetSub).slice(0, 6)}…${String(targetSub).slice(-4)}`)
+        : null;
+
+      let systemText = safeString(body.text);
+      if (!systemText) {
+        if (systemKind === 'ban' && targetName) systemText = `${targetName} was banned by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'added' && targetName) systemText = `${targetName} was added by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'unban' && targetName) systemText = `${targetName} was unbanned by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'kick' && targetName) systemText = `${targetName} was kicked by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'left' && targetName) systemText = `${targetName} left the chat`;
+        else if (systemKind === 'removed' && targetName) systemText = `${targetName} was removed by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'update') {
+          const updateField = safeString(body.updateField || body.field);
+          const groupName = safeString(body.groupName);
+          if (updateField === 'groupName') {
+            systemText = groupName ? `Group name changed to ${groupName}` : 'Group name reset to default';
+          } else {
+            systemText = `${senderDisplayName || 'An admin'} updated the group`;
+          }
+        } else systemText = `${senderDisplayName || 'An admin'} updated the group`;
+      }
+
+      const systemMessageId = `sys-${nowMs}-${Math.random().toString(36).slice(2)}`;
+
+      // Persist (optional) so late joiners can see it in history.
+      if (process.env.MESSAGES_TABLE) {
+        try {
+          await ddb.send(
+            new PutCommand({
+              TableName: process.env.MESSAGES_TABLE,
+              Item: {
+                conversationId,
+                createdAt: nowMs,
+                messageId: systemMessageId,
+                kind: 'system',
+                systemKind,
+                actorSub: senderSub,
+                actorUser: senderDisplayName,
+                ...(targetSub ? { targetSub } : {}),
+                ...(targetName ? { targetUser: targetName } : {}),
+                text: systemText,
+                user: 'System',
+                userLower: 'system',
+              },
+            })
+          );
+        } catch (err) {
+          console.warn('system message persist failed (ignored)', err);
+        }
+      }
+
+      // Realtime broadcast to active members.
+      try {
+        await broadcast(mgmt, recipientConnIds, {
+          type: 'system',
+          kind: 'system',
+          systemKind,
+          conversationId,
+          messageId: systemMessageId,
+          createdAt: nowMs,
+          text: systemText,
+          user: 'System',
+          userLower: 'system',
+          actorSub: senderSub,
+          actorUser: senderDisplayName,
+          ...(targetSub ? { targetSub } : {}),
+          ...(targetName ? { targetUser: targetName } : {}),
+        });
+      } catch (err) {
+        console.warn('system message broadcast failed (ignored)', err);
+      }
+      return { statusCode: 200, body: 'System message sent.' };
+    }
+
+    // ---- KICK (group-only, admin-only, UI eject) ----
+    if (action === 'kick') {
+      if (!groupId) return { statusCode: 400, body: 'kick only supported for group DMs.' };
+      if (!groupMember || groupMember.status !== 'active' || !groupMember.isAdmin) {
+        return { statusCode: 403, body: 'Admin required.' };
+      }
+      const targetSub = safeString(body.targetSub);
+      if (!targetSub) return { statusCode: 400, body: 'targetSub is required.' };
+      const suppressSystem = body && body.suppressSystem === true;
+
+      if (!suppressSystem) {
+        // Best-effort: broadcast a "system message" to the group chat so everyone sees the event in history/UI.
+        // Kick is UI-only (no membership change), but the event itself can still be logged.
+        let targetLabel = null;
+        try {
+          targetLabel = await getUserDisplayNameBySub(targetSub);
+        } catch {
+          targetLabel = null;
+        }
+        const targetName = targetLabel || `${String(targetSub).slice(0, 6)}…${String(targetSub).slice(-4)}`;
+        const systemText = `${targetName} was kicked by ${senderDisplayName || 'an admin'}`;
+        const systemMessageId = `sys-${nowMs}-${Math.random().toString(36).slice(2)}`;
+
+        // Persist (optional) so late joiners can see it in history.
+        if (process.env.MESSAGES_TABLE) {
+          try {
+            await ddb.send(
+              new PutCommand({
+                TableName: process.env.MESSAGES_TABLE,
+                Item: {
+                  conversationId,
+                  createdAt: nowMs,
+                  messageId: systemMessageId,
+                  kind: 'system',
+                  systemKind: 'kick',
+                  actorSub: senderSub,
+                  actorUser: senderDisplayName,
+                  targetSub,
+                  targetUser: targetName,
+                  text: systemText,
+                  user: 'System',
+                  userLower: 'system',
+                },
+              })
+            );
+          } catch (err) {
+            // Never fail the kick if logging fails.
+            console.warn('kick system message persist failed (ignored)', err);
+          }
+        }
+
+        // Realtime broadcast to active members.
+        try {
+          await broadcast(mgmt, recipientConnIds, {
+            type: 'system',
+            kind: 'system',
+            systemKind: 'kick',
+            conversationId,
+            messageId: systemMessageId,
+            createdAt: nowMs,
+            text: systemText,
+            user: 'System',
+            userLower: 'system',
+            actorSub: senderSub,
+            actorUser: senderDisplayName,
+            targetSub,
+            targetUser: targetName,
+          });
+        } catch (err) {
+          console.warn('kick system message broadcast failed (ignored)', err);
+        }
+      }
+
+      const targetConns = await queryConnIdsByUserSub(targetSub).catch(() => []);
+      if (Array.isArray(targetConns) && targetConns.length) {
+        await broadcast(mgmt, targetConns, {
+          type: 'kicked',
+          conversationId,
+          bySub: senderSub,
+          byUser: senderDisplayName,
+          createdAt: nowMs,
+        });
+      }
+      return { statusCode: 200, body: 'Kick sent.' };
     }
 
     // ---- READ ----
@@ -948,10 +1283,13 @@ exports.handler = async (event) => {
     if (!text) return { statusCode: 400, body: 'Empty message.' };
     if (!process.env.MESSAGES_TABLE) return { statusCode: 500, body: 'Missing MESSAGES_TABLE env.' };
 
+    const isDm = String(conversationId || '').startsWith('dm#');
+    const isGroup = String(conversationId || '').startsWith('gdm#');
+
     // Block enforcement (DM only).
     // If either party has blocked the other, do not persist or broadcast.
     // This is intentionally "silent": client will treat it like a send failure/timeout.
-    if (conversationId !== 'global') {
+    if (isDm) {
       try {
         if (!dmRecipientSub) dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
         if (dmRecipientSub) {
@@ -1006,6 +1344,11 @@ exports.handler = async (event) => {
       })
     );
 
+    let groupTitleForPayload;
+    if (isGroup) {
+      groupTitleForPayload = (await getConversationTitleForUser(senderSub, conversationId)) || 'Group DM';
+    }
+
     // Broadcast (send display + stable key)
     await broadcast(mgmt, recipientConnIds, {
       messageId,
@@ -1015,58 +1358,91 @@ exports.handler = async (event) => {
       text,
       createdAt: nowMs,
       conversationId,
+      conversationKind: isGroup ? 'group' : isDm ? 'dm' : undefined,
+      ...(isGroup ? { groupTitle: groupTitleForPayload } : {}),
       ...(ttlSeconds ? { ttlSeconds } : {}),
     });
 
-    // Persist unread (DM only) so offline users see it on next login via GET /unreads
+    // Persist unread so offline users see it on next login via GET /unreads
     if (conversationId !== 'global') {
       try {
-        if (!dmRecipientSub) {
-          dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
-        }
+        if (isDm) {
+          if (!dmRecipientSub) {
+            dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
+          }
 
-        // Conversation index (DM inbox list) for both participants.
-        // Best-effort: store a peer display name so new devices can render the chat list.
-        const recipientName =
-          (await getUserDisplayNameBySub(dmRecipientSub)) || safeString(dmRecipientSub) || 'Direct Message';
-        await Promise.all([
-          upsertConversationIndex({
-            ownerSub: senderSub,
-            conversationId,
-            peerSub: dmRecipientSub,
-            peerDisplayName: recipientName,
-            lastMessageAt: nowMs,
-            lastSenderSub: senderSub,
-            lastSenderDisplayName: senderDisplayName,
-          }),
-          upsertConversationIndex({
-            ownerSub: dmRecipientSub,
-            conversationId,
-            peerSub: senderSub,
-            peerDisplayName: senderDisplayName,
-            lastMessageAt: nowMs,
-            lastSenderSub: senderSub,
-            lastSenderDisplayName: senderDisplayName,
-          }),
-        ]);
+          const recipientName =
+            (await getUserDisplayNameBySub(dmRecipientSub)) || safeString(dmRecipientSub) || 'Direct Message';
+          await Promise.all([
+            upsertConversationIndex({
+              ownerSub: senderSub,
+              conversationId,
+              peerSub: dmRecipientSub,
+              peerDisplayName: recipientName,
+              lastMessageAt: nowMs,
+              lastSenderSub: senderSub,
+              lastSenderDisplayName: senderDisplayName,
+            }),
+            upsertConversationIndex({
+              ownerSub: dmRecipientSub,
+              conversationId,
+              peerSub: senderSub,
+              peerDisplayName: senderDisplayName,
+              lastMessageAt: nowMs,
+              lastSenderSub: senderSub,
+              lastSenderDisplayName: senderDisplayName,
+            }),
+          ]);
 
-        await markUnread(dmRecipientSub, conversationId, {
-          userSub: senderSub,
-          displayName: senderDisplayName,
-          createdAtMs: nowMs,
-        });
-
-        // Best-effort: DM push for background/offline users.
-        // We avoid pushing when the recipient appears "online" (has any active WS connections).
-        // Default payload mirrors Signal privacy: sender name only, no message content.
-        const activeRecipientConns = await queryConnIdsByUserSub(dmRecipientSub).catch(() => []);
-        if (!Array.isArray(activeRecipientConns) || activeRecipientConns.length === 0) {
-          await sendDmPushNotification({
-            recipientSub: dmRecipientSub,
-            senderDisplayName,
-            senderSub,
-            conversationId,
+          await markUnread(dmRecipientSub, conversationId, {
+            userSub: senderSub,
+            displayName: senderDisplayName,
+            createdAtMs: nowMs,
           });
+
+          const activeRecipientConns = await queryConnIdsByUserSub(dmRecipientSub).catch(() => []);
+          if (!Array.isArray(activeRecipientConns) || activeRecipientConns.length === 0) {
+            await sendDmPushNotification({
+              recipientSub: dmRecipientSub,
+              senderDisplayName,
+              senderSub,
+              conversationId,
+              kind: 'dm',
+            });
+          }
+        } else if (isGroup) {
+          const activeSubs = Array.isArray(groupActiveSubs) ? groupActiveSubs : [];
+          await Promise.all(
+            activeSubs.map(async (u) => {
+              const title = (await getConversationTitleForUser(u, conversationId)) || 'Group DM';
+              if (process.env.CONVERSATIONS_TABLE) {
+                await ddb
+                  .send(
+                    new UpdateCommand({
+                      TableName: process.env.CONVERSATIONS_TABLE,
+                      Key: { userSub: String(u), conversationId },
+                      UpdateExpression: 'SET lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd',
+                      ExpressionAttributeValues: { ':lma': nowMs, ':lss': senderSub, ':lsd': senderDisplayName },
+                    })
+                  )
+                  .catch(() => {});
+              }
+
+              if (u && u !== senderSub) {
+                await markUnread(u, conversationId, { userSub: senderSub, displayName: title, createdAtMs: nowMs });
+                const activeConns = await queryConnIdsByUserSub(u).catch(() => []);
+                if (!Array.isArray(activeConns) || activeConns.length === 0) {
+                  await sendDmPushNotification({
+                    recipientSub: u,
+                    senderDisplayName: title,
+                    senderSub,
+                    conversationId,
+                    kind: 'group',
+                  });
+                }
+              }
+            })
+          );
         }
       } catch {
         // ignore
