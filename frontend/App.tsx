@@ -42,7 +42,7 @@ import {
   FederatedProviderButtons,
 } from '@aws-amplify/ui-react-native/src/Authenticator/common';
 import { useFieldValues } from '@aws-amplify/ui-react-native/src/Authenticator/hooks';
-import { fetchUserAttributes } from 'aws-amplify/auth';
+import { deleteUser, fetchUserAttributes } from 'aws-amplify/auth';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { getUrl, uploadData } from 'aws-amplify/storage';
 import { API_URL, CDN_URL } from './src/config/env';
@@ -301,6 +301,82 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     setPassphraseError(null);
     setProcessing(false);
   };
+
+  const deleteMyAccount = React.useCallback(async () => {
+    if (!API_URL) {
+      await promptAlert('Unavailable', 'Missing API_URL (backend not configured).');
+      return;
+    }
+
+    const ok = await promptConfirm(
+      'Delete account?',
+      "This will permanently delete your Projxon account.\n\nWhat will be deleted:\n- Your profile (display name / avatar)\n- Your blocklist and chat index (best-effort)\n- Push notification tokens\n- Recovery backup (if set)\n\nWhat may remain:\n- Messages you already sent may still be visible to other users.\n- Cached media may take a short time to disappear.\n\nTimeline: typically immediate, but some cleanup may take a few minutes.\n\nContinue?",
+      { confirmText: 'Delete', cancelText: 'Cancel', destructive: true }
+    );
+    if (!ok) return;
+
+    // Best-effort: clear local push + crypto material for this user.
+    try {
+      await unregisterDmPushNotifications();
+    } catch {
+      // ignore
+    }
+    try {
+      if (myUserSub) {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const SecureStore = require('expo-secure-store') as typeof import('expo-secure-store');
+        await SecureStore.deleteItemAsync(`crypto_keys_${myUserSub}`).catch(() => undefined);
+      }
+    } catch {
+      // ignore
+    }
+
+    let idToken = '';
+    try {
+      const { tokens } = await fetchAuthSession();
+      idToken = tokens?.idToken?.toString() || '';
+    } catch {
+      idToken = '';
+    }
+
+    if (!idToken) {
+      await promptAlert('Not signed in', 'Missing auth token. Please sign in again and retry.');
+      return;
+    }
+
+    // Step 1: delete app-side data while JWT is still valid.
+    try {
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/account/delete`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Backend deletion failed (${res.status})`);
+      }
+    } catch (e: any) {
+      await promptAlert('Delete failed', e?.message ?? 'Failed to delete account data.');
+      return;
+    }
+
+    // Step 2: delete the Cognito user (removes the login itself).
+    try {
+      await deleteUser();
+    } catch {
+      // If this fails (expired token, etc.), fall back to signOut.
+    }
+
+    try {
+      await signOut();
+    } catch {
+      // ignore
+    } finally {
+      onSignedOut?.();
+    }
+
+    await promptAlert('Account deleted', 'Your account deletion request completed.');
+  }, [myUserSub, onSignedOut, promptAlert, promptConfirm, signOut]);
 
   const handlePromptSubmit = () => {
     if (!passphrasePrompt || processing) return;
@@ -1174,6 +1250,32 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     }
   }, [API_URL, blockUsername, fetchBlocks, promptConfirm]);
 
+  const addBlockBySub = React.useCallback(
+    async (blockedSub: string, label?: string): Promise<void> => {
+      if (!API_URL) throw new Error('Missing API_URL');
+      const sub = String(blockedSub || '').trim();
+      if (!sub) throw new Error('Missing user id');
+
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) throw new Error('Missing auth token');
+
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/blocks`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blockedSub: sub }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        const who = label ? `"${label}"` : 'user';
+        throw new Error(text?.trim() ? `Failed to block ${who}: ${text.trim()}` : `Failed to block ${who} (${res.status})`);
+      }
+
+      await fetchBlocks();
+    },
+    [API_URL, fetchBlocks]
+  );
+
   const unblockUser = React.useCallback(
     async (blockedSub: string, label?: string) => {
       const subToUnblock = String(blockedSub || '').trim();
@@ -1776,6 +1878,14 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             onPress: () => {
               setMenuOpen(false);
               setBlocklistOpen(true);
+            },
+          },
+          {
+            key: 'deleteAccount',
+            label: 'Delete account',
+            onPress: async () => {
+              setMenuOpen(false);
+              await deleteMyAccount();
             },
           },
           {
@@ -2990,6 +3100,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           keyEpoch={keyEpoch}
           promptAlert={promptAlert}
           promptConfirm={promptConfirm}
+          onBlockUserSub={addBlockBySub}
         />
       </View>
     </View>

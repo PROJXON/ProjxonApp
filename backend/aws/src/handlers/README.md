@@ -98,6 +98,22 @@ This folder stores the **source code** for the AWS Lambdas used by ProjxonApp.
   - **Body**: `{ expoPushToken?, deviceId? }`
   - **Notes**: removes a token on sign-out (prevents another account on the same device from receiving pushes)
 
+- **POST `/reports`** → `http/reportContent.js`
+  - **Auth**: JWT
+  - **Body**: `{ kind?: "message"|"user", conversationId?, messageCreatedAt?, reportedUserSub?, reason?, details?, messagePreview? }`
+  - **Returns**: `{ ok: true, reportId }`
+  - **Notes**:
+    - Stores a report in `REPORTS_TABLE` for moderation review (Apple/Google UGC requirement).
+    - You can optionally wire notifications via DynamoDB Streams / SNS / email later.
+
+- **POST `/account/delete`** → `http/deleteAccount.js`
+  - **Auth**: JWT
+  - **Returns**: `{ ok: true, deletedAt, stats: {...} }`
+  - **Notes**:
+    - Deletes app-side data (Users row, push tokens, blocks, conversation index, etc.).
+    - The client should then call Cognito deletion (e.g. Amplify Auth `deleteUser()`) to remove the login itself.
+    - Message history deletion is **best-effort** and optional (see `DELETE_ACCOUNT_SCAN_MESSAGES`); at scale you should add a `userSub` index.
+
 - **GET `/blocks`** → `http/getBlocks.js`
   - **Auth**: JWT
   - **Returns**: `{ blocked: [{ blockedSub, blockedDisplayName?, blockedUsernameLower?, blockedAt? }] }`

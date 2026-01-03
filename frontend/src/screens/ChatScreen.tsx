@@ -253,6 +253,7 @@ type ChatScreenProps = {
     message: string,
     opts?: { confirmText?: string; cancelText?: string; destructive?: boolean }
   ) => Promise<boolean>;
+  onBlockUserSub?: (blockedSub: string, label?: string) => void | Promise<void>;
 };
 
 type ChatMessage = {
@@ -701,6 +702,8 @@ export default function ChatScreen({
   blockedUserSubs = [],
   keyEpoch,
   promptAlert,
+  promptConfirm,
+  onBlockUserSub,
 }: ChatScreenProps): React.JSX.Element {
   const isDark = theme === 'dark';
   const insets = useSafeAreaInsets();
@@ -763,6 +766,17 @@ export default function ChatScreen({
   const [messageActionTarget, setMessageActionTarget] = React.useState<ChatMessage | null>(null);
   const [messageActionAnchor, setMessageActionAnchor] = React.useState<{ x: number; y: number } | null>(null);
   const actionMenuAnim = React.useRef(new Animated.Value(0)).current;
+  const [reportOpen, setReportOpen] = React.useState(false);
+  const [reportKind, setReportKind] = React.useState<'message' | 'user'>('message');
+  const [reportTargetMessage, setReportTargetMessage] = React.useState<ChatMessage | null>(null);
+  const [reportTargetUserSub, setReportTargetUserSub] = React.useState<string>('');
+  const [reportTargetUserLabel, setReportTargetUserLabel] = React.useState<string>('');
+  const [reportNotice, setReportNotice] = React.useState<null | { type: 'error' | 'success'; message: string }>(
+    null
+  );
+  const [reportCategory, setReportCategory] = React.useState<string>('spam');
+  const [reportDetails, setReportDetails] = React.useState<string>('');
+  const [reportSubmitting, setReportSubmitting] = React.useState<boolean>(false);
   const [inlineEditTargetId, setInlineEditTargetId] = React.useState<string | null>(null);
   const [inlineEditDraft, setInlineEditDraft] = React.useState<string>('');
   const [inlineEditAttachmentMode, setInlineEditAttachmentMode] = React.useState<
@@ -1273,6 +1287,136 @@ export default function ChatScreen({
     },
     [promptAlert]
   );
+
+  const openReportModalForMessage = React.useCallback((target: ChatMessage) => {
+    if (!target) return;
+    setReportKind('message');
+    setReportTargetMessage(target);
+    setReportTargetUserSub('');
+    setReportTargetUserLabel('');
+    setReportCategory('spam');
+    setReportDetails('');
+    setReportSubmitting(false);
+    setReportNotice(null);
+    setReportOpen(true);
+  }, []);
+
+  const openReportModalForUser = React.useCallback((userSub: string, label?: string) => {
+    const sub = String(userSub || '').trim();
+    if (!sub) return;
+    setReportKind('user');
+    setReportTargetMessage(null);
+    setReportTargetUserSub(sub);
+    setReportTargetUserLabel(String(label || '').trim());
+    setReportCategory('spam');
+    setReportDetails('');
+    setReportSubmitting(false);
+    setReportNotice(null);
+    setReportOpen(true);
+  }, []);
+
+  const closeReportModal = React.useCallback(() => {
+    if (reportSubmitting) return;
+    setReportOpen(false);
+    setReportTargetMessage(null);
+    setReportTargetUserSub('');
+    setReportTargetUserLabel('');
+    setReportCategory('spam');
+    setReportDetails('');
+    setReportNotice(null);
+  }, [reportSubmitting]);
+
+  const submitReport = React.useCallback(async () => {
+    if (!API_URL) {
+      setReportNotice({ type: 'error', message: 'Report failed: API_URL is not configured.' });
+      return;
+    }
+    if (reportSubmitting) return;
+
+    const { tokens } = await fetchAuthSession().catch(() => ({ tokens: undefined }));
+    const idToken = tokens?.idToken?.toString();
+    if (!idToken) {
+      setReportNotice({ type: 'error', message: 'Please sign in to report content.' });
+      return;
+    }
+
+    const details = reportDetails.trim();
+    const category = String(reportCategory || '').trim() || 'other';
+    const nowTargetMsg = reportTargetMessage;
+    const nowUserSub = reportTargetUserSub;
+
+    const messagePreview = (() => {
+      const t = nowTargetMsg;
+      if (!t) return '';
+      if (t.deletedAt) return '';
+      if (typeof t.decryptedText === 'string' && t.decryptedText.trim()) return t.decryptedText.trim();
+      if (typeof t.text === 'string' && t.text.trim()) return t.text.trim();
+      return '';
+    })();
+
+    const payload =
+      reportKind === 'user'
+        ? {
+            kind: 'user',
+            reportedUserSub: nowUserSub || undefined,
+            reason: `user_report:${category}`,
+            details: details ? details.slice(0, 900) : undefined,
+            conversationId: activeConversationId || undefined,
+          }
+        : {
+            kind: 'message',
+            conversationId: activeConversationId,
+            messageCreatedAt: nowTargetMsg?.createdAt,
+            reportedUserSub: typeof nowTargetMsg?.userSub === 'string' ? nowTargetMsg.userSub : undefined,
+            reason: `user_report:${category}`,
+            details: details ? details.slice(0, 900) : undefined,
+            messagePreview: messagePreview ? messagePreview.slice(0, 400) : undefined,
+          };
+
+    // Validate required fields client-side so we can show a friendly message.
+    if (reportKind === 'message') {
+      if (!payload.conversationId || !payload.messageCreatedAt) {
+        setReportNotice({ type: 'error', message: 'Report failed: missing message reference.' });
+        return;
+      }
+    } else {
+      if (!payload.reportedUserSub && !payload.details) {
+        setReportNotice({ type: 'error', message: 'Report failed: missing user. Try again or add an optional note.' });
+        return;
+      }
+    }
+
+    setReportSubmitting(true);
+    try {
+      const resp = await fetch(`${API_URL.replace(/\/$/, '')}/reports`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        throw new Error(text || `Report failed (${resp.status})`);
+      }
+      setReportNotice({ type: 'success', message: 'Thanks — we’ll review this.' });
+      // Give the user a moment to see the confirmation, then close.
+      setTimeout(() => {
+        setReportOpen(false);
+      }, 650);
+    } catch (e: any) {
+      setReportNotice({ type: 'error', message: e?.message ?? 'Report failed: unknown error.' });
+    } finally {
+      setReportSubmitting(false);
+    }
+  }, [
+    API_URL,
+    activeConversationId,
+    reportCategory,
+    reportDetails,
+    reportKind,
+    reportSubmitting,
+    reportTargetMessage,
+    reportTargetUserSub,
+  ]);
 
   const addPendingMediaItems = React.useCallback(
     (items: PendingMediaItem[]) => {
@@ -6229,6 +6373,198 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={reportOpen} transparent animationType="fade" onRequestClose={closeReportModal}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeReportModal} disabled={reportSubmitting} />
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
+              Report
+            </Text>
+            <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
+              Reports are sent to the developer for review. Add an optional note to help us understand the issue.
+            </Text>
+
+            {reportNotice ? (
+              <View
+                style={[
+                  styles.reportNoticeBox,
+                  reportNotice.type === 'success' ? styles.reportNoticeBoxSuccess : styles.reportNoticeBoxError,
+                  isDark ? styles.reportNoticeBoxDark : null,
+                  reportNotice.type === 'success'
+                    ? isDark
+                      ? styles.reportNoticeBoxSuccessDark
+                      : null
+                    : isDark
+                      ? styles.reportNoticeBoxErrorDark
+                      : null,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.reportNoticeText,
+                    reportNotice.type === 'success' ? styles.reportNoticeTextSuccess : styles.reportNoticeTextError,
+                    isDark ? styles.reportNoticeTextDark : null,
+                    reportNotice.type === 'success'
+                      ? isDark
+                        ? styles.reportNoticeTextSuccessDark
+                        : null
+                      : isDark
+                        ? styles.reportNoticeTextErrorDark
+                        : null,
+                  ]}
+                >
+                  {reportNotice.message}
+                </Text>
+              </View>
+            ) : null}
+
+            <View style={styles.reportTargetSwitchWrap}>
+              <Text style={[styles.reportTargetToggleLabel, isDark ? styles.reportTargetToggleLabelDark : null]}>
+                Message
+              </Text>
+              <Switch
+                value={reportKind === 'user'}
+                disabled={reportSubmitting}
+                onValueChange={(next) => {
+                  if (next) {
+                    // Switch to reporting the user (hydrate from the message if needed)
+                    if (reportTargetUserSub) {
+                      setReportKind('user');
+                      return;
+                    }
+                    const sub = reportTargetMessage?.userSub ? String(reportTargetMessage.userSub) : '';
+                    if (sub) {
+                      setReportTargetUserSub(sub);
+                      setReportTargetUserLabel(String(reportTargetMessage?.user || '').trim());
+                      setReportKind('user');
+                      return;
+                    }
+                    setReportNotice({ type: 'error', message: 'Cannot report user: no user was found for this report.' });
+                    setReportKind('message');
+                    return;
+                  }
+
+                  // Switch back to reporting the message (if we have one)
+                  if (reportTargetMessage) setReportKind('message');
+                }}
+                trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+                thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+              />
+              <Text style={[styles.reportTargetToggleLabel, isDark ? styles.reportTargetToggleLabelDark : null]}>
+                User
+              </Text>
+            </View>
+
+            <View style={styles.reportCategoryWrap}>
+              {[
+                { key: 'spam', label: 'Spam' },
+                { key: 'harassment', label: 'Harassment' },
+                { key: 'hate', label: 'Hate' },
+                { key: 'impersonation', label: 'Impersonation' },
+                { key: 'illegal', label: 'Illegal' },
+                { key: 'other', label: 'Other' },
+              ].map((c) => {
+                const active = reportCategory === c.key;
+                return (
+                  <Pressable
+                    key={c.key}
+                    disabled={reportSubmitting}
+                    onPress={() => setReportCategory(c.key)}
+                    style={({ pressed }) => [
+                      styles.reportChip,
+                      isDark ? styles.reportChipDark : null,
+                      active ? styles.reportChipActive : null,
+                      active && isDark ? styles.reportChipActiveDark : null,
+                      pressed ? { opacity: 0.9 } : null,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.reportChipText,
+                        isDark ? styles.reportChipTextDark : null,
+                        active ? (isDark ? styles.reportChipTextActiveDark : styles.reportChipTextActive) : null,
+                      ]}
+                    >
+                      {c.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            {reportKind === 'message' ? (
+              <View style={[styles.reportPreviewBox, isDark ? styles.reportPreviewBoxDark : null]}>
+                <Text style={[styles.reportPreviewLabel, isDark ? styles.reportPreviewLabelDark : null]}>
+                  Message Preview
+                </Text>
+                <Text style={[styles.reportPreviewText, isDark ? styles.reportPreviewTextDark : null]}>
+                  {(() => {
+                    const t = reportTargetMessage;
+                    if (!t) return '(no message selected)';
+                    if (t.deletedAt) return '(deleted)';
+                    const text =
+                      (typeof t.decryptedText === 'string' && t.decryptedText.trim())
+                        ? t.decryptedText.trim()
+                        : (typeof t.text === 'string' && t.text.trim())
+                          ? t.text.trim()
+                          : '';
+                    return text ? text.slice(0, 200) : '(no text)';
+                  })()}
+                </Text>
+              </View>
+            ) : (
+              <View style={[styles.reportPreviewBox, isDark ? styles.reportPreviewBoxDark : null]}>
+                <Text style={[styles.reportPreviewLabel, isDark ? styles.reportPreviewLabelDark : null]}>
+                  Reporting User
+                </Text>
+                <Text style={[styles.reportPreviewText, isDark ? styles.reportPreviewTextDark : null]}>
+                  {(() => {
+                    const label = String(reportTargetUserLabel || '').trim();
+                    if (label) return label.slice(0, 120);
+                    const sub = String(reportTargetUserSub || '').trim();
+                    return sub ? `User ID: ${sub}` : '(unknown user)';
+                  })()}
+                </Text>
+              </View>
+            )}
+
+            <TextInput
+              value={reportDetails}
+              onChangeText={(t) => setReportDetails(t)}
+              placeholder="Optional note (e.g. harassment, spam, impersonation)…"
+              placeholderTextColor={isDark ? '#8f8fa3' : '#8a8a96'}
+              multiline
+              style={[styles.reportInput, isDark ? styles.reportInputDark : null]}
+              editable={!reportSubmitting}
+              maxLength={900}
+            />
+
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[
+                  styles.reportBtnDanger,
+                  isDark ? styles.reportBtnDangerDark : null,
+                  reportSubmitting ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+                ]}
+                disabled={reportSubmitting}
+                onPress={submitReport}
+              >
+                <Text style={[styles.reportBtnDangerText]}>
+                  {reportSubmitting ? 'Reporting…' : 'Report'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                disabled={reportSubmitting}
+                onPress={closeReportModal}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Cancel</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={messageActionOpen} transparent animationType="fade">
         <View style={styles.actionMenuOverlay}>
           <Pressable style={StyleSheet.absoluteFill} onPress={closeMessageActions} />
@@ -6535,6 +6871,61 @@ export default function ChatScreen({
                 <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
                   Delete for me
                 </Text>
+              </Pressable>
+
+              {(() => {
+                const t = messageActionTarget;
+                const sub = t?.userSub ? String(t.userSub) : '';
+                const label = t?.user ? String(t.user) : '';
+                const isMe = !!myUserId && !!sub && String(sub) === String(myUserId);
+                const alreadyBlocked = !!sub && blockedSubsSet.has(sub);
+                if (!t || !sub || isMe || alreadyBlocked || typeof onBlockUserSub !== 'function') return null;
+                return (
+                  <Pressable
+                    onPress={async () => {
+                      closeMessageActions();
+                      try {
+                        const ok =
+                          typeof promptConfirm === 'function'
+                            ? await promptConfirm(
+                                'Block user?',
+                                `Block ${label ? `"${label}"` : 'this user'}?\n\nYou won’t see their messages, and they won’t be able to DM you.\n\nYou can unblock them later from your Blocklist.`,
+                                { confirmText: 'Block', cancelText: 'Cancel', destructive: true }
+                              )
+                            : await new Promise<boolean>((resolve) => {
+                                Alert.alert(
+                                  'Block user?',
+                                  `Block ${label ? `"${label}"` : 'this user'}?\n\nYou can unblock them later from your Blocklist.`,
+                                  [
+                                    { text: 'Block', style: 'destructive', onPress: () => resolve(true) },
+                                    { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+                                  ],
+                                  { cancelable: true }
+                                );
+                              });
+                        if (!ok) return;
+                        await Promise.resolve(onBlockUserSub(sub, label));
+                        showAlert('Blocked', 'User blocked. Their messages will be hidden.');
+                      } catch (e: any) {
+                        showAlert('Block failed', e?.message ?? 'Failed to block user');
+                      }
+                    }}
+                    style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+                  >
+                    <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Block user</Text>
+                  </Pressable>
+                );
+              })()}
+
+              <Pressable
+                onPress={() => {
+                  if (!messageActionTarget) return;
+                  openReportModalForMessage(messageActionTarget);
+                  closeMessageActions();
+                }}
+                style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+              >
+                    <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Report…</Text>
               </Pressable>
 
               {(() => {
@@ -7680,6 +8071,104 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
     opacity: 0.6,
   },
+
+  reportPreviewBox: {
+    marginTop: 12,
+    marginBottom: 10,
+    borderRadius: 12,
+    padding: 10,
+    minHeight: 72,
+    backgroundColor: '#f6f6fb',
+    borderWidth: 1,
+    borderColor: '#e7e7ee',
+  },
+  reportPreviewBoxDark: { backgroundColor: '#1c1c22', borderColor: '#2a2a33' },
+  reportPreviewLabel: { fontWeight: '800', color: '#111', marginBottom: 4 },
+  reportPreviewLabelDark: { color: '#fff' },
+  reportPreviewText: { color: '#222', lineHeight: 18 },
+  reportPreviewTextDark: { color: '#d7d7e0' },
+  reportTargetLine: { marginTop: 10, marginBottom: 6, color: '#222', fontWeight: '700' },
+  reportTargetLineDark: { color: '#d7d7e0' },
+  reportNoticeBox: {
+    marginTop: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  reportNoticeBoxDark: {},
+  reportNoticeBoxError: { backgroundColor: '#fff5f5', borderColor: '#ffd5d5' },
+  reportNoticeBoxErrorDark: { backgroundColor: '#2a1518', borderColor: '#5a2a2f' },
+  reportNoticeBoxSuccess: { backgroundColor: '#f0fff4', borderColor: '#c7f0d0' },
+  reportNoticeBoxSuccessDark: { backgroundColor: '#0f2317', borderColor: '#1f4d33' },
+  reportNoticeText: { fontWeight: '800', lineHeight: 18 },
+  reportNoticeTextDark: {},
+  reportNoticeTextError: { color: '#b00020' },
+  reportNoticeTextErrorDark: { color: '#cf6679' },
+  reportNoticeTextSuccess: { color: '#0b6b2c' },
+  reportNoticeTextSuccessDark: { color: '#7de6a5' },
+  reportInput: {
+    marginTop: 10,
+    minHeight: 96,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e7e7ee',
+    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#111',
+    textAlignVertical: 'top',
+  },
+  reportInputDark: {
+    borderColor: '#2a2a33',
+    backgroundColor: '#14141a',
+    color: '#fff',
+  },
+  reportCategoryWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  reportChip: {
+    borderWidth: 1,
+    borderColor: '#e7e7ee',
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  reportChipDark: { borderColor: '#2a2a33', backgroundColor: '#1c1c22' },
+  // Keep chips neutral; "Report" should look destructive, not brand-blue.
+  reportChipActive: { borderColor: '#111', backgroundColor: '#f2f2f7' },
+  reportChipActiveDark: { borderColor: '#fff', backgroundColor: '#2a2a33' },
+  reportChipText: { color: '#222', fontWeight: '800' },
+  reportChipTextDark: { color: '#d7d7e0' },
+  reportChipTextActive: { color: '#111' },
+  reportChipTextActiveDark: { color: '#fff' },
+
+  reportTargetSwitchWrap: { flexDirection: 'row', gap: 10, marginTop: 10, alignItems: 'center' },
+  reportTargetToggleLabel: { color: '#222', fontWeight: '900' },
+  reportTargetToggleLabelDark: { color: '#d7d7e0' },
+  reportTargetChip: {
+    borderWidth: 1,
+    borderColor: '#e7e7ee',
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  reportTargetChipDark: { borderColor: '#2a2a33', backgroundColor: '#1c1c22' },
+  reportTargetChipActive: { borderColor: '#111', backgroundColor: '#f2f2f7' },
+  reportTargetChipActiveDark: { borderColor: '#fff', backgroundColor: '#2a2a33' },
+  reportTargetChipText: { color: '#222', fontWeight: '900' },
+  reportTargetChipTextDark: { color: '#d7d7e0' },
+  reportTargetChipTextActive: { color: '#111' },
+
+  reportBtnDanger: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: '#b00020',
+    borderWidth: 0,
+  },
+  reportBtnDangerDark: { backgroundColor: '#cf6679' },
+  reportBtnDangerText: { color: '#fff', fontWeight: '800', fontSize: 13 },
 
   summaryModal: {
     width: '88%',
