@@ -30,6 +30,8 @@ exports.handler = async (event) => {
 
     const unread = (resp.Items || []).map((item) => ({
       conversationId: String(item.conversationId || ''),
+      // Optional: kind can be "message" (default) or "added" for group DMs.
+      kind: item.kind ? String(item.kind) : undefined,
       senderSub: item.senderSub ? String(item.senderSub) : undefined,
       senderDisplayName: item.senderDisplayName ? String(item.senderDisplayName) : undefined,
       messageCount: Number(item.messageCount ?? 0),

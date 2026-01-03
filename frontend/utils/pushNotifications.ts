@@ -199,6 +199,9 @@ export async function setForegroundNotificationPolicy(): Promise<void> {
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
       shouldShowAlert: false,
+      // Newer expo-notifications NotificationBehavior requires these fields.
+      shouldShowBanner: false,
+      shouldShowList: false,
       shouldPlaySound: false,
       shouldSetBadge: false,
     }),

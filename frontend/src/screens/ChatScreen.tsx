@@ -239,6 +239,7 @@ type ChatScreenProps = {
   peer?: string | null;
   displayName: string;
   onNewDmNotification?: (conversationId: string, user: string, userSub?: string) => void;
+  onKickedFromConversation?: (conversationId: string) => void;
   headerTop?: React.ReactNode;
   theme?: 'light' | 'dark';
   chatBackground?: { mode: 'default' | 'color' | 'image'; color?: string; uri?: string; blur?: number; opacity?: number };
@@ -269,7 +270,10 @@ type ChatMessage = {
   text: string;
   rawText?: string;
   encrypted?: EncryptedChatPayloadV1;
+  groupEncrypted?: EncryptedGroupPayloadV1;
   decryptedText?: string;
+  // Group-only: derived from wraps[mySub] after decrypt; used to decrypt group media.
+  groupKeyHex?: string;
   decryptFailed?: boolean;
   expiresAt?: number; // epoch seconds
   ttlSeconds?: number; // duration, seconds (TTL-from-read)
@@ -304,6 +308,16 @@ type ChatEnvelope = {
 };
 
 const ENCRYPTED_PLACEHOLDER = 'Encrypted message (tap to decrypt)';
+
+type EncryptedGroupPayloadV1 = {
+  type: 'gdm_v1';
+  v: 1;
+  alg: 'aes-256-gcm+wraps-v1';
+  iv: string; // hex (12 bytes)
+  ciphertext: string; // hex (ciphertext + authTag)
+  // Wraps map: recipientSub -> EncryptedChatPayloadV1 encrypting messageKeyHex
+  wraps: Record<string, EncryptedChatPayloadV1>;
+};
 
 type DmMediaEnvelopeV1 = {
   type: 'dm_media_v1';
@@ -395,6 +409,63 @@ const normalizeDmMediaItems = (
 ): Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }> => {
   if (!env) return [];
   if (env.type === 'dm_media_v1') return [{ media: env.media, wrap: env.wrap }];
+  return Array.isArray(env.items) ? env.items : [];
+};
+
+// Group DM media envelope:
+// - The outer group message is encrypted with messageKey.
+// - Each attachment fileKey is wrapped with messageKey (AES-GCM), not ECDH.
+type GroupMediaEnvelopeV1 = {
+  type: 'gdm_media_v1';
+  v: 1;
+  caption?: string;
+  media: DmMediaEnvelopeV1['media'];
+  wrap: DmMediaEnvelopeV1['wrap']; // aesGcmEncryptBytes(messageKey, fileKey)
+};
+
+type GroupMediaEnvelopeV2 = {
+  type: 'gdm_media_v2';
+  v: 2;
+  caption?: string;
+  items: Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }>;
+};
+
+type GroupMediaEnvelope = GroupMediaEnvelopeV1 | GroupMediaEnvelopeV2;
+
+const parseGroupMediaEnvelope = (raw: string): GroupMediaEnvelope | null => {
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return null;
+    if (obj.type === 'gdm_media_v1' && obj.v === 1) {
+      if (!obj.media || !obj.wrap) return null;
+      if (typeof obj.media.path !== 'string' || typeof obj.media.iv !== 'string') return null;
+      if (typeof obj.wrap.iv !== 'string' || typeof obj.wrap.ciphertext !== 'string') return null;
+      return obj as GroupMediaEnvelopeV1;
+    }
+    if (obj.type === 'gdm_media_v2' && obj.v === 2) {
+      if (!Array.isArray(obj.items) || obj.items.length === 0) return null;
+      for (const it of obj.items) {
+        if (!it || typeof it !== 'object') return null;
+        const m = (it as any).media;
+        const w = (it as any).wrap;
+        if (!m || !w) return null;
+        if (typeof m.path !== 'string' || typeof m.iv !== 'string') return null;
+        if (typeof w.iv !== 'string' || typeof w.ciphertext !== 'string') return null;
+      }
+      return obj as GroupMediaEnvelopeV2;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const normalizeGroupMediaItems = (
+  env: GroupMediaEnvelope | null
+): Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }> => {
+  if (!env) return [];
+  if (env.type === 'gdm_media_v1') return [{ media: env.media, wrap: env.wrap }];
   return Array.isArray(env.items) ? env.items : [];
 };
 
@@ -696,6 +767,7 @@ export default function ChatScreen({
   peer,
   displayName,
   onNewDmNotification,
+  onKickedFromConversation,
   headerTop,
   theme = 'light',
   chatBackground,
@@ -744,6 +816,7 @@ export default function ChatScreen({
   const displayNameRef = React.useRef<string>('');
   const myPublicKeyRef = React.useRef<string | null>(null);
   const onNewDmNotificationRef = React.useRef<typeof onNewDmNotification | undefined>(undefined);
+  const onKickedFromConversationRef = React.useRef<typeof onKickedFromConversation | undefined>(undefined);
   const isTypingRef = React.useRef<boolean>(false);
   const lastTypingSentAtRef = React.useRef<number>(0);
   const typingCleanupTimerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
@@ -752,6 +825,15 @@ export default function ChatScreen({
   const [myPrivateKey, setMyPrivateKey] = React.useState<string | null>(null);
   const [myPublicKey, setMyPublicKey] = React.useState<string | null>(null);
   const [peerPublicKey, setPeerPublicKey] = React.useState<string | null>(null);
+  // Group DM state (used for encryption + admin UI)
+  const [groupMeta, setGroupMeta] = React.useState<null | { groupId: string; groupName?: string; meIsAdmin: boolean; meStatus: string }>(
+    null
+  );
+  const [groupMembers, setGroupMembers] = React.useState<
+    Array<{ memberSub: string; displayName?: string; status: string; isAdmin: boolean }>
+  >([]);
+  const [groupPublicKeyBySub, setGroupPublicKeyBySub] = React.useState<Record<string, string>>({});
+  const [groupMembersOpen, setGroupMembersOpen] = React.useState<boolean>(false);
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
   const [cipherOpen, setCipherOpen] = React.useState(false);
   const [cipherText, setCipherText] = React.useState<string>('');
@@ -971,12 +1053,14 @@ export default function ChatScreen({
   const [viewerState, setViewerState] = React.useState<
     | null
     | {
-        mode: 'global' | 'dm';
+        mode: 'global' | 'dm' | 'gdm';
         title?: string;
         index: number;
         globalItems?: Array<{ url: string; kind: 'image' | 'video' | 'file'; fileName?: string }>;
         dmMsg?: ChatMessage;
         dmItems?: Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }>;
+        gdmMsg?: ChatMessage;
+        gdmItems?: Array<{ media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }>;
       }
   >(null);
   const [dmThumbUriByPath, setDmThumbUriByPath] = React.useState<Record<string, string>>({});
@@ -995,7 +1079,9 @@ export default function ChatScreen({
     () => (conversationId && conversationId.length > 0 ? conversationId : 'global'),
     [conversationId]
   );
-  const isDm = React.useMemo(() => activeConversationId !== 'global', [activeConversationId]);
+  const isDm = React.useMemo(() => activeConversationId.startsWith('dm#'), [activeConversationId]);
+  const isGroup = React.useMemo(() => activeConversationId.startsWith('gdm#'), [activeConversationId]);
+  const isEncryptedChat = isDm || isGroup;
   const resolvedChatBg = React.useMemo(() => {
     const bg = chatBackground;
     if (!bg || bg.mode === 'default') return { mode: 'default' as const };
@@ -1170,6 +1256,9 @@ export default function ChatScreen({
   React.useEffect(() => {
     onNewDmNotificationRef.current = onNewDmNotification;
   }, [onNewDmNotification]);
+  React.useEffect(() => {
+    onKickedFromConversationRef.current = onKickedFromConversation;
+  }, [onKickedFromConversation]);
 
   const normalizeUser = React.useCallback((v: unknown): string => {
     return String(v ?? '').trim().toLowerCase();
@@ -1868,6 +1957,126 @@ export default function ChatScreen({
     [input]
   );
 
+  const uploadPendingMediaGroupEncrypted = React.useCallback(
+    async (
+      media: PendingMediaItem,
+      conversationKey: string,
+      messageKeyBytes: Uint8Array,
+      captionOverride?: string
+    ): Promise<GroupMediaEnvelopeV1> => {
+      const readUriBytes = async (uri: string): Promise<Uint8Array> => {
+        try {
+          const resp: any = await fetch(uri);
+          if (resp && typeof resp.arrayBuffer === 'function') {
+            return new Uint8Array(await resp.arrayBuffer());
+          }
+          if (resp && typeof resp.blob === 'function') {
+            const b: any = await resp.blob();
+            if (b && typeof b.arrayBuffer === 'function') {
+              return new Uint8Array(await b.arrayBuffer());
+            }
+          }
+        } catch {
+          // fall through
+        }
+        const fsAny: any = require('expo-file-system');
+        const File = fsAny?.File;
+        if (!File) throw new Error('File API not available');
+        const f: any = new File(uri);
+        if (typeof f?.bytes === 'function') {
+          const bytes = await f.bytes();
+          return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        }
+        if (typeof f?.base64 === 'function') {
+          const b64 = await f.base64();
+          return toByteArray(String(b64 || ''));
+        }
+        throw new Error('File read API not available');
+      };
+
+      const declaredSize = typeof media.size === 'number' ? media.size : undefined;
+      const hardLimit =
+        media.kind === 'image' ? MAX_IMAGE_BYTES : media.kind === 'video' ? MAX_VIDEO_BYTES : MAX_FILE_BYTES;
+      if (declaredSize && declaredSize > hardLimit) {
+        throw new Error(
+          `File too large (${formatBytes(declaredSize)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
+        );
+      }
+
+      const plainBytes = await readUriBytes(media.uri);
+      if (plainBytes.byteLength > hardLimit) {
+        throw new Error(
+          `File too large (${formatBytes(plainBytes.byteLength)}). Limit for ${media.kind} is ${formatBytes(hardLimit)}.`
+        );
+      }
+
+      const fileKey = new Uint8Array(getRandomBytes(32));
+      const fileIv = new Uint8Array(getRandomBytes(12));
+      const fileCipher = gcm(fileKey, fileIv).encrypt(plainBytes);
+
+      const uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const path = `uploads/dm/${conversationKey}/${uploadId}.enc`;
+      await uploadData({ path, data: fileCipher, options: { contentType: 'application/octet-stream' } }).result;
+
+      // Encrypted thumbnail with same fileKey (Signal-style)
+      let thumbPath: string | undefined;
+      let thumbIvHex: string | undefined;
+      let thumbContentType: string | undefined;
+      try {
+        let thumbUri: string | null = null;
+        if (media.kind === 'image') {
+          const thumb = await ImageManipulator.manipulateAsync(
+            media.uri,
+            [{ resize: { width: THUMB_MAX_DIM } }],
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
+          );
+          thumbUri = thumb.uri;
+        } else if (media.kind === 'video') {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(media.uri, { time: 500, quality: THUMB_JPEG_QUALITY });
+          const converted = await ImageManipulator.manipulateAsync(
+            uri,
+            [{ resize: { width: THUMB_MAX_DIM } }],
+            { compress: THUMB_JPEG_QUALITY, format: ImageManipulator.SaveFormat.WEBP }
+          );
+          thumbUri = converted.uri;
+        }
+        if (thumbUri) {
+          const tBytes = await readUriBytes(thumbUri);
+          const tIv = new Uint8Array(getRandomBytes(12));
+          const tCipher = gcm(fileKey, tIv).encrypt(tBytes);
+          thumbPath = `uploads/dm/${conversationKey}/thumbs/${uploadId}.webp.enc`;
+          await uploadData({ path: thumbPath, data: tCipher, options: { contentType: 'application/octet-stream' } }).result;
+          thumbIvHex = bytesToHex(tIv);
+          thumbContentType = 'image/webp';
+        }
+      } catch {
+        // ignore thumb failures
+      }
+
+      // Wrap fileKey with messageKey (NOT ECDH)
+      const wrap = aesGcmEncryptBytes(messageKeyBytes, fileKey);
+
+      return {
+        type: 'gdm_media_v1',
+        v: 1,
+        caption: (typeof captionOverride === 'string' ? captionOverride.trim() : input.trim()) || undefined,
+        media: {
+          kind: media.kind,
+          contentType: media.contentType,
+          fileName: media.fileName,
+          size: media.size,
+          path,
+          iv: bytesToHex(fileIv),
+          ...(thumbPath ? { thumbPath } : {}),
+          ...(thumbIvHex ? { thumbIv: thumbIvHex } : {}),
+          ...(thumbContentType ? { thumbContentType } : {}),
+        },
+        wrap: { iv: wrap.ivHex, ciphertext: wrap.ciphertextHex },
+      };
+    },
+    [aesGcmEncryptBytes, input]
+  );
+
   const openMedia = React.useCallback(async (path: string) => {
     try {
       const s = toCdnUrl(path);
@@ -2440,6 +2649,43 @@ export default function ChatScreen({
     }
   }, []);
 
+  const parseGroupEncrypted = React.useCallback((text: string): EncryptedGroupPayloadV1 | null => {
+    try {
+      const obj = JSON.parse(text);
+      if (
+        obj &&
+        obj.type === 'gdm_v1' &&
+        obj.v === 1 &&
+        obj.alg === 'aes-256-gcm+wraps-v1' &&
+        typeof obj.iv === 'string' &&
+        typeof obj.ciphertext === 'string' &&
+        obj.wraps &&
+        typeof obj.wraps === 'object'
+      ) {
+        return obj as EncryptedGroupPayloadV1;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const decryptGroupForDisplay = React.useCallback(
+    (msg: ChatMessage): { plaintext: string; messageKeyHex: string } => {
+      if (!msg.groupEncrypted) throw new Error('Not group-encrypted');
+      if (!myPrivateKey) throw new Error('Missing your private key on this device.');
+      if (!myUserId) throw new Error('Missing your user id.');
+      const wraps = msg.groupEncrypted.wraps || {};
+      const wrap = wraps[myUserId];
+      if (!wrap) throw new Error("Can't decrypt (message not encrypted for you).");
+      const messageKeyHex = decryptChatMessageV1(wrap, myPrivateKey);
+      const keyBytes = hexToBytes(messageKeyHex);
+      const plainBytes = aesGcmDecryptBytes(keyBytes, msg.groupEncrypted.iv, msg.groupEncrypted.ciphertext);
+      return { plaintext: new TextDecoder().decode(plainBytes), messageKeyHex };
+    },
+    [myPrivateKey, myUserId, aesGcmDecryptBytes]
+  );
+
   const decryptForDisplay = React.useCallback(
     (msg: ChatMessage): string => {
       if (!msg.encrypted) throw new Error('Not encrypted');
@@ -2582,6 +2828,117 @@ export default function ChatScreen({
     [aesGcmDecryptBytes, buildDmMediaKey, dmFileUriByPath]
   );
 
+  const buildGroupMediaKey = React.useCallback((msg: ChatMessage): Uint8Array => {
+    if (!msg.groupKeyHex) throw new Error('Missing group message key');
+    return hexToBytes(String(msg.groupKeyHex));
+  }, []);
+
+  const decryptGroupThumbToDataUri = React.useCallback(
+    async (
+      msg: ChatMessage,
+      it: { media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }
+    ): Promise<string | null> => {
+      if (!it.media.thumbPath || !it.media.thumbIv) return null;
+      const cacheKey = it.media.thumbPath;
+      if (dmThumbUriByPath[cacheKey]) return dmThumbUriByPath[cacheKey];
+
+      const messageKey = buildGroupMediaKey(msg);
+      const fileKey = aesGcmDecryptBytes(messageKey, it.wrap.iv, it.wrap.ciphertext); // 32 bytes
+
+      const signedUrl = await getDmMediaSignedUrl(it.media.thumbPath, 300);
+      const encResp = await fetch(signedUrl);
+      if (!encResp.ok) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`Group download failed (${encResp.status}): ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const respCt = String(encResp.headers.get('content-type') || '');
+      if (respCt.includes('text') || respCt.includes('xml') || respCt.includes('json') || respCt.includes('html')) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`Group download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const encBytes = new Uint8Array(await encResp.arrayBuffer());
+      let plainThumbBytes: Uint8Array;
+      try {
+        plainThumbBytes = gcm(fileKey, new Uint8Array(hexToBytes(it.media.thumbIv))).decrypt(encBytes);
+      } catch {
+        throw new Error('Group decrypt failed (bad key or corrupted download)');
+      }
+
+      const b64 = fromByteArray(plainThumbBytes);
+      const ct =
+        it.media.thumbContentType ||
+        (String(it.media.thumbPath || '').includes('.webp') ? 'image/webp' : 'image/jpeg');
+      const dataUri = `data:${ct};base64,${b64}`;
+      setDmThumbUriByPath((prev) => ({ ...prev, [cacheKey]: dataUri }));
+
+      Image.getSize(
+        dataUri,
+        (w, h) => {
+          const aspect = w > 0 && h > 0 ? w / h : 1;
+          setImageAspectByPath((prev) => ({ ...prev, [cacheKey]: aspect }));
+        },
+        () => {}
+      );
+      return dataUri;
+    },
+    [aesGcmDecryptBytes, buildGroupMediaKey, dmThumbUriByPath]
+  );
+
+  const decryptGroupFileToCacheUri = React.useCallback(
+    async (
+      msg: ChatMessage,
+      it: { media: DmMediaEnvelopeV1['media']; wrap: DmMediaEnvelopeV1['wrap'] }
+    ): Promise<string> => {
+      const cacheKey = it.media.path;
+      if (dmFileUriByPath[cacheKey]) return dmFileUriByPath[cacheKey];
+
+      const messageKey = buildGroupMediaKey(msg);
+      const fileKey = aesGcmDecryptBytes(messageKey, it.wrap.iv, it.wrap.ciphertext);
+
+      const signedUrl = await getDmMediaSignedUrl(it.media.path, 300);
+      const encResp = await fetch(signedUrl);
+      if (!encResp.ok) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`Group download failed (${encResp.status}): ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const respCt = String(encResp.headers.get('content-type') || '');
+      if (respCt.includes('text') || respCt.includes('xml') || respCt.includes('json') || respCt.includes('html')) {
+        const txt = await encResp.text().catch(() => '');
+        throw new Error(`Group download returned ${respCt || 'text'}: ${txt.slice(0, 160) || 'no body'}`);
+      }
+      const encBytes = new Uint8Array(await encResp.arrayBuffer());
+      const fileIvBytes = hexToBytes(it.media.iv);
+      let plainBytes: Uint8Array;
+      try {
+        plainBytes = gcm(fileKey, fileIvBytes).decrypt(encBytes);
+      } catch {
+        throw new Error('Group decrypt failed (bad key or corrupted download)');
+      }
+
+      const ct = it.media.contentType || 'application/octet-stream';
+      const ext =
+        ct.startsWith('image/')
+          ? ct.split('/')[1] || 'jpg'
+          : ct.startsWith('video/')
+            ? ct.split('/')[1] || 'mp4'
+            : 'bin';
+      const fileNameSafe = (it.media.fileName || `gdm-${Date.now()}`).replace(/[^\w.\-() ]+/g, '_');
+      const fsAny: any = require('expo-file-system');
+      const Paths = fsAny?.Paths;
+      const File = fsAny?.File;
+      const root = (Paths?.cache || Paths?.document) as any;
+      if (!root) throw new Error('No writable cache directory');
+      if (!File) throw new Error('File API not available');
+      const outFile = new File(root, `gdm-${fileNameSafe}.${ext}`);
+      if (typeof outFile?.write !== 'function') throw new Error('File write API not available');
+      await outFile.write(plainBytes);
+
+      setDmFileUriByPath((prev) => ({ ...prev, [cacheKey]: outFile.uri }));
+      return outFile.uri;
+    },
+    [aesGcmDecryptBytes, buildGroupMediaKey, dmFileUriByPath]
+  );
+
   // DM: decrypt thumbnails once messages are decrypted (so we can render inline previews).
   React.useEffect(() => {
     if (!isDm) return;
@@ -2610,6 +2967,61 @@ export default function ChatScreen({
       cancelled = true;
     };
   }, [isDm, messages, dmThumbUriByPath, decryptDmThumbToDataUri]);
+
+  // Group DM: decrypt thumbnails once messages are decrypted.
+  React.useEffect(() => {
+    if (!isGroup) return;
+    let cancelled = false;
+    const run = async () => {
+      for (const m of messages) {
+        if (cancelled) return;
+        if (!m.decryptedText || !m.groupKeyHex) continue;
+        const env = parseGroupMediaEnvelope(m.decryptedText);
+        const items = normalizeGroupMediaItems(env);
+        for (const it of items) {
+          if (cancelled) return;
+          if (!it.media.thumbPath || !it.media.thumbIv) continue;
+          if (dmThumbUriByPath[it.media.thumbPath]) continue;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await decryptGroupThumbToDataUri(m, it);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
+    setTimeout(() => void run(), 0);
+    return () => {
+      cancelled = true;
+    };
+  }, [isGroup, messages, dmThumbUriByPath, decryptGroupThumbToDataUri]);
+
+  const openGroupMediaViewer = React.useCallback(
+    async (msg: ChatMessage, idx: number = 0) => {
+      if (!isGroup) return;
+      if (!msg.decryptedText || !msg.groupKeyHex) return;
+      const env = parseGroupMediaEnvelope(msg.decryptedText);
+      if (!env) return;
+      const items = normalizeGroupMediaItems(env);
+      const it = items[idx];
+      if (!it) return;
+      try {
+        const localUri = await decryptGroupFileToCacheUri(msg, it);
+        setViewerState({
+          mode: 'gdm',
+          index: Math.max(0, Math.min(items.length - 1, idx)),
+          gdmMsg: msg,
+          gdmItems: items,
+          title: it.media.fileName,
+        });
+        setViewerOpen(true);
+      } catch (e: any) {
+        showAlert('Open failed', e?.message ?? 'Could not decrypt attachment');
+      }
+    },
+    [isGroup, decryptGroupFileToCacheUri, showAlert]
+  );
 
   const openDmMediaViewer = React.useCallback(
     async (msg: ChatMessage, idx: number = 0) => {
@@ -2665,6 +3077,31 @@ export default function ChatScreen({
         });
     });
   }, [viewerOpen, viewerState, dmFileUriByPath, decryptDmFileToCacheUri]);
+
+  // Fullscreen Group viewer: lazily decrypt the currently visible page (and a neighbor).
+  React.useEffect(() => {
+    if (!viewerOpen) return;
+    const vs = viewerState;
+    if (!vs || vs.mode !== 'gdm') return;
+    const msg = vs.gdmMsg;
+    const items = vs.gdmItems;
+    if (!msg || !items || !items.length) return;
+
+    const want = [vs.index, vs.index + 1, vs.index - 1].filter((i) => typeof i === 'number' && i >= 0 && i < items.length).slice(0, 3);
+    want.forEach((i) => {
+      const it = items[i];
+      const key = it?.media?.path;
+      if (!key) return;
+      if (dmFileUriByPath[key]) return;
+      if (inFlightDmViewerDecryptRef.current.has(key)) return;
+      inFlightDmViewerDecryptRef.current.add(key);
+      decryptGroupFileToCacheUri(msg, it)
+        .catch(() => {})
+        .finally(() => {
+          inFlightDmViewerDecryptRef.current.delete(key);
+        });
+    });
+  }, [viewerOpen, viewerState, dmFileUriByPath, decryptGroupFileToCacheUri]);
 
   const markMySeen = React.useCallback((messageCreatedAt: number, readAt: number) => {
     setMySeenAtByCreatedAt((prev) => ({
@@ -2800,9 +3237,7 @@ export default function ChatScreen({
   // Auto-decrypt pass: whenever enabled and keys are ready, decrypt any encrypted messages once.
   React.useEffect(() => {
     if (!autoDecrypt || !myPrivateKey) return;
-    const needsDecrypt = messages.some(
-      (m) => m.encrypted && !m.decryptedText && !m.decryptFailed
-    );
+    const needsDecrypt = messages.some((m) => (m.encrypted || m.groupEncrypted) && !m.decryptedText && !m.decryptFailed);
     if (!needsDecrypt) return;
 
     const decryptedIncomingCreatedAts: number[] = [];
@@ -2810,15 +3245,22 @@ export default function ChatScreen({
     let changed = false;
 
     const nextMessages = messages.map((m) => {
-      if (!m.encrypted || m.decryptedText || m.decryptFailed) return m;
-      const isFromMe = !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
-      if (isFromMe && !peerPublicKey) return m; // wait for peer key
+      if ((!m.encrypted && !m.groupEncrypted) || m.decryptedText || m.decryptFailed) return m;
+      const isFromMe =
+        !!myUserId && !!m.userSub ? String(m.userSub) === String(myUserId) : false;
+      if (m.encrypted) {
+        const isFromMeByKey = !!myPublicKey && m.encrypted.senderPublicKey === myPublicKey;
+        if (isFromMeByKey && !peerPublicKey) return m; // wait for peer key for sent DMs
+      }
       try {
-        const plaintext = decryptForDisplay(m);
+        const groupDec = m.groupEncrypted ? decryptGroupForDisplay(m) : null;
+        const plaintext = groupDec ? groupDec.plaintext : decryptForDisplay(m);
         changed = true;
         const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
+        const gEnv = isGroup ? parseGroupMediaEnvelope(plaintext) : null;
         const dmItems = dmEnv ? normalizeDmMediaItems(dmEnv) : [];
-        const dmMediaList: ChatMediaItem[] = dmItems.map((it) => ({
+        const gItems = gEnv ? normalizeGroupMediaItems(gEnv) : [];
+        const mediaList: ChatMediaItem[] = (isDm ? dmItems : gItems).map((it) => ({
           path: it.media.path,
           thumbPath: it.media.thumbPath,
           kind: it.media.kind,
@@ -2835,9 +3277,10 @@ export default function ChatScreen({
           return {
             ...m,
             decryptedText: plaintext,
-            text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
-            media: dmMediaList.length ? dmMediaList[0] : m.media,
-            mediaList: dmMediaList.length ? dmMediaList : undefined,
+            groupKeyHex: groupDec ? groupDec.messageKeyHex : m.groupKeyHex,
+            text: dmEnv ? (dmEnv.caption ?? '') : gEnv ? (gEnv.caption ?? '') : plaintext,
+            media: mediaList.length ? mediaList[0] : m.media,
+            mediaList: mediaList.length ? mediaList : undefined,
             expiresAt,
           };
         }
@@ -2845,9 +3288,10 @@ export default function ChatScreen({
         return {
           ...m,
           decryptedText: plaintext,
-          text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
-          media: dmMediaList.length ? dmMediaList[0] : m.media,
-          mediaList: dmMediaList.length ? dmMediaList : undefined,
+          groupKeyHex: groupDec ? groupDec.messageKeyHex : m.groupKeyHex,
+          text: dmEnv ? (dmEnv.caption ?? '') : gEnv ? (gEnv.caption ?? '') : plaintext,
+          media: mediaList.length ? mediaList[0] : m.media,
+          mediaList: mediaList.length ? mediaList : undefined,
         };
       } catch {
         changed = true;
@@ -2872,6 +3316,9 @@ export default function ChatScreen({
     markMySeen,
     messages,
     peerPublicKey,
+    isGroup,
+    decryptGroupForDisplay,
+    myUserId,
   ]);
 
   React.useEffect(() => {
@@ -2929,6 +3376,170 @@ export default function ChatScreen({
       }
     })();
   }, [peer, isDm, API_URL, activeConversationId, myUserId]);
+
+  const [groupRefreshNonce, setGroupRefreshNonce] = React.useState<number>(0);
+
+  // Group metadata + member key hydration (for encryption + admin UI).
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!API_URL || !isGroup) {
+        setGroupMeta(null);
+        setGroupMembers([]);
+        setGroupPublicKeyBySub({});
+        return;
+      }
+      try {
+        const { tokens } = await fetchAuthSession();
+        const idToken = tokens?.idToken?.toString();
+        if (!idToken) return;
+        const base = API_URL.replace(/\/$/, '');
+        const url = `${base}/groups/get?conversationId=${encodeURIComponent(activeConversationId)}`;
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${idToken}` } });
+        if (!res.ok) {
+          if (!cancelled) {
+            setGroupMeta(null);
+            setGroupMembers([]);
+            setGroupPublicKeyBySub({});
+          }
+          return;
+        }
+        const data: any = await res.json().catch(() => ({}));
+        const groupId = String(data.groupId || '').trim();
+        const me = data.me && typeof data.me === 'object' ? data.me : {};
+        const meIsAdmin = !!me.isAdmin;
+        const meStatus = typeof me.status === 'string' ? String(me.status) : 'active';
+        const membersRaw = Array.isArray(data.members) ? data.members : [];
+        const members = membersRaw
+          .map((m: any) => ({
+            memberSub: String(m.memberSub || '').trim(),
+            displayName: typeof m.displayName === 'string' ? String(m.displayName) : undefined,
+            status: typeof m.status === 'string' ? String(m.status) : 'active',
+            isAdmin: !!m.isAdmin,
+          }))
+          .filter((m: any) => m.memberSub);
+        if (!cancelled) {
+          setGroupMeta(groupId ? { groupId, groupName: typeof data.groupName === 'string' ? String(data.groupName) : undefined, meIsAdmin, meStatus } : null);
+          setGroupMembers(members);
+        }
+
+        // Fetch current public keys for active members (required for wrapping message keys).
+        const activeSubs = members.filter((m: { status: string; memberSub: string }) => m.status === 'active').map((m: { memberSub: string }) => m.memberSub);
+        const nextKeyMap: Record<string, string> = {};
+        await Promise.all(
+          activeSubs.map(async (sub: string) => {
+            try {
+              const r = await fetch(`${base}/users?sub=${encodeURIComponent(sub)}`, {
+                headers: { Authorization: `Bearer ${idToken}` },
+              });
+              if (!r.ok) return;
+              const u = await r.json().catch(() => ({}));
+              const pk = (u.public_key as string | undefined) || (u.publicKey as string | undefined);
+              if (typeof pk === 'string' && pk.trim()) nextKeyMap[sub] = pk.trim();
+            } catch {
+              // ignore
+            }
+          })
+        );
+        if (!cancelled) setGroupPublicKeyBySub(nextKeyMap);
+      } catch {
+        if (!cancelled) {
+          setGroupMeta(null);
+          setGroupMembers([]);
+          setGroupPublicKeyBySub({});
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [API_URL, isGroup, activeConversationId, groupRefreshNonce]);
+  const [groupNameEditOpen, setGroupNameEditOpen] = React.useState<boolean>(false);
+  const [groupNameDraft, setGroupNameDraft] = React.useState<string>('');
+  const [groupAddMembersDraft, setGroupAddMembersDraft] = React.useState<string>('');
+  const [groupActionBusy, setGroupActionBusy] = React.useState<boolean>(false);
+
+  const groupPost = React.useCallback(
+    async (path: string, body: any): Promise<{ ok: boolean; status: number; json?: any; text?: string }> => {
+      if (!API_URL) return { ok: false, status: 0, text: 'API not configured' };
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) return { ok: false, status: 401, text: 'Not authenticated' };
+      const base = API_URL.replace(/\/$/, '');
+      const res = await fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      });
+      const text = await res.text().catch(() => '');
+      let json: any = undefined;
+      try {
+        json = text ? JSON.parse(text) : undefined;
+      } catch {
+        // ignore
+      }
+      return { ok: res.ok, status: res.status, json, text };
+    },
+    [API_URL]
+  );
+
+  const groupUpdate = React.useCallback(
+    async (op: string, extra: any) => {
+      if (!isGroup) return;
+      setGroupActionBusy(true);
+      try {
+        const resp = await groupPost('/groups/update', { conversationId: activeConversationId, op, ...(extra || {}) });
+        if (!resp.ok) {
+          const msg = (resp.json && typeof resp.json.message === 'string' ? resp.json.message : resp.text) || 'Request failed';
+          showAlert('Group update failed', `${msg}`.trim());
+          return;
+        }
+        setGroupRefreshNonce((v) => v + 1);
+      } finally {
+        setGroupActionBusy(false);
+      }
+    },
+    [isGroup, groupPost, activeConversationId, showAlert]
+  );
+
+  const groupLeave = React.useCallback(async () => {
+    if (!isGroup) return;
+    const ok = promptConfirm
+      ? await promptConfirm(
+          'Leave group?',
+          'You will stop receiving new messages. This chat will remain in your Chats list as read-only until you remove it.',
+          { confirmText: 'Leave', cancelText: 'Cancel', destructive: true }
+        )
+      : true;
+    if (!ok) return;
+    setGroupActionBusy(true);
+    try {
+      const resp = await groupPost('/groups/leave', { conversationId: activeConversationId });
+      if (!resp.ok) {
+        const msg = (resp.json && typeof resp.json.message === 'string' ? resp.json.message : resp.text) || 'Request failed';
+        showAlert('Leave failed', `${msg}`.trim());
+        return;
+      }
+      setToast({ kind: 'success', message: 'Left group' });
+      setGroupMeta((prev) => (prev ? { ...prev, meStatus: 'left' } : prev));
+      setGroupRefreshNonce((v) => v + 1);
+    } finally {
+      setGroupActionBusy(false);
+    }
+  }, [isGroup, groupPost, activeConversationId, promptConfirm, showAlert]);
+
+  const groupKick = React.useCallback(
+    (targetSub: string) => {
+      if (!isGroup) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showAlert('Not connected', 'WebSocket is not connected.');
+        return;
+      }
+      ws.send(JSON.stringify({ action: 'kick', conversationId: activeConversationId, targetSub, createdAt: Date.now() }));
+    },
+    [isGroup, activeConversationId, showAlert]
+  );
 
   const closeWs = React.useCallback(() => {
     if (wsReconnectTimerRef.current) {
@@ -3044,7 +3655,7 @@ export default function ChatScreen({
                 ? normalizeUser(payload.user)
                 : '';
 
-        const isPayloadDm =
+        const isPayloadChat =
           typeof payload?.conversationId === 'string' && payload?.conversationId !== 'global';
         const isDifferentConversation = payload?.conversationId !== activeConv;
         const payloadSub = typeof payload?.userSub === 'string' ? payload.userSub : '';
@@ -3052,19 +3663,34 @@ export default function ChatScreen({
           (payloadSub && myUserId ? payloadSub !== myUserId : payloadUserLower !== myUserLower);
         const hasText = typeof payload?.text === 'string';
         if (
-          isPayloadDm &&
+          isPayloadChat &&
           isDifferentConversation &&
           fromOtherUser &&
           hasText &&
           typeof payload.conversationId === 'string'
         ) {
-          // Prefer display string when available; fall back to userLower for older deployments.
+          // For group DMs, prefer server-provided groupTitle.
           const senderLabel =
+            (typeof payload.groupTitle === 'string' && payload.groupTitle) ||
             (typeof payload.user === 'string' && payload.user) ||
             (typeof payload.userLower === 'string' && payload.userLower) ||
             'someone';
           const senderSub = typeof payload.userSub === 'string' ? payload.userSub : undefined;
           onNewDmNotificationRef.current?.(payload.conversationId, senderLabel, senderSub);
+        }
+
+        // Group admin "kick": eject from active conversation (client-side navigation)
+        if (payload && payload.type === 'kicked' && payload.conversationId === activeConv) {
+          try {
+            setToast({ kind: 'error', message: 'You were kicked from the chat' });
+          } catch {
+            // ignore
+          }
+          try {
+            onKickedFromConversationRef.current?.(String(payload.conversationId));
+          } catch {
+            // ignore
+          }
         }
 
         // Read receipt events (broadcast by backend)
@@ -3439,11 +4065,14 @@ export default function ChatScreen({
             reactions: normalizeReactions((it as any)?.reactions),
             rawText: typeof it.text === 'string' ? String(it.text) : '',
             encrypted: parseEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
+            groupEncrypted: parseGroupEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
             text:
               typeof it.deletedAt === 'number'
                 ? ''
                 : parseEncrypted(typeof it.text === 'string' ? String(it.text) : '')
                   ? ENCRYPTED_PLACEHOLDER
+                  : parseGroupEncrypted(typeof it.text === 'string' ? String(it.text) : '')
+                    ? ENCRYPTED_PLACEHOLDER
                   : typeof it.text === 'string'
                     ? String(it.text)
                     : '',
@@ -3536,6 +4165,10 @@ export default function ChatScreen({
     if (!currentInput.trim() && (!currentPendingMedia || currentPendingMedia.length === 0)) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected');
+      return;
+    }
+    if (isGroup && groupMeta && groupMeta.meStatus !== 'active') {
+      showAlert('Read-only', 'You have left this group and can no longer send messages.');
       return;
     }
 
@@ -3657,6 +4290,86 @@ export default function ChatScreen({
         const enc = encryptChatMessageV1(outgoingText, myPrivateKey, peerPublicKey);
         outgoingText = JSON.stringify(enc);
       }
+    } else if (isGroup) {
+      if (!myPrivateKey) {
+        showAlert('Encryption not ready', 'Missing your private key on this device.');
+        restoreDraftIfUnchanged();
+        return;
+      }
+      if (!myUserId) {
+        showAlert('Encryption not ready', 'Missing your user identity.');
+        restoreDraftIfUnchanged();
+        return;
+      }
+      const activeMembers = groupMembers.filter((m) => m.status === 'active').map((m) => m.memberSub);
+      if (activeMembers.length < 2) {
+        showAlert('Group not ready', 'No active members found.');
+        restoreDraftIfUnchanged();
+        return;
+      }
+      // Require keys for all active members (product rule).
+      for (const sub of activeMembers) {
+        if (sub === myUserId) continue;
+        if (!groupPublicKeyBySub[sub]) {
+          showAlert('Encryption not ready', "Can't find a group member's public key.");
+          restoreDraftIfUnchanged();
+          return;
+        }
+      }
+
+      // Generate per-message key first (used for message + attachment wraps).
+      const messageKeyBytes = new Uint8Array(getRandomBytes(32));
+
+      // Build plaintext to encrypt.
+      let plaintextToEncrypt = outgoingText;
+      let groupMediaPathsToSend: string[] | undefined = undefined;
+      if (originalPendingMedia && originalPendingMedia.length) {
+        try {
+          setIsUploading(true);
+          const caption = originalInput.trim();
+          const envs: GroupMediaEnvelopeV1[] = [];
+          for (const item of originalPendingMedia) {
+            // eslint-disable-next-line no-await-in-loop
+            const gEnv = await uploadPendingMediaGroupEncrypted(item, activeConversationId, messageKeyBytes, caption);
+            envs.push(gEnv);
+          }
+          const gAny: GroupMediaEnvelope =
+            envs.length === 1
+              ? envs[0]
+              : { type: 'gdm_media_v2', v: 2, caption: caption || undefined, items: envs.map((e) => ({ media: e.media, wrap: e.wrap })) };
+          plaintextToEncrypt = JSON.stringify(gAny);
+          groupMediaPathsToSend = envs.flatMap((e) => [e.media.path, e.media.thumbPath].filter(Boolean)).map(String);
+        } catch (e: any) {
+          showAlert('Upload Failed', e?.message ?? 'Failed to upload media');
+          restoreDraftIfUnchanged();
+          return;
+        } finally {
+          setIsUploading(false);
+        }
+      }
+
+      const plainBytes = new TextEncoder().encode(plaintextToEncrypt);
+      const msgCipher = aesGcmEncryptBytes(messageKeyBytes, plainBytes);
+
+      // Wrap messageKey for each active member (including me).
+      const messageKeyHex = bytesToHex(messageKeyBytes);
+      const wraps: Record<string, EncryptedChatPayloadV1> = {};
+      for (const sub of activeMembers) {
+        const pk = sub === myUserId ? derivePublicKey(myPrivateKey) : groupPublicKeyBySub[sub];
+        wraps[sub] = encryptChatMessageV1(messageKeyHex, myPrivateKey, pk);
+      }
+
+      const payload: EncryptedGroupPayloadV1 = {
+        type: 'gdm_v1',
+        v: 1,
+        alg: 'aes-256-gcm+wraps-v1',
+        iv: msgCipher.ivHex,
+        ciphertext: msgCipher.ciphertextHex,
+        wraps,
+      };
+      outgoingText = JSON.stringify(payload);
+      // For backend deletion support (like DM), send opaque keys.
+      if (typeof groupMediaPathsToSend !== 'undefined') dmMediaPathsToSend = groupMediaPathsToSend;
     } else if (originalPendingMedia && originalPendingMedia.length) {
       try {
         setIsUploading(true);
@@ -3690,6 +4403,7 @@ export default function ChatScreen({
     if (!originalPendingMedia || originalPendingMedia.length === 0) {
       const optimisticRaw = outgoingText;
       const optimisticEncrypted = parseEncrypted(optimisticRaw);
+      const optimisticGroupEncrypted = parseGroupEncrypted(optimisticRaw);
       const optimisticPlaintext = originalInput.trim();
       const optimisticMsg: ChatMessage = {
         id: clientMessageId,
@@ -3698,10 +4412,16 @@ export default function ChatScreen({
         userSub: myUserId ?? undefined,
         rawText: optimisticRaw,
         encrypted: optimisticEncrypted ?? undefined,
+        groupEncrypted: optimisticGroupEncrypted ?? undefined,
         // If it's an encrypted DM, only show plaintext optimistically when autoDecrypt is enabled.
-        decryptedText: isDm && optimisticEncrypted && autoDecrypt ? optimisticPlaintext : undefined,
+        decryptedText:
+          isDm && optimisticEncrypted && autoDecrypt
+            ? optimisticPlaintext
+            : isGroup && optimisticGroupEncrypted && autoDecrypt
+              ? optimisticPlaintext
+              : undefined,
         text:
-          isDm && optimisticEncrypted
+          (isDm && optimisticEncrypted) || (isGroup && optimisticGroupEncrypted)
             ? (autoDecrypt ? optimisticPlaintext : ENCRYPTED_PLACEHOLDER)
             : optimisticEncrypted
               ? ENCRYPTED_PLACEHOLDER
@@ -3904,13 +4624,18 @@ export default function ChatScreen({
   const onPressMessage = React.useCallback(
     (msg: ChatMessage) => {
       if (msg.deletedAt) return;
-      if (!msg.encrypted) return;
+      if (!msg.encrypted && !msg.groupEncrypted) return;
       try {
         const readAt = Math.floor(Date.now() / 1000);
-        const plaintext = decryptForDisplay(msg);
-        const dmEnv = isDm ? parseDmMediaEnvelope(plaintext) : null;
+        const groupDec = msg.groupEncrypted ? decryptGroupForDisplay(msg) : null;
+        const plaintext = groupDec ? groupDec.plaintext : decryptForDisplay(msg);
+
+        const dmEnv = isDm && !groupDec ? parseDmMediaEnvelope(plaintext) : null;
         const dmItems = dmEnv ? normalizeDmMediaItems(dmEnv) : [];
-        const dmMediaList: ChatMediaItem[] = dmItems.map((it) => ({
+        const gEnv = isGroup && groupDec ? parseGroupMediaEnvelope(plaintext) : null;
+        const gItems = gEnv ? normalizeGroupMediaItems(gEnv) : [];
+
+        const mediaList: ChatMediaItem[] = (dmEnv ? dmItems : gEnv ? gItems : []).map((it) => ({
           path: it.media.path,
           thumbPath: it.media.thumbPath,
           kind: it.media.kind,
@@ -3919,30 +4644,34 @@ export default function ChatScreen({
           fileName: it.media.fileName,
           size: it.media.size,
         }));
-        const isFromMe = !!myPublicKey && msg.encrypted?.senderPublicKey === myPublicKey;
+
+        const isFromMe = groupDec
+          ? (!!myUserId && !!msg.userSub && String(msg.userSub) === String(myUserId))
+          : (!!myPublicKey && msg.encrypted?.senderPublicKey === myPublicKey);
         setMessages((prev) =>
           prev.map((m) =>
             m.id === msg.id
               ? {
                   ...m,
                   decryptedText: plaintext,
-                  text: dmEnv ? (dmEnv.caption ?? '') : plaintext,
-                  media: dmMediaList.length ? dmMediaList[0] : m.media,
-                  mediaList: dmMediaList.length ? dmMediaList : undefined,
+                  groupKeyHex: groupDec ? groupDec.messageKeyHex : m.groupKeyHex,
+                  text: dmEnv ? (dmEnv.caption ?? '') : gEnv ? (gEnv.caption ?? '') : plaintext,
+                  media: mediaList.length ? mediaList[0] : m.media,
+                  mediaList: mediaList.length ? mediaList : undefined,
                   expiresAt:
                     // TTL-from-read:
                     // - Incoming messages: start countdown at decrypt time.
                     // - Outgoing messages: do NOT start countdown when you decrypt your own message;
                     //   only start when the peer decrypts (via read receipt).
-                    !isFromMe && m.ttlSeconds && m.ttlSeconds > 0
+                    !isFromMe && isDm && m.ttlSeconds && m.ttlSeconds > 0
                       ? (m.expiresAt ?? readAt + m.ttlSeconds)
                       : m.expiresAt,
                 }
               : m
           )
         );
-        if (!isFromMe) sendReadReceipt(msg.createdAt);
-      if (!isFromMe) markMySeen(msg.createdAt, readAt);
+        if (!isFromMe && isDm) sendReadReceipt(msg.createdAt);
+        if (!isFromMe) markMySeen(msg.createdAt, readAt);
       } catch (e: any) {
         const rawMsg = typeof e?.message === 'string' ? e.message : '';
         const lower = rawMsg.toLowerCase();
@@ -3953,7 +4682,17 @@ export default function ChatScreen({
         openInfo("Couldn't decrypt message", hint);
       }
     },
-    [decryptForDisplay, myPublicKey, sendReadReceipt, isDm, markMySeen, openInfo]
+    [
+      decryptForDisplay,
+      decryptGroupForDisplay,
+      myPublicKey,
+      myUserId,
+      sendReadReceipt,
+      isDm,
+      isGroup,
+      markMySeen,
+      openInfo,
+    ]
   );
 
   const openMessageActions = React.useCallback(
@@ -3994,16 +4733,17 @@ export default function ChatScreen({
     (target: ChatMessage) => {
       if (!target) return;
       if (target.deletedAt) return;
-      if (target.encrypted && !target.decryptedText) {
+      if ((target.encrypted || target.groupEncrypted) && !target.decryptedText) {
         openInfo('Decrypt first', 'Decrypt this message before editing it');
         return;
       }
       let seed = '';
-      if (target.encrypted) {
+      if (target.encrypted || target.groupEncrypted) {
         const plain = String(target.decryptedText || '');
         const dmEnv = parseDmMediaEnvelope(plain);
-        // If this is a DM media message, edit the caption (not the raw JSON envelope).
-        seed = dmEnv ? String(dmEnv.caption || '') : plain;
+        const gEnv = parseGroupMediaEnvelope(plain);
+        // If this is an encrypted media message, edit the caption (not the raw JSON envelope).
+        seed = dmEnv ? String(dmEnv.caption || '') : gEnv ? String(gEnv.caption || '') : plain;
       } else {
         const raw = String(target.rawText ?? target.text ?? '');
         // Global media messages store a ChatEnvelope JSON; edit the caption (env.text).
@@ -4889,7 +5629,9 @@ export default function ChatScreen({
           {headerTop ? <View style={styles.headerTopSlot}>{headerTop}</View> : null}
           <View style={styles.titleRow}>
             <Text style={[styles.title, isDark ? styles.titleDark : null]} numberOfLines={1}>
-              {peer ? `DM with ${peer}` : 'Global Chat'}
+              {peer
+                ? (isGroup ? (groupMeta?.groupName?.trim() ? groupMeta.groupName.trim() : peer) : `DM with ${peer}`)
+                : 'Global Chat'}
             </Text>
             <View style={styles.headerTools}>
               <Pressable
@@ -4952,7 +5694,7 @@ export default function ChatScreen({
                         size={16}
                       />
                     ) : null}
-                    {isDm ? (
+                    {isEncryptedChat ? (
                       <Pressable
                         style={({ pressed }) => [
                           styles.dmSettingsCaretBtn,
@@ -4983,10 +5725,11 @@ export default function ChatScreen({
             })()}
           </View>
 
-          {isDm ? (
+          {isEncryptedChat ? (
             <>
               {dmSettingsOpen ? (
-                <View style={styles.dmSettingsRow}>
+                isDm ? (
+                  <View style={styles.dmSettingsRow}>
                 <View style={styles.dmSettingSlotLeft}>
                   <View style={styles.dmSettingGroup}>
                     <Text
@@ -5102,7 +5845,78 @@ export default function ChatScreen({
                     )}
                   </View>
                 </View>
-              </View>
+                  </View>
+                ) : (
+                  <View style={styles.dmSettingsRow}>
+                    <View style={styles.dmSettingSlotLeft}>
+                      <View style={styles.dmSettingGroup}>
+                        <Text
+                          style={[
+                            styles.decryptLabel,
+                            isDark ? styles.decryptLabelDark : null,
+                            styles.dmSettingLabel,
+                            dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          Members
+                        </Text>
+                        <Pressable
+                          style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                          disabled={groupActionBusy}
+                          onPress={() => setGroupMembersOpen(true)}
+                        >
+                          <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                            {`${groupMembers.length || 0}`}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </View>
+
+                    <View style={styles.dmSettingSlotCenter}>
+                      <View style={styles.dmSettingGroup}>
+                        <Text
+                          style={[
+                            styles.decryptLabel,
+                            isDark ? styles.decryptLabelDark : null,
+                            styles.dmSettingLabel,
+                            dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          Status
+                        </Text>
+                        <Text style={[styles.welcomeStatusText, isDark ? styles.statusTextDark : null]} numberOfLines={1}>
+                          {groupMeta?.meStatus === 'active' ? 'Active' : groupMeta?.meStatus || '—'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.dmSettingSlotRight}>
+                      <View style={[styles.dmSettingGroup, { justifyContent: 'flex-end', gap: 10 }]}>
+                        {groupMeta?.meIsAdmin ? (
+                          <Pressable
+                            style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                            disabled={groupActionBusy}
+                            onPress={() => {
+                              setGroupNameDraft(groupMeta?.groupName || '');
+                              setGroupNameEditOpen(true);
+                            }}
+                          >
+                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Name</Text>
+                          </Pressable>
+                        ) : null}
+                        <Pressable
+                          style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                          disabled={groupActionBusy}
+                          onPress={() => void groupLeave()}
+                        >
+                          <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Leave</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  </View>
+                )
               ) : null}
             </>
           ) : null}
@@ -5206,7 +6020,7 @@ export default function ChatScreen({
           const seenLabel = isOutgoing ? outgoingSeenLabel : null;
 
           const envelope =
-            !item.encrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;
+            !item.encrypted && !item.groupEncrypted && !isDm ? parseChatEnvelope(item.rawText ?? item.text) : null;
           const envMediaList = envelope ? normalizeChatMediaList(envelope.media) : [];
           // Only treat it as a "media envelope" if it actually has media.
           // (Otherwise a random JSON message could parse as an envelope and we'd hide the text.)
@@ -5249,7 +6063,9 @@ export default function ChatScreen({
           // IMPORTANT: if the message is still encrypted (not decrypted yet),
           // always render it as a normal encrypted-text bubble so media placeholders
           // don't appear larger than encrypted text placeholders.
-          const hasMedia = !!mediaList.length && (!item.encrypted || !!item.decryptedText);
+          const isStillEncrypted =
+            (!!item.encrypted || !!item.groupEncrypted) && !item.decryptedText;
+          const hasMedia = !!mediaList.length && !isStillEncrypted;
           const imageKeyPath = mediaLooksImage ? (media?.thumbPath || media?.path) : undefined;
           const imageAspect =
             imageKeyPath && imageAspectByPath[imageKeyPath] ? imageAspectByPath[imageKeyPath] : undefined;
@@ -5274,8 +6090,8 @@ export default function ChatScreen({
 
           const rowGutter = !isOutgoing && showAvatarForIncoming ? AVATAR_GUTTER : 0;
           const capped = getCappedMediaSize(thumbAspect, isOutgoing ? windowWidth : windowWidth - rowGutter);
-          const hideMetaUntilDecrypted = !!item.encrypted && !item.decryptedText;
-          const canReact = !isDeleted && (!item.encrypted || !!item.decryptedText);
+          const hideMetaUntilDecrypted = isStillEncrypted;
+          const canReact = !isDeleted && !isStillEncrypted;
           const reactionEntriesVisible = canReact ? reactionEntries : [];
           const metaPrefix =
             hideMetaUntilDecrypted || isOutgoing ? '' : `${item.user ?? 'anon'} · `;
@@ -5551,13 +6367,14 @@ export default function ChatScreen({
                             mediaList={mediaList}
                             width={capped.w}
                             height={capped.h}
-                            isDm={isDm}
+                            isDm={isEncryptedChat}
                             isDark={isDark}
                             isOutgoing={isOutgoing}
                             mediaUrlByPath={mediaUrlByPath}
                             dmThumbUriByPath={dmThumbUriByPath}
                             onOpen={(idx, media) => {
                               if (isDm) void openDmMediaViewer(item, idx);
+                              else if (isGroup) void openGroupMediaViewer(item, idx);
                               else openViewer(mediaList, idx);
                             }}
                           />
@@ -5917,10 +6734,12 @@ export default function ChatScreen({
                 style={[
                   styles.pickBtn,
                   isDark ? styles.pickBtnDark : null,
-                  isUploading || inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null,
+                  isUploading || inlineEditTargetId || (isGroup && groupMeta?.meStatus !== 'active')
+                    ? (isDark ? styles.btnDisabledDark : styles.btnDisabled)
+                    : null,
                 ]}
                 onPress={handlePickMedia}
-                disabled={isUploading || !!inlineEditTargetId}
+                disabled={isUploading || !!inlineEditTargetId || (isGroup && groupMeta?.meStatus !== 'active')}
               >
                 <Text style={[styles.pickTxt, isDark ? styles.pickTxtDark : null]}>＋</Text>
               </Pressable>
@@ -5933,6 +6752,8 @@ export default function ChatScreen({
                 placeholder={
                   inlineEditTargetId
                     ? 'Finish editing above…'
+                    : isGroup && groupMeta?.meStatus !== 'active'
+                      ? 'Read‑only (left group)'
                     : pendingMedia.length
                       ? 'Add a caption (optional)…'
                       : 'Type a message'
@@ -5942,7 +6763,7 @@ export default function ChatScreen({
                 cursorColor={isDark ? '#ffffff' : '#111'}
                 value={input}
                 onChangeText={onChangeInput}
-                editable={!inlineEditTargetId && !isUploading}
+                editable={!inlineEditTargetId && !isUploading && !(isGroup && groupMeta?.meStatus !== 'active')}
                 onBlur={() => {
                   if (isTypingRef.current) sendTyping(false);
                 }}
@@ -5955,10 +6776,12 @@ export default function ChatScreen({
                   isDark ? styles.sendBtnDark : null,
                   isUploading
                     ? (isDark ? styles.sendBtnUploadingDark : styles.sendBtnUploading)
-                    : (inlineEditTargetId ? (isDark ? styles.btnDisabledDark : styles.btnDisabled) : null),
+                    : inlineEditTargetId || (isGroup && groupMeta?.meStatus !== 'active')
+                      ? (isDark ? styles.btnDisabledDark : styles.btnDisabled)
+                      : null,
                 ]}
                 onPress={sendMessage}
-                disabled={isUploading || !!inlineEditTargetId}
+                disabled={isUploading || !!inlineEditTargetId || (isGroup && groupMeta?.meStatus !== 'active')}
               >
                 {isUploading ? (
                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
@@ -6633,7 +7456,7 @@ export default function ChatScreen({
                   let kind: 'image' | 'video' | 'file' | null = null;
                   let hasMedia = false;
 
-                  if (t.encrypted) {
+                  if (t.encrypted || t.groupEncrypted) {
                     if (!t.decryptedText) {
                       return (
                         <View style={[styles.messageBubble, bubbleStyle]}>
@@ -6641,19 +7464,19 @@ export default function ChatScreen({
                         </View>
                       );
                     }
-                    const dmEnv = parseDmMediaEnvelope(String(t.decryptedText));
+                    const plain = String(t.decryptedText || '');
+                    const dmEnv = parseDmMediaEnvelope(plain);
                     const dmItems = dmEnv ? normalizeDmMediaItems(dmEnv) : [];
-                    if (dmItems.length) {
+                    const gEnv = parseGroupMediaEnvelope(plain);
+                    const gItems = gEnv ? normalizeGroupMediaItems(gEnv) : [];
+                    if (dmItems.length || gItems.length) {
                       hasMedia = true;
-                      caption = String(dmEnv?.caption || '');
-                      const first = dmItems[0].media;
+                      caption = String((dmEnv?.caption ?? gEnv?.caption) || '');
+                      const first = (dmItems[0]?.media ?? gItems[0]?.media) as any;
                       kind = (first.kind as any) || 'file';
-                      thumbUri =
-                        first.thumbPath && dmThumbUriByPath[first.thumbPath]
-                          ? dmThumbUriByPath[first.thumbPath]
-                          : null;
+                      thumbUri = null; // Decrypted thumbs are handled in the main chat list/media viewer.
                     } else {
-                      caption = String(t.decryptedText || '');
+                      caption = plain;
                     }
                   } else {
                     const raw = String(t.rawText ?? t.text ?? '');
@@ -7207,6 +8030,164 @@ export default function ChatScreen({
         </View>
       </Modal>
 
+      <Modal visible={groupNameEditOpen} transparent animationType="fade" onRequestClose={() => setGroupNameEditOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Group name</Text>
+            <TextInput
+              value={groupNameDraft}
+              onChangeText={setGroupNameDraft}
+              placeholder="Optional group name"
+              placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+              selectionColor={isDark ? '#ffffff' : '#111'}
+              cursorColor={isDark ? '#ffffff' : '#111'}
+              style={[styles.input, isDark ? styles.inputDark : null, { marginTop: 10 }]}
+              editable={!groupActionBusy}
+            />
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                disabled={groupActionBusy}
+                onPress={async () => {
+                  const name = groupNameDraft.trim();
+                  await groupUpdate('setName', { name });
+                  setGroupNameEditOpen(false);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Save
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setGroupNameEditOpen(false)}
+                disabled={groupActionBusy}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Cancel
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={groupMembersOpen} transparent animationType="fade" onRequestClose={() => setGroupMembersOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Members</Text>
+
+            {groupMeta?.meIsAdmin ? (
+              <View style={{ marginTop: 10 }}>
+                <TextInput
+                  value={groupAddMembersDraft}
+                  onChangeText={setGroupAddMembersDraft}
+                  placeholder="Add usernames (comma/space separated)"
+                  placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
+                  selectionColor={isDark ? '#ffffff' : '#111'}
+                  cursorColor={isDark ? '#ffffff' : '#111'}
+                  style={[styles.input, isDark ? styles.inputDark : null]}
+                  editable={!groupActionBusy}
+                />
+                <View style={[styles.summaryButtons, { justifyContent: 'flex-end' }]}>
+                  <Pressable
+                    style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                    disabled={groupActionBusy}
+                    onPress={async () => {
+                      const raw = groupAddMembersDraft.trim();
+                      if (!raw) return;
+                      const usernames = Array.from(new Set(raw.split(/[,\s]+/g).map((t) => t.trim().toLowerCase()).filter(Boolean)));
+                      if (!usernames.length) return;
+                      await groupUpdate('addMembers', { usernames });
+                      setGroupAddMembersDraft('');
+                    }}
+                  >
+                    <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Add</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+
+            <ScrollView style={{ marginTop: 10, maxHeight: 360 }}>
+              {groupMembers
+                .slice()
+                .sort((a, b) => (a.status === b.status ? (a.displayName || a.memberSub).localeCompare(b.displayName || b.memberSub) : a.status.localeCompare(b.status)))
+                .map((m) => {
+                  const label = m.displayName || m.memberSub.slice(0, 10);
+                  const isMe = !!myUserId && m.memberSub === myUserId;
+                  const canAdmin = !!groupMeta?.meIsAdmin && !isMe;
+                  const canKick = canAdmin && m.status === 'active';
+                  return (
+                    <View key={`gm:${m.memberSub}`} style={{ marginBottom: 10 }}>
+                      <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]} numberOfLines={1}>
+                        {label}{m.isAdmin ? ' (admin)' : ''} — {m.status}
+                      </Text>
+                      {canAdmin ? (
+                        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+                          <Pressable
+                            style={[
+                              styles.toolBtn,
+                              isDark ? styles.toolBtnDark : null,
+                              (groupActionBusy || !canKick) ? { opacity: 0.6 } : null,
+                            ]}
+                            disabled={groupActionBusy || !canKick}
+                            onPress={() => groupKick(m.memberSub)}
+                          >
+                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Kick</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                            disabled={groupActionBusy}
+                            onPress={async () => {
+                              if (m.status === 'banned') await groupUpdate('unban', { memberSub: m.memberSub });
+                              else await groupUpdate('ban', { memberSub: m.memberSub });
+                            }}
+                          >
+                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                              {m.status === 'banned' ? 'Unban' : 'Ban'}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                            disabled={groupActionBusy}
+                            onPress={async () => {
+                              await groupUpdate('removeMembers', { memberSubs: [m.memberSub] });
+                            }}
+                          >
+                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Remove</Text>
+                          </Pressable>
+                          {m.status === 'active' ? (
+                            <Pressable
+                              style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
+                              disabled={groupActionBusy}
+                              onPress={async () => {
+                                await groupUpdate(m.isAdmin ? 'demoteAdmin' : 'promoteAdmin', { memberSub: m.memberSub });
+                              }}
+                            >
+                              <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                                {m.isAdmin ? 'Demote' : 'Promote'}
+                              </Text>
+                            </Pressable>
+                          ) : null}
+                        </View>
+                      ) : null}
+                    </View>
+                  );
+                })}
+            </ScrollView>
+
+            <View style={styles.summaryButtons}>
+              <Pressable
+                style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
+                onPress={() => setGroupMembersOpen(false)}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal
         visible={viewerOpen}
         transparent
@@ -7232,6 +8213,8 @@ export default function ChatScreen({
                     ? (vs.globalItems?.length ?? 0)
                     : vs?.mode === 'dm'
                       ? (vs.dmItems?.length ?? 0)
+                      : vs?.mode === 'gdm'
+                        ? (vs.gdmItems?.length ?? 0)
                       : 0;
                 const idx = vs ? vs.index : 0;
                 const name =
@@ -7239,6 +8222,8 @@ export default function ChatScreen({
                     ? vs.globalItems?.[idx]?.fileName
                     : vs?.mode === 'dm'
                       ? vs.dmItems?.[idx]?.media?.fileName
+                      : vs?.mode === 'gdm'
+                        ? vs.gdmItems?.[idx]?.media?.fileName
                       : undefined;
                 const title = name || (count > 1 ? `Attachment ${idx + 1}/${count}` : 'Attachment');
                 return <Text style={styles.viewerTitle}>{title}</Text>;
@@ -7271,6 +8256,8 @@ export default function ChatScreen({
                     ? (vs.globalItems?.length ?? 0)
                     : vs.mode === 'dm'
                       ? (vs.dmItems?.length ?? 0)
+                      : vs.mode === 'gdm'
+                        ? (vs.gdmItems?.length ?? 0)
                       : 0;
                 if (!count) return <Text style={styles.viewerFallback}>No preview available.</Text>;
 
@@ -7306,6 +8293,15 @@ export default function ChatScreen({
                                   it.media.kind === 'video' ? 'video' : it.media.kind === 'image' ? 'image' : 'file';
                                 return { url, kind, fileName: it.media.fileName };
                               })()
+                            : vs.mode === 'gdm'
+                              ? (() => {
+                                  const it = vs.gdmItems?.[i];
+                                  if (!it?.media?.path) return null;
+                                  const url = dmFileUriByPath[it.media.path] || '';
+                                  const kind =
+                                    it.media.kind === 'video' ? 'video' : it.media.kind === 'image' ? 'image' : 'file';
+                                  return { url, kind, fileName: it.media.fileName };
+                                })()
                             : null;
 
                       const url = item?.url || '';
@@ -7429,7 +8425,7 @@ const styles = StyleSheet.create({
   headerTopSlot: {
     // Small, consistent breathing room between the app-level headerTop controls
     // (Global/DM switch, menu, DM search) and the chat title row.
-    marginBottom: 3,
+    marginBottom: 6,
   },
   titleRow: {
     flexDirection: 'row',
@@ -7447,7 +8443,7 @@ const styles = StyleSheet.create({
   welcomeStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, flexShrink: 0 },
   welcomeStatusText: { fontSize: 12, color: '#666', fontWeight: '800' },
   headerSubRow: {
-    marginTop: 6,
+    marginTop: 3,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',

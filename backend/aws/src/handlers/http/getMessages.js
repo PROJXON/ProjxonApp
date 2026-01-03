@@ -9,7 +9,7 @@
 // - BLOCKS_TABLE (optional): PK blockerSub (String), SK blockedSub (String)
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, QueryCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, QueryCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -35,6 +35,38 @@ exports.handler = async (event) => {
     const callerSub = typeof claims.sub === 'string' ? String(claims.sub).trim() : '';
     if (!callerSub) return { statusCode: 401, body: 'Unauthorized' };
 
+    // Group DM access control: gdm#<groupId>
+    // - active: full access
+    // - left/banned: read-only history up to leftAt/bannedAt
+    // - not a member: 403
+    let membershipCutoffMs = null;
+    if (typeof conversationId === 'string' && conversationId.startsWith('gdm#')) {
+      const groupId = conversationId.slice('gdm#'.length).trim();
+      if (!groupId) return { statusCode: 400, body: 'Invalid group conversationId' };
+      const membersTable = process.env.GROUP_MEMBERS_TABLE;
+      if (!membersTable) return { statusCode: 500, body: 'GROUP_MEMBERS_TABLE not configured' };
+      const mem = await ddb.send(
+        new GetCommand({
+          TableName: membersTable,
+          Key: { groupId, memberSub: callerSub },
+          ProjectionExpression: 'memberSub, #s, leftAt, bannedAt',
+          ExpressionAttributeNames: { '#s': 'status' },
+        })
+      );
+      const it = mem?.Item;
+      if (!it) return { statusCode: 403, body: 'Forbidden' };
+      const status = typeof it.status === 'string' ? String(it.status) : '';
+      if (status === 'left') {
+        membershipCutoffMs = typeof it.leftAt === 'number' ? Number(it.leftAt) : 0;
+      } else if (status === 'banned') {
+        membershipCutoffMs = typeof it.bannedAt === 'number' ? Number(it.bannedAt) : 0;
+      } else if (status === 'active') {
+        membershipCutoffMs = null;
+      } else {
+        return { statusCode: 403, body: 'Forbidden' };
+      }
+    }
+
     const queryInput = {
       TableName: process.env.MESSAGES_TABLE,
       KeyConditionExpression: 'conversationId = :c',
@@ -44,9 +76,15 @@ exports.handler = async (event) => {
     };
 
     // Cursor-style paging: fetch older than a given createdAt (epoch ms).
-    if (typeof before === 'number' && Number.isFinite(before) && before > 0) {
+    let effectiveBefore = typeof before === 'number' && Number.isFinite(before) && before > 0 ? before : null;
+    if (typeof membershipCutoffMs === 'number' && Number.isFinite(membershipCutoffMs) && membershipCutoffMs > 0) {
+      // Because KeyCondition is createdAt < :b, use cutoff+1 to include messages at exactly cutoff.
+      const cutoffBefore = membershipCutoffMs + 1;
+      effectiveBefore = effectiveBefore != null ? Math.min(effectiveBefore, cutoffBefore) : cutoffBefore;
+    }
+    if (typeof effectiveBefore === 'number' && Number.isFinite(effectiveBefore) && effectiveBefore > 0) {
       queryInput.KeyConditionExpression = 'conversationId = :c AND createdAt < :b';
-      queryInput.ExpressionAttributeValues[':b'] = before;
+      queryInput.ExpressionAttributeValues[':b'] = effectiveBefore;
     }
 
     const resp = await ddb.send(

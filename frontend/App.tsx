@@ -41,7 +41,6 @@ import {
   DefaultContent,
   FederatedProviderButtons,
 } from '@aws-amplify/ui-react-native/src/Authenticator/common';
-import { useFieldValues } from '@aws-amplify/ui-react-native/src/Authenticator/hooks';
 import { deleteUser, fetchUserAttributes } from 'aws-amplify/auth';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import { getUrl, uploadData } from 'aws-amplify/storage';
@@ -883,7 +882,14 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   // Backed by AsyncStorage so it survives restarts (per-device is OK for now).
   const [dmThreads, setDmThreads] = useState<Record<string, { peer: string; lastActivityAt: number }>>(() => ({}));
   const [serverConversations, setServerConversations] = React.useState<
-    Array<{ conversationId: string; peerDisplayName?: string; peerSub?: string; lastMessageAt?: number }>
+    Array<{
+      conversationId: string;
+      peerDisplayName?: string;
+      peerSub?: string;
+      conversationKind?: 'dm' | 'group';
+      memberStatus?: 'active' | 'left' | 'banned';
+      lastMessageAt?: number;
+    }>
   >([]);
   const [chatsLoading, setChatsLoading] = React.useState<boolean>(false);
   const [conversationsCacheAt, setConversationsCacheAt] = React.useState<number>(0);
@@ -1101,6 +1107,15 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           conversationId: String(c?.conversationId || ''),
           peerDisplayName: c?.peerDisplayName ? String(c.peerDisplayName) : undefined,
           peerSub: c?.peerSub ? String(c.peerSub) : undefined,
+          conversationKind: c?.conversationKind === 'group' ? 'group' : c?.conversationKind === 'dm' ? 'dm' : undefined,
+          memberStatus:
+            c?.memberStatus === 'active'
+              ? 'active'
+              : c?.memberStatus === 'left'
+                ? 'left'
+                : c?.memberStatus === 'banned'
+                  ? 'banned'
+                  : undefined,
           lastMessageAt: Number(c?.lastMessageAt ?? 0),
         }))
         .filter((c: any) => c.conversationId);
@@ -1346,6 +1361,8 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         .map((c) => ({
           conversationId: c.conversationId,
           peer: c.peerDisplayName || mapUnread[c.conversationId]?.user || 'Direct Message',
+          conversationKind: c.conversationKind,
+          memberStatus: c.memberStatus,
           lastActivityAt: Number(c.lastMessageAt || 0),
           unreadCount: mapUnread[c.conversationId]?.count || 0,
         }))
@@ -1443,34 +1460,118 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   }, []);
 
   const startDM = async () => {
-      const trimmed = peerInput.trim();
-      const normalizedInput = trimmed.toLowerCase();
+      const raw = peerInput.trim();
       const normalizedCurrent = currentUsername.trim().toLowerCase();
-      if (!trimmed || normalizedInput === normalizedCurrent) {
-        setSearchError(
-          normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username'
-        );
+      if (!raw) {
+        setSearchError('Enter a username');
         return;
       }
 
-      const { tokens } = await fetchAuthSession();
-      const idToken = tokens?.idToken?.toString();
+      // Support group DMs: comma/space separated usernames.
+      const tokens = raw
+        .split(/[,\s]+/g)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const normalizedTokens = Array.from(new Set(tokens.map((t) => t.toLowerCase())));
+
+      // 1:1 DM (existing behavior)
+      if (normalizedTokens.length === 1) {
+        const trimmed = tokens[0];
+        const normalizedInput = trimmed.toLowerCase();
+        if (!trimmed || normalizedInput === normalizedCurrent) {
+          setSearchError(normalizedInput === normalizedCurrent ? 'Not you silly!' : 'Enter a username');
+          return;
+        }
+
+        const { tokens: authTokens } = await fetchAuthSession();
+        const idToken = authTokens?.idToken?.toString();
+        if (!idToken) {
+          setSearchError('Unable to authenticate');
+          return;
+        }
+
+        const res = await fetch(`${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(trimmed)}`, {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        if (res.status === 404) {
+          setSearchError('No such user!');
+          return;
+        }
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          console.warn('getUser failed', res.status, text);
+          let msg = text;
+          try {
+            const parsed = text ? JSON.parse(text) : null;
+            if (parsed && typeof parsed.message === 'string') msg = parsed.message;
+          } catch {
+            // ignore
+          }
+          setSearchError(msg ? `User lookup failed (${res.status}): ${msg}` : `User lookup failed (${res.status})`);
+          return;
+        }
+
+        const data = await res.json();
+        const peerSub = String(data.sub || data.userSub || '').trim();
+        const canonical = String(data.displayName || data.preferred_username || data.username || trimmed).trim();
+        if (!peerSub) {
+          console.warn('getUser ok but missing sub', data);
+          setSearchError('User lookup missing sub (check getUser response JSON)');
+          return;
+        }
+        if (blockedSubs.includes(peerSub)) {
+          setSearchError('That user is in your Blocklist. Unblock them to start a DM.');
+          return;
+        }
+        const normalizedCanonical = canonical.toLowerCase();
+        if (normalizedCanonical === normalizedCurrent) {
+          setSearchError('Not you silly!');
+          return;
+        }
+        const mySub = (await fetchUserAttributes()).sub as string | undefined;
+        if (!mySub) {
+          setSearchError('Unable to authenticate');
+          return;
+        }
+        if (peerSub === mySub) {
+          setSearchError('Not you silly!');
+          return;
+        }
+        const [a, b] = [mySub, peerSub].sort();
+        const id = `dm#${a}#${b}`;
+        setPeer(canonical);
+        setConversationId(id);
+        upsertDmThread(id, canonical, Date.now());
+        setSearchOpen(false);
+        setPeerInput('');
+        setSearchError(null);
+        return;
+      }
+
+      // Group DM start
+      if (normalizedTokens.length > 7) {
+        setSearchError('Too many members (max 8 including you).');
+        return;
+      }
+      if (normalizedTokens.includes(normalizedCurrent)) {
+        setSearchError("Don't include yourself.");
+        return;
+      }
+
+      const { tokens: authTokens } = await fetchAuthSession();
+      const idToken = authTokens?.idToken?.toString();
       if (!idToken) {
         setSearchError('Unable to authenticate');
         return;
       }
 
-      const res = await fetch(
-        `${API_URL.replace(/\/$/, '')}/users?username=${encodeURIComponent(trimmed)}`,
-        { headers: { Authorization: `Bearer ${idToken}` } }
-      );
-      if (res.status === 404) {
-        setSearchError('No such user!');
-        return;
-      }
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/groups/start`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernames: normalizedTokens }),
+      });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        console.warn('getUser failed', res.status, text);
         let msg = text;
         try {
           const parsed = text ? JSON.parse(text) : null;
@@ -1478,41 +1579,19 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         } catch {
           // ignore
         }
-        setSearchError(msg ? `User lookup failed (${res.status}): ${msg}` : `User lookup failed (${res.status})`);
+        setSearchError(msg ? `Group start failed (${res.status}): ${msg}` : `Group start failed (${res.status})`);
         return;
       }
-
-      const data = await res.json();
-      const peerSub = String(data.sub || data.userSub || '').trim();
-      const canonical = String(data.displayName || data.preferred_username || data.username || trimmed).trim();
-      if (!peerSub) {
-        console.warn('getUser ok but missing sub', data);
-        setSearchError('User lookup missing sub (check getUser response JSON)');
+      const data = await res.json().catch(() => ({}));
+      const convId = String(data.conversationId || '').trim();
+      const title = String(data.title || 'Group DM').trim();
+      if (!convId) {
+        setSearchError('Group start missing conversationId');
         return;
       }
-      if (blockedSubs.includes(peerSub)) {
-        setSearchError('That user is in your Blocklist. Unblock them to start a DM.');
-        return;
-      }
-      const normalizedCanonical = canonical.toLowerCase();
-      if (normalizedCanonical === normalizedCurrent) {
-        setSearchError('Not you silly!');
-        return;
-      }
-      const mySub = (await fetchUserAttributes()).sub as string | undefined;
-      if (!mySub) {
-        setSearchError('Unable to authenticate');
-        return;
-      }
-      if (peerSub === mySub) {
-        setSearchError('Not you silly!');
-        return;
-      }
-      const [a, b] = [mySub, peerSub].sort();
-      const id = `dm#${a}#${b}`;
-      setPeer(canonical);
-      setConversationId(id);
-      upsertDmThread(id, canonical, Date.now());
+      setPeer(title);
+      setConversationId(convId);
+      upsertDmThread(convId, title, Date.now());
       setSearchOpen(false);
       setPeerInput('');
       setSearchError(null);
@@ -1528,15 +1607,25 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     (targetConversationId: string) => {
       if (!targetConversationId) return;
       setConversationId(targetConversationId);
-      // Best-effort: we can't derive displayName from dm#sub#sub, so use unread cache if available.
+      // Best-effort title selection:
+      // 1) server conversations (authoritative titles for groups + DMs)
+      // 2) unread cache (push/unreads can provide a title)
+      // 3) fallback by kind
+      const server = serverConversations.find((c) => c.conversationId === targetConversationId);
       const cached = unreadDmMap[targetConversationId];
-      if (cached?.user) setPeer(cached.user);
-      else if (targetConversationId === 'global') setPeer(null);
-      else setPeer('Direct Message');
+      const kind =
+        server?.conversationKind ||
+        (String(targetConversationId || '').startsWith('gdm#') ? 'group' : String(targetConversationId || '').startsWith('dm#') ? 'dm' : undefined);
+      const title =
+        (server?.peerDisplayName && String(server.peerDisplayName).trim()) ||
+        (cached?.user && String(cached.user).trim()) ||
+        (targetConversationId === 'global' ? '' : kind === 'group' ? 'Group DM' : 'Direct Message');
+      if (targetConversationId === 'global') setPeer(null);
+      else setPeer(title || (kind === 'group' ? 'Group DM' : 'Direct Message'));
       if (targetConversationId !== 'global') {
         upsertDmThread(
           targetConversationId,
-          cached?.user || peer || 'Direct Message',
+          title || peer || (kind === 'group' ? 'Group DM' : 'Direct Message'),
           Date.now()
         );
       }
@@ -1544,7 +1633,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       setPeerInput('');
       setSearchError(null);
     },
-    [unreadDmMap, upsertDmThread, peer]
+    [unreadDmMap, upsertDmThread, peer, serverConversations]
   );
 
   // Handle taps on OS notifications to jump into the DM.
@@ -1558,12 +1647,12 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         const kind = typeof data.kind === 'string' ? data.kind : '';
         const convId = typeof data.conversationId === 'string' ? data.conversationId : '';
         const senderName = typeof data.senderDisplayName === 'string' ? data.senderDisplayName : '';
-        if (kind === 'dm' && convId) {
+        if ((kind === 'dm' || kind === 'group') && convId) {
           setSearchOpen(false);
           setPeerInput('');
           setSearchError(null);
           setConversationId(convId);
-          setPeer(senderName || 'Direct Message');
+          setPeer(senderName || (kind === 'group' ? 'Group DM' : 'Direct Message'));
         }
       });
     } catch {
@@ -1628,11 +1717,18 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
         for (const it of unread) {
           const convId = String(it.conversationId || '');
           if (!convId) continue;
+          const kind = typeof it.kind === 'string' ? String(it.kind) : '';
           // Prefer display name if backend provides it; fall back to legacy `sender`/`user`.
-          const sender = String(it.senderDisplayName || it.sender || it.user || 'someone');
+          // For kind=added, senderDisplayName is treated as the group title.
+          const sender = String(it.senderDisplayName || it.sender || it.user || (kind === 'added' ? 'Added to group' : 'someone'));
           const senderSub = it.senderSub ? String(it.senderSub) : undefined;
-          const count = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
-          next[convId] = { user: sender, senderSub, count: Math.max(1, Math.floor(count)) };
+          const countRaw = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
+          const count = kind === 'added' ? 1 : Math.max(1, Math.floor(countRaw));
+          next[convId] = {
+            user: kind === 'added' ? `Added to group: ${sender}` : sender,
+            senderSub,
+            count,
+          };
           const lastAt = Number(it.lastMessageCreatedAt || 0);
           upsertDmThread(convId, sender, Number.isFinite(lastAt) && lastAt > 0 ? lastAt : Date.now());
         }
@@ -3093,6 +3189,12 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           peer={peer}
           displayName={displayName}
           onNewDmNotification={handleNewDmNotification}
+          onKickedFromConversation={(convId) => {
+            if (!convId) return;
+            if (conversationId !== convId) return;
+            setConversationId('global');
+            setPeer(null);
+          }}
           headerTop={headerTop}
           theme={theme}
           chatBackground={chatBackground}
@@ -3372,19 +3474,14 @@ const CustomSignUp = ({
     getSignUpTabText,
   } = authenticatorTextUtil;
 
-  const {
-    disableFormSubmit,
-    fields: fieldsWithHandlers,
-    fieldValidationErrors,
-    handleFormSubmit,
-  } = useFieldValues({
-    componentName: 'SignUp',
-    fields,
-    handleBlur,
-    handleChange,
-    handleSubmit,
-    validationErrors,
-  });
+  // NOTE:
+  // We intentionally avoid importing Amplify UI's internal `useFieldValues` from `@aws-amplify/ui-react-native/src/*`
+  // because it pulls TypeScript source files from node_modules into our `tsc` build (causing typecheck failures).
+  // For our usage, Authenticator already provides correctly-wired `fields` + `handleSubmit`.
+  const disableFormSubmit = false;
+  const fieldsWithHandlers = fields;
+  const fieldValidationErrors = validationErrors;
+  const handleFormSubmit = handleSubmit;
 
   const disabled = hasValidationErrors || disableFormSubmit;
   const headerText = getSignUpTabText();

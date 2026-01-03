@@ -193,7 +193,7 @@ const sendExpoPush = async (messages) => {
   }
 };
 
-const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderSub, conversationId }) => {
+const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderSub, conversationId, kind }) => {
   try {
     const tokens = await queryExpoPushTokensByUserSub(recipientSub);
     if (!tokens.length) return;
@@ -203,6 +203,7 @@ const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderS
     const body = 'New message';
     const convId = safeString(conversationId);
     const sSub = safeString(senderSub);
+    const k = safeString(kind) || 'dm';
 
     const base = {
       title,
@@ -211,7 +212,7 @@ const sendDmPushNotification = async ({ recipientSub, senderDisplayName, senderS
       priority: 'high',
       channelId: 'dm',
       data: {
-        kind: 'dm',
+        kind: k,
         conversationId: convId,
         senderDisplayName: safeString(senderDisplayName),
         senderSub: sSub,
@@ -312,6 +313,83 @@ const parseDmRecipientSub = (conversationId, senderSub) => {
   return null;
 };
 
+// Group DM conversationId format: "gdm#<groupId>"
+const parseGroupId = (conversationId) => {
+  if (!conversationId || conversationId === 'global') return null;
+  const raw = String(conversationId).trim();
+  if (!raw.startsWith('gdm#')) return null;
+  const groupId = raw.slice('gdm#'.length).trim();
+  return groupId || null;
+};
+
+const getGroupMember = async (groupId, memberSub) => {
+  const table = process.env.GROUP_MEMBERS_TABLE;
+  const gid = safeString(groupId);
+  const sub = safeString(memberSub);
+  if (!table || !gid || !sub) return null;
+  try {
+    const resp = await ddb.send(
+      new GetCommand({
+        TableName: table,
+        Key: { groupId: gid, memberSub: sub },
+        ProjectionExpression: 'memberSub, #s, isAdmin, leftAt, bannedAt',
+        ExpressionAttributeNames: { '#s': 'status' },
+      })
+    );
+    const it = resp?.Item;
+    if (!it) return null;
+    return {
+      status: safeString(it.status) || '',
+      isAdmin: !!it.isAdmin,
+      leftAt: typeof it.leftAt === 'number' ? it.leftAt : undefined,
+      bannedAt: typeof it.bannedAt === 'number' ? it.bannedAt : undefined,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const queryActiveGroupMemberSubs = async (groupId) => {
+  const table = process.env.GROUP_MEMBERS_TABLE;
+  const gid = safeString(groupId);
+  if (!table || !gid) return [];
+  const resp = await ddb.send(
+    new QueryCommand({
+      TableName: table,
+      KeyConditionExpression: 'groupId = :g',
+      ExpressionAttributeValues: { ':g': gid },
+      ProjectionExpression: 'memberSub, #s',
+      ExpressionAttributeNames: { '#s': 'status' },
+      Limit: 50,
+    })
+  );
+  return (resp.Items || [])
+    .filter((it) => safeString(it?.status) === 'active')
+    .map((it) => safeString(it.memberSub))
+    .filter(Boolean);
+};
+
+const getConversationTitleForUser = async (userSub, conversationId) => {
+  const table = process.env.CONVERSATIONS_TABLE;
+  const u = safeString(userSub);
+  const c = safeString(conversationId);
+  if (!table || !u || !c) return null;
+  try {
+    const resp = await ddb.send(
+      new GetCommand({
+        TableName: table,
+        Key: { userSub: u, conversationId: c },
+        ProjectionExpression: 'peerDisplayName',
+      })
+    );
+    const it = resp?.Item;
+    const t = it && typeof it.peerDisplayName === 'string' ? String(it.peerDisplayName).trim() : '';
+    return t || null;
+  } catch {
+    return null;
+  }
+};
+
 const getUserDisplayNameBySub = async (userSub) => {
   const usersTable = process.env.USERS_TABLE;
   const sub = safeString(userSub);
@@ -347,19 +425,22 @@ const upsertConversationIndex = async ({
   const convId = safeString(conversationId);
   if (!table || !owner || !convId) return;
 
+  const conversationKind = convId.startsWith('gdm#') ? 'group' : convId.startsWith('dm#') ? 'dm' : undefined;
   try {
     await ddb.send(
       new UpdateCommand({
         TableName: table,
         Key: { userSub: owner, conversationId: convId },
         UpdateExpression:
-          'SET peerSub = :ps, peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd',
+          'SET peerSub = :ps, peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd' +
+          (conversationKind ? ', conversationKind = :ck' : ''),
         ExpressionAttributeValues: {
           ':ps': safeString(peerSub) || undefined,
           ':pd': safeString(peerDisplayName) || undefined,
           ':lma': Number(lastMessageAt) || 0,
           ':lss': safeString(lastSenderSub) || undefined,
           ':lsd': safeString(lastSenderDisplayName) || undefined,
+          ...(conversationKind ? { ':ck': conversationKind } : {}),
         },
       })
     );
@@ -448,8 +529,10 @@ const markUnread = async (recipientSub, conversationId, sender) => {
       TableName: process.env.UNREADS_TABLE,
       Key: { userSub: recipientSub, conversationId },
       UpdateExpression:
-        'SET senderSub = :ss, senderDisplayName = :sd, lastMessageCreatedAt = :createdAt, messageCount = if_not_exists(messageCount, :zero) + :inc',
+        'SET #k = :k, senderSub = :ss, senderDisplayName = :sd, lastMessageCreatedAt = :createdAt, messageCount = if_not_exists(messageCount, :zero) + :inc',
+      ExpressionAttributeNames: { '#k': 'kind' },
       ExpressionAttributeValues: {
+        ':k': 'message',
         ':ss': sender.userSub,
         ':sd': sender.displayName,
         ':createdAt': sender.createdAtMs,
@@ -539,6 +622,9 @@ exports.handler = async (event) => {
     // Recipients (NO scans)
     let recipientConnIds = [];
     let dmRecipientSub = null;
+    let groupId = null;
+    let groupMember = null;
+    let groupActiveSubs = null;
 
     if (conversationId === 'global') {
       // Only broadcast to people who are currently "joined" to global
@@ -551,7 +637,7 @@ exports.handler = async (event) => {
         console.warn('byConversationWithUser unavailable; falling back to byConversation', err);
         recipientConnIds = await queryConnIdsByConversation('global');
       }
-    } else {
+    } else if (String(conversationId).startsWith('dm#')) {
       dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
       if (!dmRecipientSub) {
         return { statusCode: 400, body: 'Invalid DM conversationId (expected dm#minSub#maxSub).' };
@@ -559,6 +645,46 @@ exports.handler = async (event) => {
       const a = await queryConnIdsByUserSub(senderSub);
       const b = await queryConnIdsByUserSub(dmRecipientSub);
       recipientConnIds = Array.from(new Set([...a, ...b]));
+    } else if (String(conversationId).startsWith('gdm#')) {
+      groupId = parseGroupId(conversationId);
+      if (!groupId) return { statusCode: 400, body: 'Invalid group conversationId (expected gdm#<groupId>).' };
+      groupMember = await getGroupMember(groupId, senderSub);
+      if (!groupMember) return { statusCode: 403, body: 'Forbidden.' };
+
+      groupActiveSubs = await queryActiveGroupMemberSubs(groupId);
+      if (!Array.isArray(groupActiveSubs) || groupActiveSubs.length === 0) {
+        return { statusCode: 404, body: 'Group not found.' };
+      }
+      const activeSet = new Set(groupActiveSubs);
+      if (!activeSet.has(senderSub)) {
+        if (action !== 'read') return { statusCode: 403, body: 'Forbidden.' };
+      }
+
+      const connLists = await Promise.all(groupActiveSubs.map((s) => queryConnIdsByUserSub(s).catch(() => [])));
+      recipientConnIds = Array.from(new Set(connLists.flat().filter(Boolean)));
+    } else {
+      return { statusCode: 400, body: 'Invalid conversationId.' };
+    }
+
+    // ---- KICK (group-only, admin-only, UI eject) ----
+    if (action === 'kick') {
+      if (!groupId) return { statusCode: 400, body: 'kick only supported for group DMs.' };
+      if (!groupMember || groupMember.status !== 'active' || !groupMember.isAdmin) {
+        return { statusCode: 403, body: 'Admin required.' };
+      }
+      const targetSub = safeString(body.targetSub);
+      if (!targetSub) return { statusCode: 400, body: 'targetSub is required.' };
+      const targetConns = await queryConnIdsByUserSub(targetSub).catch(() => []);
+      if (Array.isArray(targetConns) && targetConns.length) {
+        await broadcast(mgmt, targetConns, {
+          type: 'kicked',
+          conversationId,
+          bySub: senderSub,
+          byUser: senderDisplayName,
+          createdAt: nowMs,
+        });
+      }
+      return { statusCode: 200, body: 'Kick sent.' };
     }
 
     // ---- READ ----
@@ -948,10 +1074,13 @@ exports.handler = async (event) => {
     if (!text) return { statusCode: 400, body: 'Empty message.' };
     if (!process.env.MESSAGES_TABLE) return { statusCode: 500, body: 'Missing MESSAGES_TABLE env.' };
 
+    const isDm = String(conversationId || '').startsWith('dm#');
+    const isGroup = String(conversationId || '').startsWith('gdm#');
+
     // Block enforcement (DM only).
     // If either party has blocked the other, do not persist or broadcast.
     // This is intentionally "silent": client will treat it like a send failure/timeout.
-    if (conversationId !== 'global') {
+    if (isDm) {
       try {
         if (!dmRecipientSub) dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
         if (dmRecipientSub) {
@@ -1006,6 +1135,11 @@ exports.handler = async (event) => {
       })
     );
 
+    let groupTitleForPayload;
+    if (isGroup) {
+      groupTitleForPayload = (await getConversationTitleForUser(senderSub, conversationId)) || 'Group DM';
+    }
+
     // Broadcast (send display + stable key)
     await broadcast(mgmt, recipientConnIds, {
       messageId,
@@ -1015,58 +1149,91 @@ exports.handler = async (event) => {
       text,
       createdAt: nowMs,
       conversationId,
+      conversationKind: isGroup ? 'group' : isDm ? 'dm' : undefined,
+      ...(isGroup ? { groupTitle: groupTitleForPayload } : {}),
       ...(ttlSeconds ? { ttlSeconds } : {}),
     });
 
-    // Persist unread (DM only) so offline users see it on next login via GET /unreads
+    // Persist unread so offline users see it on next login via GET /unreads
     if (conversationId !== 'global') {
       try {
-        if (!dmRecipientSub) {
-          dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
-        }
+        if (isDm) {
+          if (!dmRecipientSub) {
+            dmRecipientSub = parseDmRecipientSub(conversationId, senderSub);
+          }
 
-        // Conversation index (DM inbox list) for both participants.
-        // Best-effort: store a peer display name so new devices can render the chat list.
-        const recipientName =
-          (await getUserDisplayNameBySub(dmRecipientSub)) || safeString(dmRecipientSub) || 'Direct Message';
-        await Promise.all([
-          upsertConversationIndex({
-            ownerSub: senderSub,
-            conversationId,
-            peerSub: dmRecipientSub,
-            peerDisplayName: recipientName,
-            lastMessageAt: nowMs,
-            lastSenderSub: senderSub,
-            lastSenderDisplayName: senderDisplayName,
-          }),
-          upsertConversationIndex({
-            ownerSub: dmRecipientSub,
-            conversationId,
-            peerSub: senderSub,
-            peerDisplayName: senderDisplayName,
-            lastMessageAt: nowMs,
-            lastSenderSub: senderSub,
-            lastSenderDisplayName: senderDisplayName,
-          }),
-        ]);
+          const recipientName =
+            (await getUserDisplayNameBySub(dmRecipientSub)) || safeString(dmRecipientSub) || 'Direct Message';
+          await Promise.all([
+            upsertConversationIndex({
+              ownerSub: senderSub,
+              conversationId,
+              peerSub: dmRecipientSub,
+              peerDisplayName: recipientName,
+              lastMessageAt: nowMs,
+              lastSenderSub: senderSub,
+              lastSenderDisplayName: senderDisplayName,
+            }),
+            upsertConversationIndex({
+              ownerSub: dmRecipientSub,
+              conversationId,
+              peerSub: senderSub,
+              peerDisplayName: senderDisplayName,
+              lastMessageAt: nowMs,
+              lastSenderSub: senderSub,
+              lastSenderDisplayName: senderDisplayName,
+            }),
+          ]);
 
-        await markUnread(dmRecipientSub, conversationId, {
-          userSub: senderSub,
-          displayName: senderDisplayName,
-          createdAtMs: nowMs,
-        });
-
-        // Best-effort: DM push for background/offline users.
-        // We avoid pushing when the recipient appears "online" (has any active WS connections).
-        // Default payload mirrors Signal privacy: sender name only, no message content.
-        const activeRecipientConns = await queryConnIdsByUserSub(dmRecipientSub).catch(() => []);
-        if (!Array.isArray(activeRecipientConns) || activeRecipientConns.length === 0) {
-          await sendDmPushNotification({
-            recipientSub: dmRecipientSub,
-            senderDisplayName,
-            senderSub,
-            conversationId,
+          await markUnread(dmRecipientSub, conversationId, {
+            userSub: senderSub,
+            displayName: senderDisplayName,
+            createdAtMs: nowMs,
           });
+
+          const activeRecipientConns = await queryConnIdsByUserSub(dmRecipientSub).catch(() => []);
+          if (!Array.isArray(activeRecipientConns) || activeRecipientConns.length === 0) {
+            await sendDmPushNotification({
+              recipientSub: dmRecipientSub,
+              senderDisplayName,
+              senderSub,
+              conversationId,
+              kind: 'dm',
+            });
+          }
+        } else if (isGroup) {
+          const activeSubs = Array.isArray(groupActiveSubs) ? groupActiveSubs : [];
+          await Promise.all(
+            activeSubs.map(async (u) => {
+              const title = (await getConversationTitleForUser(u, conversationId)) || 'Group DM';
+              if (process.env.CONVERSATIONS_TABLE) {
+                await ddb
+                  .send(
+                    new UpdateCommand({
+                      TableName: process.env.CONVERSATIONS_TABLE,
+                      Key: { userSub: String(u), conversationId },
+                      UpdateExpression: 'SET lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd',
+                      ExpressionAttributeValues: { ':lma': nowMs, ':lss': senderSub, ':lsd': senderDisplayName },
+                    })
+                  )
+                  .catch(() => {});
+              }
+
+              if (u && u !== senderSub) {
+                await markUnread(u, conversationId, { userSub: senderSub, displayName: title, createdAtMs: nowMs });
+                const activeConns = await queryConnIdsByUserSub(u).catch(() => []);
+                if (!Array.isArray(activeConns) || activeConns.length === 0) {
+                  await sendDmPushNotification({
+                    recipientSub: u,
+                    senderDisplayName: title,
+                    senderSub,
+                    conversationId,
+                    kind: 'group',
+                  });
+                }
+              }
+            })
+          );
         }
       } catch {
         // ignore
