@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 import { AnimatedDots } from '../components/AnimatedDots';
 import { AvatarBubble } from '../components/AvatarBubble';
+import { GroupMembersSectionList } from '../components/GroupMembersSectionList';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WS_URL, API_URL, CDN_URL } from '../config/env';
 // const API_URL = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com"
@@ -240,6 +241,8 @@ type ChatScreenProps = {
   displayName: string;
   onNewDmNotification?: (conversationId: string, user: string, userSub?: string) => void;
   onKickedFromConversation?: (conversationId: string) => void;
+  // Notify the parent (Chats list) that the current conversation's title changed.
+  onConversationTitleChanged?: (conversationId: string, title: string) => void;
   headerTop?: React.ReactNode;
   theme?: 'light' | 'dark';
   chatBackground?: { mode: 'default' | 'color' | 'image'; color?: string; uri?: string; blur?: number; opacity?: number };
@@ -264,6 +267,13 @@ type ChatMessage = {
   userLower?: string;
   // Stable identity key for comparisons (Cognito sub). Prefer this over display strings for logic.
   userSub?: string;
+  // System messages are server-authored "events" (e.g. kicked/banned/left).
+  kind?: 'system';
+  systemKind?: string;
+  actorSub?: string;
+  actorUser?: string;
+  targetSub?: string;
+  targetUser?: string;
   avatarBgColor?: string;
   avatarTextColor?: string;
   avatarImagePath?: string;
@@ -589,10 +599,15 @@ function MediaStackCarousel({
           scrollRef.current = r;
         }}
         horizontal
+        // Android: allow horizontal paging inside the vertical FlatList reliably.
+        // (Without this, swipes can get captured by the parent scroll view and paging feels "stuck".)
+        nestedScrollEnabled
         pagingEnabled
+        scrollEnabled={n > 1}
         showsHorizontalScrollIndicator={false}
         snapToInterval={width}
         decelerationRate="fast"
+        directionalLockEnabled
         style={{ width, height }}
         scrollEventThrottle={16}
         onScroll={handleScroll}
@@ -768,6 +783,7 @@ export default function ChatScreen({
   displayName,
   onNewDmNotification,
   onKickedFromConversation,
+  onConversationTitleChanged,
   headerTop,
   theme = 'light',
   chatBackground,
@@ -830,8 +846,42 @@ export default function ChatScreen({
     null
   );
   const [groupMembers, setGroupMembers] = React.useState<
-    Array<{ memberSub: string; displayName?: string; status: string; isAdmin: boolean }>
+    Array<{
+      memberSub: string;
+      displayName?: string;
+      status: string;
+      isAdmin: boolean;
+      avatarBgColor?: string;
+      avatarTextColor?: string;
+      avatarImagePath?: string;
+    }>
   >([]);
+  // For UI counts + roster list. We intentionally hide "left" members.
+  const groupMembersVisible = React.useMemo(
+    () => groupMembers.filter((m) => m && (m.status === 'active' || m.status === 'banned')),
+    [groupMembers]
+  );
+  // For the "Members" button count: show *active* participants only.
+  const groupMembersActiveCount = React.useMemo(
+    () => groupMembers.reduce((acc, m) => (m && m.status === 'active' ? acc + 1 : acc), 0),
+    [groupMembers]
+  );
+  const computeDefaultGroupTitleForMe = React.useCallback((): string => {
+    const mySub = typeof myUserId === 'string' && myUserId.trim() ? myUserId.trim() : '';
+    const active = groupMembers.filter((m) => m && m.status === 'active');
+    const others = active.filter((m) => !mySub || String(m.memberSub) !== mySub);
+    const labels = others
+      .map((m) => String(m.displayName || m.memberSub || '').trim())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    if (!labels.length) return 'Group DM';
+    const head = labels.slice(0, 3);
+    const rest = labels.length - head.length;
+    return rest > 0 ? `${head.join(', ')} +${rest}` : head.join(', ');
+  }, [groupMembers, myUserId]);
+  // UI-only: prevent accidental/spammy repeated kicks (per-user cooldown).
+  const [kickCooldownUntilBySub, setKickCooldownUntilBySub] = React.useState<Record<string, number>>({});
+  const kickCooldownTimersRef = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [groupPublicKeyBySub, setGroupPublicKeyBySub] = React.useState<Record<string, string>>({});
   const [groupMembersOpen, setGroupMembersOpen] = React.useState<boolean>(false);
   const [autoDecrypt, setAutoDecrypt] = React.useState<boolean>(false);
@@ -1082,6 +1132,25 @@ export default function ChatScreen({
   const isDm = React.useMemo(() => activeConversationId.startsWith('dm#'), [activeConversationId]);
   const isGroup = React.useMemo(() => activeConversationId.startsWith('gdm#'), [activeConversationId]);
   const isEncryptedChat = isDm || isGroup;
+
+  // Keep parent Chats list/unreads in sync whenever the effective group title changes
+  // (e.g. another admin renamed the group and we refreshed group meta).
+  const lastPushedTitleRef = React.useRef<string>('');
+  React.useEffect(() => {
+    if (!isGroup) return;
+    const effective =
+      groupMeta?.groupName && String(groupMeta.groupName).trim()
+        ? String(groupMeta.groupName).trim()
+        : computeDefaultGroupTitleForMe();
+    if (!effective) return;
+    if (effective === lastPushedTitleRef.current) return;
+    lastPushedTitleRef.current = effective;
+    try {
+      onConversationTitleChanged?.(activeConversationId, effective);
+    } catch {
+      // ignore
+    }
+  }, [isGroup, activeConversationId, groupMeta?.groupName, computeDefaultGroupTitleForMe, onConversationTitleChanged]);
   const resolvedChatBg = React.useMemo(() => {
     const bg = chatBackground;
     if (!bg || bg.mode === 'default') return { mode: 'default' as const };
@@ -1486,7 +1555,7 @@ export default function ChatScreen({
         const text = await resp.text().catch(() => '');
         throw new Error(text || `Report failed (${resp.status})`);
       }
-      setReportNotice({ type: 'success', message: 'Thanks — we’ll review this.' });
+      setReportNotice({ type: 'success', message: 'Thanks - we’ll review this.' });
       // Give the user a moment to see the confirmation, then close.
       setTimeout(() => {
         setReportOpen(false);
@@ -2558,11 +2627,11 @@ export default function ChatScreen({
     })();
   }, [activeConversationId, mySeenAtByCreatedAt]);
 
-  // Persist autoDecrypt per-conversation so users don't need to keep re-enabling it after relogin.
+  // Persist autoDecrypt per-conversation, per-account so it doesn't bleed across users on the same device.
   React.useEffect(() => {
     (async () => {
       try {
-        const key = `chat:autoDecrypt:${activeConversationId}`;
+        const key = `chat:autoDecrypt:${String(myUserId || 'anon')}:${activeConversationId}`;
         const v = await AsyncStorage.getItem(key);
         if (v === '1') setAutoDecrypt(true);
         if (v === '0') setAutoDecrypt(false);
@@ -2570,18 +2639,18 @@ export default function ChatScreen({
         // ignore
       }
     })();
-  }, [activeConversationId]);
+  }, [activeConversationId, myUserId]);
 
   React.useEffect(() => {
     (async () => {
       try {
-        const key = `chat:autoDecrypt:${activeConversationId}`;
+        const key = `chat:autoDecrypt:${String(myUserId || 'anon')}:${activeConversationId}`;
         await AsyncStorage.setItem(key, autoDecrypt ? '1' : '0');
       } catch {
         // ignore
       }
     })();
-  }, [activeConversationId, autoDecrypt]);
+  }, [activeConversationId, myUserId, autoDecrypt]);
 
   // ttlIdx is UI state for the disappearing-message setting.
 
@@ -2631,7 +2700,15 @@ export default function ChatScreen({
 
   const parseEncrypted = React.useCallback((text: string): EncryptedChatPayloadV1 | null => {
     try {
-      const obj = JSON.parse(text);
+      let obj: any = JSON.parse(text);
+      // Some backends/clients may double-encode payload.text as a JSON-string containing JSON.
+      if (typeof obj === 'string') {
+        try {
+          obj = JSON.parse(obj);
+        } catch {
+          // leave as-is
+        }
+      }
       if (
         obj &&
         obj.v === 1 &&
@@ -2651,7 +2728,15 @@ export default function ChatScreen({
 
   const parseGroupEncrypted = React.useCallback((text: string): EncryptedGroupPayloadV1 | null => {
     try {
-      const obj = JSON.parse(text);
+      let obj: any = JSON.parse(text);
+      // Some backends/clients may double-encode payload.text as a JSON-string containing JSON.
+      if (typeof obj === 'string') {
+        try {
+          obj = JSON.parse(obj);
+        } catch {
+          // leave as-is
+        }
+      }
       if (
         obj &&
         obj.type === 'gdm_v1' &&
@@ -3378,6 +3463,7 @@ export default function ChatScreen({
   }, [peer, isDm, API_URL, activeConversationId, myUserId]);
 
   const [groupRefreshNonce, setGroupRefreshNonce] = React.useState<number>(0);
+  const lastGroupRosterRefreshAtRef = React.useRef<number>(0);
 
   // Group metadata + member key hydration (for encryption + admin UI).
   React.useEffect(() => {
@@ -3416,11 +3502,47 @@ export default function ChatScreen({
             displayName: typeof m.displayName === 'string' ? String(m.displayName) : undefined,
             status: typeof m.status === 'string' ? String(m.status) : 'active',
             isAdmin: !!m.isAdmin,
+            avatarBgColor: typeof m.avatarBgColor === 'string' ? String(m.avatarBgColor) : undefined,
+            avatarTextColor: typeof m.avatarTextColor === 'string' ? String(m.avatarTextColor) : undefined,
+            avatarImagePath: typeof m.avatarImagePath === 'string' ? String(m.avatarImagePath) : undefined,
           }))
           .filter((m: any) => m.memberSub);
         if (!cancelled) {
           setGroupMeta(groupId ? { groupId, groupName: typeof data.groupName === 'string' ? String(data.groupName) : undefined, meIsAdmin, meStatus } : null);
-          setGroupMembers(members);
+          // If I'm not an active member, treat the roster as a snapshot (privacy/UX):
+          // keep the last-known roster stable, while still polling `meStatus` so we can wake up if re-added/unbanned.
+          setGroupMembers((prev) => {
+            if (meStatus === 'active') return members;
+            // If we don't have anything yet (e.g. first load), take one snapshot.
+            if (!prev || prev.length === 0) return members;
+            return prev;
+          });
+          // Ensure avatars for roster members get signed URLs via existing avatar pipeline.
+          // (This keeps the Members modal avatars in sync even if nobody has chatted recently.)
+          setAvatarProfileBySub((prev) => {
+            const next = { ...prev };
+            const now = Date.now();
+            for (const m of members) {
+              const sub = String(m.memberSub || '').trim();
+              if (!sub) continue;
+              next[sub] = {
+                ...(prev[sub] || {}),
+                displayName: typeof m.displayName === 'string' ? m.displayName : (prev[sub]?.displayName || undefined),
+                avatarBgColor: typeof m.avatarBgColor === 'string' ? m.avatarBgColor : (prev[sub]?.avatarBgColor || undefined),
+                avatarTextColor: typeof m.avatarTextColor === 'string' ? m.avatarTextColor : (prev[sub]?.avatarTextColor || undefined),
+                avatarImagePath: typeof m.avatarImagePath === 'string' ? m.avatarImagePath : (prev[sub]?.avatarImagePath || undefined),
+                fetchedAt: now,
+              };
+            }
+            return next;
+          });
+        }
+
+        // Only fetch other members' public keys if I'm an active member.
+        // (Needed for encrypting outgoing messages; not needed for read-only viewing/decrypting.)
+        if (meStatus !== 'active') {
+          if (!cancelled) setGroupPublicKeyBySub({});
+          return;
         }
 
         // Fetch current public keys for active members (required for wrapping message keys).
@@ -3454,10 +3576,46 @@ export default function ChatScreen({
       cancelled = true;
     };
   }, [API_URL, isGroup, activeConversationId, groupRefreshNonce]);
+
+  // If I'm currently read-only in a group, periodically refresh group meta so that
+  // getting re-added/unbanned "wakes up" the chat without leaving/re-entering.
+  React.useEffect(() => {
+    if (!isGroup) return;
+    if (!groupMeta || groupMeta.meStatus === 'active') return;
+    const t = setInterval(() => {
+      setGroupRefreshNonce((n) => n + 1);
+    }, 4000);
+    return () => clearInterval(t);
+  }, [isGroup, groupMeta?.meStatus]);
   const [groupNameEditOpen, setGroupNameEditOpen] = React.useState<boolean>(false);
   const [groupNameDraft, setGroupNameDraft] = React.useState<string>('');
   const [groupAddMembersDraft, setGroupAddMembersDraft] = React.useState<string>('');
+  const groupAddMembersInputRef = React.useRef<TextInput | null>(null);
   const [groupActionBusy, setGroupActionBusy] = React.useState<boolean>(false);
+
+  // Focus the "Add usernames" input when Members modal opens (admin-only).
+  React.useEffect(() => {
+    if (!groupMembersOpen) return;
+    if (!groupMeta?.meIsAdmin) return;
+    const t = setTimeout(() => {
+      try {
+        groupAddMembersInputRef.current?.focus?.();
+      } catch {
+        // ignore
+      }
+    }, 150);
+    return () => clearTimeout(t);
+  }, [groupMembersOpen, groupMeta?.meIsAdmin]);
+
+  // When the Members modal opens, refresh roster once (helps keep the count in sync,
+  // especially after "left"/ban/unban events and while read-only).
+  React.useEffect(() => {
+    if (!groupMembersOpen) return;
+    if (!isGroup) return;
+    const now = Date.now();
+    lastGroupRosterRefreshAtRef.current = now;
+    setGroupRefreshNonce((n) => n + 1);
+  }, [groupMembersOpen, isGroup]);
 
   const groupPost = React.useCallback(
     async (path: string, body: any): Promise<{ ok: boolean; status: number; json?: any; text?: string }> => {
@@ -3494,6 +3652,32 @@ export default function ChatScreen({
           showAlert('Group update failed', `${msg}`.trim());
           return;
         }
+        // For "addMembers", emit system messages so everyone sees "X was added..." (persisted + broadcast by server).
+        if (op === 'addMembers') {
+          const addedSubs: string[] = Array.isArray(resp.json?.addedSubs) ? resp.json.addedSubs.map(String) : [];
+          if (addedSubs.length) {
+            const ws = wsRef.current;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              for (const sub of addedSubs) {
+                // eslint-disable-next-line no-continue
+                if (!sub) continue;
+                try {
+                  ws.send(
+                    JSON.stringify({
+                      action: 'system',
+                      conversationId: activeConversationId,
+                      systemKind: 'added',
+                      targetSub: sub,
+                      createdAt: Date.now(),
+                    })
+                  );
+                } catch {
+                  // ignore
+                }
+              }
+            }
+          }
+        }
         setGroupRefreshNonce((v) => v + 1);
       } finally {
         setGroupActionBusy(false);
@@ -3512,13 +3696,56 @@ export default function ChatScreen({
         )
       : true;
     if (!ok) return;
+
+    // UX guard: prevent orphaning a group (no active admins).
+    // This duplicates the server rule so the user gets a clear message even if the backend is stale/misconfigured.
+    try {
+      const mySub = typeof myUserId === 'string' && myUserId.trim() ? myUserId.trim() : '';
+      if (groupMeta?.meIsAdmin && mySub) {
+        const active = groupMembers.filter((m) => m && m.status === 'active');
+        const otherActive = active.filter((m) => String(m.memberSub) !== mySub);
+        const otherActiveAdmins = otherActive.filter((m) => !!m.isAdmin);
+        // If there are other active members, require at least one admin besides me.
+        if (otherActive.length > 0 && otherActiveAdmins.length === 0) {
+          showAlert('Cannot leave', 'You are the last admin. Promote someone else before leaving.');
+          return;
+        }
+      }
+    } catch {
+      // ignore (fall back to server enforcement)
+    }
+
     setGroupActionBusy(true);
     try {
       const resp = await groupPost('/groups/leave', { conversationId: activeConversationId });
       if (!resp.ok) {
         const msg = (resp.json && typeof resp.json.message === 'string' ? resp.json.message : resp.text) || 'Request failed';
-        showAlert('Leave failed', `${msg}`.trim());
+        // Helpful UX: if the backend isn't updated yet, surface the client-side rule.
+        if (resp.status === 500) {
+          showAlert('Leave failed', 'Server error while leaving the group. If you are an admin, ensure another admin exists, then try again.');
+        } else {
+          showAlert('Leave failed', `${msg}`.trim());
+        }
         return;
+      }
+
+      // Broadcast a "left" system note AFTER leaving.
+      // (Backend WS authorizer allows self-left even when status is already "left".)
+      try {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN && myUserId) {
+          ws.send(
+            JSON.stringify({
+              action: 'system',
+              conversationId: activeConversationId,
+              systemKind: 'left',
+              targetSub: myUserId,
+              createdAt: Date.now(),
+            })
+          );
+        }
+      } catch {
+        // ignore
       }
       setToast({ kind: 'success', message: 'Left group' });
       setGroupMeta((prev) => (prev ? { ...prev, meStatus: 'left' } : prev));
@@ -3526,7 +3753,7 @@ export default function ChatScreen({
     } finally {
       setGroupActionBusy(false);
     }
-  }, [isGroup, groupPost, activeConversationId, promptConfirm, showAlert]);
+  }, [isGroup, groupPost, activeConversationId, promptConfirm, showAlert, myUserId]);
 
   const groupKick = React.useCallback(
     (targetSub: string) => {
@@ -3536,6 +3763,24 @@ export default function ChatScreen({
         showAlert('Not connected', 'WebSocket is not connected.');
         return;
       }
+      // UI-only cooldown (per-user) so admins can't spam kick.
+      const sub = String(targetSub || '').trim();
+      if (!sub) return;
+      const until = Date.now() + 5000;
+      setKickCooldownUntilBySub((prev) => ({ ...prev, [sub]: until }));
+      // Ensure the button re-enables even if the modal stays open.
+      if (kickCooldownTimersRef.current[sub]) {
+        clearTimeout(kickCooldownTimersRef.current[sub]);
+      }
+      kickCooldownTimersRef.current[sub] = setTimeout(() => {
+        setKickCooldownUntilBySub((prev) => {
+          if (!prev[sub]) return prev;
+          const next = { ...prev };
+          delete next[sub];
+          return next;
+        });
+        delete kickCooldownTimersRef.current[sub];
+      }, 5200);
       ws.send(JSON.stringify({ action: 'kick', conversationId: activeConversationId, targetSub, createdAt: Date.now() }));
     },
     [isGroup, activeConversationId, showAlert]
@@ -3557,6 +3802,20 @@ export default function ChatScreen({
     }
     setIsConnecting(false);
     setIsConnected(false);
+  }, []);
+
+  // Cleanup kick cooldown timers on unmount
+  React.useEffect(() => {
+    return () => {
+      try {
+        for (const t of Object.values(kickCooldownTimersRef.current || {})) {
+          clearTimeout(t);
+        }
+      } catch {
+        // ignore
+      }
+      kickCooldownTimersRef.current = {};
+    };
   }, []);
 
   const scheduleReconnect = React.useCallback(() => {
@@ -3669,6 +3928,10 @@ export default function ChatScreen({
           hasText &&
           typeof payload.conversationId === 'string'
         ) {
+          // System events shouldn't create "unread message" notifications.
+          if (payload?.type === 'system' || payload?.kind === 'system') {
+            // ignore
+          } else {
           // For group DMs, prefer server-provided groupTitle.
           const senderLabel =
             (typeof payload.groupTitle === 'string' && payload.groupTitle) ||
@@ -3677,6 +3940,7 @@ export default function ChatScreen({
             'someone';
           const senderSub = typeof payload.userSub === 'string' ? payload.userSub : undefined;
           onNewDmNotificationRef.current?.(payload.conversationId, senderLabel, senderSub);
+          }
         }
 
         // Group admin "kick": eject from active conversation (client-side navigation)
@@ -3691,6 +3955,77 @@ export default function ChatScreen({
           } catch {
             // ignore
           }
+        }
+
+        // System events (server-authored), e.g. "User was kicked"
+        if (
+          payload &&
+          payload.type === 'system' &&
+          payload.conversationId === activeConv &&
+          typeof payload.text === 'string'
+        ) {
+          // Membership-related system events should refresh the roster for everyone currently viewing this chat
+          // (updates Members modal + any member counts).
+          try {
+            const kind = typeof payload.systemKind === 'string' ? payload.systemKind : '';
+            const membershipKinds = new Set(['added', 'ban', 'unban', 'unbanned', 'left', 'removed', 'kick', 'kicked', 'banned', 'update']);
+            if (kind && membershipKinds.has(kind) && String(activeConv || '').startsWith('gdm#')) {
+              const now = Date.now();
+              if (now - (lastGroupRosterRefreshAtRef.current || 0) > 750) {
+                lastGroupRosterRefreshAtRef.current = now;
+                setGroupRefreshNonce((n) => n + 1);
+              }
+            }
+          } catch {
+            // ignore
+          }
+
+          // If a membership-related system event targets me, immediately refresh/flip the chat out of read-only.
+          // (We also have a periodic refresh fallback, but this makes it instant when the event arrives.)
+          try {
+            const mySub = myUserId;
+            const targetSub = typeof payload.targetSub === 'string' ? payload.targetSub : '';
+            const systemKind = typeof payload.systemKind === 'string' ? payload.systemKind : '';
+            if (mySub && targetSub && mySub === targetSub) {
+              if (systemKind === 'added' || systemKind === 'unban' || systemKind === 'unbanned') {
+                setGroupMeta((prev) => (prev ? { ...prev, meStatus: 'active' } : prev));
+                setGroupRefreshNonce((n) => n + 1);
+              } else if (systemKind === 'ban' || systemKind === 'banned') {
+                setGroupMeta((prev) => (prev ? { ...prev, meStatus: 'banned' } : prev));
+              } else if (systemKind === 'left') {
+                setGroupMeta((prev) => (prev ? { ...prev, meStatus: 'left' } : prev));
+              } else if (systemKind === 'removed' || systemKind === 'kick' || systemKind === 'kicked') {
+                // "kicked" usually comes as payload.type === 'kicked' (handled above),
+                // but handle any system variants defensively.
+                setGroupMeta((prev) => (prev ? { ...prev, meStatus: 'left' } : prev));
+              }
+            }
+          } catch {
+            // ignore
+          }
+
+          const createdAt = Number(payload.createdAt || Date.now());
+          const stableId =
+            (payload.messageId && String(payload.messageId)) ||
+            (payload.id && String(payload.id)) ||
+            `sys-${createdAt}-${Math.random().toString(36).slice(2)}`;
+          const msg: ChatMessage = {
+            id: stableId,
+            kind: 'system',
+            systemKind: typeof payload.systemKind === 'string' ? payload.systemKind : undefined,
+            actorSub: typeof payload.actorSub === 'string' ? payload.actorSub : undefined,
+            actorUser: typeof payload.actorUser === 'string' ? payload.actorUser : undefined,
+            targetSub: typeof payload.targetSub === 'string' ? payload.targetSub : undefined,
+            targetUser: typeof payload.targetUser === 'string' ? payload.targetUser : undefined,
+            user: 'System',
+            userLower: 'system',
+            text: String(payload.text || ''),
+            rawText: String(payload.text || ''),
+            createdAt,
+            localStatus: 'sent',
+          };
+          setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [msg, ...prev]));
+          return;
         }
 
         // Read receipt events (broadcast by backend)
@@ -3774,18 +4109,26 @@ export default function ChatScreen({
         if (payload && payload.type === 'edit') {
           const messageCreatedAt = Number(payload.createdAt);
           const editedAt = typeof payload.editedAt === 'number' ? payload.editedAt : Date.now();
-          const newRaw = typeof payload.text === 'string' ? payload.text : '';
+          const newRaw =
+            typeof payload.text === 'string'
+              ? payload.text
+              : payload.text && typeof payload.text === 'object'
+                ? JSON.stringify(payload.text)
+                : '';
           if (Number.isFinite(messageCreatedAt) && newRaw) {
             setMessages((prev) =>
               prev.map((m) => {
                 if (m.createdAt !== messageCreatedAt) return m;
                 if (m.deletedAt) return m;
                 const encrypted = parseEncrypted(newRaw);
-                const isEncrypted = !!encrypted;
+                const groupEncrypted = parseGroupEncrypted(newRaw);
+                const isEncrypted = !!encrypted || !!groupEncrypted;
                 return {
                   ...m,
                   rawText: newRaw,
                   encrypted: encrypted ?? undefined,
+                  groupEncrypted: groupEncrypted ?? undefined,
+                  groupKeyHex: undefined,
                   text: isEncrypted ? ENCRYPTED_PLACEHOLDER : newRaw,
                   decryptedText: undefined,
                   decryptFailed: false,
@@ -3879,8 +4222,14 @@ export default function ChatScreen({
             }
           }
 
-          const rawText = String(payload.text);
+          const rawText =
+            typeof payload.text === 'string'
+              ? payload.text
+              : payload.text && typeof payload.text === 'object'
+                ? JSON.stringify(payload.text)
+                : String(payload.text ?? '');
           const encrypted = parseEncrypted(rawText);
+          const groupEncrypted = parseGroupEncrypted(rawText);
           const createdAt = Number(payload.createdAt || Date.now());
           const stableId =
             (payload.messageId && String(payload.messageId)) ||
@@ -3904,7 +4253,8 @@ export default function ChatScreen({
             reactions: normalizeReactions((payload as any)?.reactions),
             rawText,
             encrypted: encrypted ?? undefined,
-            text: encrypted ? ENCRYPTED_PLACEHOLDER : rawText,
+            groupEncrypted: groupEncrypted ?? undefined,
+            text: encrypted || groupEncrypted ? ENCRYPTED_PLACEHOLDER : rawText,
             createdAt,
             expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : undefined,
             ttlSeconds: typeof payload.ttlSeconds === 'number' ? payload.ttlSeconds : undefined,
@@ -3924,6 +4274,7 @@ export default function ChatScreen({
             const merged: ChatMessage = {
               ...msg,
               decryptedText: existing.decryptedText ?? msg.decryptedText,
+              groupKeyHex: existing.groupKeyHex ?? msg.groupKeyHex,
               text: shouldPreservePlaintext ? existing.text : msg.text,
               localStatus: 'sent',
             };
@@ -4048,38 +4399,47 @@ export default function ChatScreen({
           typeof json?.nextCursor === 'number' && Number.isFinite(json.nextCursor) ? json.nextCursor : null;
 
         const normalized: ChatMessage[] = rawItems
-          .map((it: any) => ({
-            id: String(it.messageId ?? `${it.createdAt ?? Date.now()}-${Math.random().toString(36).slice(2)}`),
-            user: it.user ?? 'anon',
-            userSub: typeof it.userSub === 'string' ? it.userSub : undefined,
-            userLower:
-              typeof it.userLower === 'string'
-                ? normalizeUser(it.userLower)
-                : normalizeUser(String(it.user ?? 'anon')),
-            avatarBgColor: typeof it.avatarBgColor === 'string' ? String(it.avatarBgColor) : undefined,
-            avatarTextColor: typeof it.avatarTextColor === 'string' ? String(it.avatarTextColor) : undefined,
-            avatarImagePath: typeof it.avatarImagePath === 'string' ? String(it.avatarImagePath) : undefined,
-            editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
-            deletedAt: typeof it.deletedAt === 'number' ? it.deletedAt : undefined,
-            deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
-            reactions: normalizeReactions((it as any)?.reactions),
-            rawText: typeof it.text === 'string' ? String(it.text) : '',
-            encrypted: parseEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
-            groupEncrypted: parseGroupEncrypted(typeof it.text === 'string' ? String(it.text) : '') ?? undefined,
-            text:
-              typeof it.deletedAt === 'number'
+          .map((it: any) => {
+            const rawText = typeof it.text === 'string' ? String(it.text) : '';
+            const kind = typeof it.kind === 'string' && it.kind === 'system' ? 'system' : undefined;
+            const encrypted = kind ? null : parseEncrypted(rawText);
+            const groupEncrypted = kind ? null : parseGroupEncrypted(rawText);
+            const deletedAt = typeof it.deletedAt === 'number' ? it.deletedAt : undefined;
+            return {
+              id: String(it.messageId ?? `${it.createdAt ?? Date.now()}-${Math.random().toString(36).slice(2)}`),
+              kind,
+              systemKind: typeof it.systemKind === 'string' ? it.systemKind : undefined,
+              actorSub: typeof it.actorSub === 'string' ? it.actorSub : undefined,
+              actorUser: typeof it.actorUser === 'string' ? it.actorUser : undefined,
+              targetSub: typeof it.targetSub === 'string' ? it.targetSub : undefined,
+              targetUser: typeof it.targetUser === 'string' ? it.targetUser : undefined,
+              user: kind ? 'System' : (it.user ?? 'anon'),
+              userSub: kind ? undefined : (typeof it.userSub === 'string' ? it.userSub : undefined),
+              userLower: kind
+                ? 'system'
+                : typeof it.userLower === 'string'
+                  ? normalizeUser(it.userLower)
+                  : normalizeUser(String(it.user ?? 'anon')),
+              avatarBgColor: typeof it.avatarBgColor === 'string' ? String(it.avatarBgColor) : undefined,
+              avatarTextColor: typeof it.avatarTextColor === 'string' ? String(it.avatarTextColor) : undefined,
+              avatarImagePath: typeof it.avatarImagePath === 'string' ? String(it.avatarImagePath) : undefined,
+              editedAt: typeof it.editedAt === 'number' ? it.editedAt : undefined,
+              deletedAt,
+              deletedBySub: typeof it.deletedBySub === 'string' ? it.deletedBySub : undefined,
+              reactions: normalizeReactions((it as any)?.reactions),
+              rawText,
+              encrypted: encrypted ?? undefined,
+              groupEncrypted: groupEncrypted ?? undefined,
+              text: deletedAt
                 ? ''
-                : parseEncrypted(typeof it.text === 'string' ? String(it.text) : '')
+                : (encrypted || groupEncrypted)
                   ? ENCRYPTED_PLACEHOLDER
-                  : parseGroupEncrypted(typeof it.text === 'string' ? String(it.text) : '')
-                    ? ENCRYPTED_PLACEHOLDER
-                  : typeof it.text === 'string'
-                    ? String(it.text)
-                    : '',
-            createdAt: Number(it.createdAt ?? Date.now()),
-            expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
-            ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
-          }))
+                  : rawText,
+              createdAt: Number(it.createdAt ?? Date.now()),
+              expiresAt: typeof it.expiresAt === 'number' ? it.expiresAt : undefined,
+              ttlSeconds: typeof it.ttlSeconds === 'number' ? it.ttlSeconds : undefined,
+            } as ChatMessage;
+          })
           .filter((m: ChatMessage) => m.text.length > 0)
           .sort((a: ChatMessage, b: ChatMessage) => b.createdAt - a.createdAt);
 
@@ -5728,7 +6088,8 @@ export default function ChatScreen({
           {isEncryptedChat ? (
             <>
               {dmSettingsOpen ? (
-                isDm ? (
+                <>
+                  {isDm ? (
                   <View style={styles.dmSettingsRow}>
                 <View style={styles.dmSettingSlotLeft}>
                   <View style={styles.dmSettingGroup}>
@@ -5765,158 +6126,186 @@ export default function ChatScreen({
 
                 <View style={styles.dmSettingSlotCenter}>
                   <View style={styles.dmSettingGroup}>
-                    <Text
-                      style={[
-                        styles.decryptLabel,
-                        isDark ? styles.decryptLabelDark : null,
-                        styles.dmSettingLabel,
-                        dmSettingsCompact ? styles.dmSettingLabelCompact : null,
-                      ]}
-                      numberOfLines={1}
-                    >
-                      Self‑Destruct
-                    </Text>
-                    <Pressable
-                      style={[
-                        styles.ttlChip,
-                        isDark ? styles.ttlChipDark : null,
-                        dmSettingsCompact ? styles.ttlChipCompact : null,
-                      ]}
-                      onPress={() => {
-                        setTtlIdxDraft(ttlIdx);
-                        setTtlPickerOpen(true);
-                      }}
-                    >
-                      <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
-                        {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                      <Text
+                        style={[
+                          styles.decryptLabel,
+                          isDark ? styles.decryptLabelDark : null,
+                          styles.dmSettingLabel,
+                          dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        Self‑Destruct
                       </Text>
-                    </Pressable>
+                      <Pressable
+                        style={[
+                          styles.ttlChip,
+                          isDark ? styles.ttlChipDark : null,
+                          dmSettingsCompact ? styles.ttlChipCompact : null,
+                        ]}
+                        onPress={() => {
+                          setTtlIdxDraft(ttlIdx);
+                          setTtlPickerOpen(true);
+                        }}
+                      >
+                        <Text style={[styles.ttlChipText, isDark ? styles.ttlChipTextDark : null]}>
+                          {TTL_OPTIONS[ttlIdx]?.label ?? 'Off'}
+                        </Text>
+                      </Pressable>
                   </View>
                 </View>
 
                 <View style={styles.dmSettingSlotRight}>
                   <View style={styles.dmSettingGroup}>
-                    <Text
-                      style={[
-                        styles.decryptLabel,
-                        isDark ? styles.decryptLabelDark : null,
-                        styles.dmSettingLabel,
-                        dmSettingsCompact ? styles.dmSettingLabelCompact : null,
-                      ]}
-                      numberOfLines={1}
-                    >
-                      Read Receipts
-                    </Text>
-                    {dmSettingsCompact ? (
-                      <MiniToggle
-                        value={sendReadReceipts}
-                        isDark={isDark}
-                        onValueChange={(v) => {
-                          // If turning OFF, also suppress any queued receipts so they won't send later.
-                          if (!v) {
-                            const pending = Array.from(pendingReadCreatedAtSetRef.current || []);
-                            const maxPending = pending.length ? Math.max(...pending) : 0;
-                            if (Number.isFinite(maxPending) && maxPending > 0) {
-                              setReadReceiptSuppressUpTo((prev) => (maxPending > prev ? maxPending : prev));
+                      <Text
+                        style={[
+                          styles.decryptLabel,
+                          isDark ? styles.decryptLabelDark : null,
+                          styles.dmSettingLabel,
+                          dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        Read Receipts
+                      </Text>
+                      {dmSettingsCompact ? (
+                        <MiniToggle
+                          value={sendReadReceipts}
+                          isDark={isDark}
+                          onValueChange={(v) => {
+                            // If turning OFF, also suppress any queued receipts so they won't send later.
+                            if (!v) {
+                              const pending = Array.from(pendingReadCreatedAtSetRef.current || []);
+                              const maxPending = pending.length ? Math.max(...pending) : 0;
+                              if (Number.isFinite(maxPending) && maxPending > 0) {
+                                setReadReceiptSuppressUpTo((prev) => (maxPending > prev ? maxPending : prev));
+                              }
+                              pendingReadCreatedAtSetRef.current = new Set();
                             }
-                            pendingReadCreatedAtSetRef.current = new Set();
-                          }
-                          setSendReadReceipts(v);
-                        }}
-                      />
-                    ) : (
-                      <Switch
-                        value={sendReadReceipts}
-                        onValueChange={(v) => {
-                          if (!v) {
-                            const pending = Array.from(pendingReadCreatedAtSetRef.current || []);
-                            const maxPending = pending.length ? Math.max(...pending) : 0;
-                            if (Number.isFinite(maxPending) && maxPending > 0) {
-                              setReadReceiptSuppressUpTo((prev) => (maxPending > prev ? maxPending : prev));
+                            setSendReadReceipts(v);
+                          }}
+                        />
+                      ) : (
+                        <Switch
+                          value={sendReadReceipts}
+                          onValueChange={(v) => {
+                            if (!v) {
+                              const pending = Array.from(pendingReadCreatedAtSetRef.current || []);
+                              const maxPending = pending.length ? Math.max(...pending) : 0;
+                              if (Number.isFinite(maxPending) && maxPending > 0) {
+                                setReadReceiptSuppressUpTo((prev) => (maxPending > prev ? maxPending : prev));
+                              }
+                              pendingReadCreatedAtSetRef.current = new Set();
                             }
-                            pendingReadCreatedAtSetRef.current = new Set();
-                          }
-                          setSendReadReceipts(v);
-                        }}
-                        trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
-                        thumbColor={isDark ? '#2a2a33' : '#ffffff'}
-                        ios_backgroundColor="#d1d1d6"
-                      />
-                    )}
+                            setSendReadReceipts(v);
+                          }}
+                          trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+                          thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                          ios_backgroundColor="#d1d1d6"
+                        />
+                      )}
                   </View>
                 </View>
                   </View>
-                ) : (
-                  <View style={styles.dmSettingsRow}>
-                    <View style={styles.dmSettingSlotLeft}>
-                      <View style={styles.dmSettingGroup}>
-                        <Text
-                          style={[
-                            styles.decryptLabel,
-                            isDark ? styles.decryptLabelDark : null,
-                            styles.dmSettingLabel,
-                            dmSettingsCompact ? styles.dmSettingLabelCompact : null,
-                          ]}
-                          numberOfLines={1}
-                        >
-                          Members
-                        </Text>
-                        <Pressable
-                          style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
-                          disabled={groupActionBusy}
-                          onPress={() => setGroupMembersOpen(true)}
-                        >
-                          <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
-                            {`${groupMembers.length || 0}`}
-                          </Text>
-                        </Pressable>
-                      </View>
-                    </View>
-
-                    <View style={styles.dmSettingSlotCenter}>
-                      <View style={styles.dmSettingGroup}>
-                        <Text
-                          style={[
-                            styles.decryptLabel,
-                            isDark ? styles.decryptLabelDark : null,
-                            styles.dmSettingLabel,
-                            dmSettingsCompact ? styles.dmSettingLabelCompact : null,
-                          ]}
-                          numberOfLines={1}
-                        >
-                          Status
-                        </Text>
-                        <Text style={[styles.welcomeStatusText, isDark ? styles.statusTextDark : null]} numberOfLines={1}>
-                          {groupMeta?.meStatus === 'active' ? 'Active' : groupMeta?.meStatus || '—'}
-                        </Text>
-                      </View>
-                    </View>
-
-                    <View style={styles.dmSettingSlotRight}>
-                      <View style={[styles.dmSettingGroup, { justifyContent: 'flex-end', gap: 10 }]}>
-                        {groupMeta?.meIsAdmin ? (
-                          <Pressable
-                            style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
-                            disabled={groupActionBusy}
-                            onPress={() => {
-                              setGroupNameDraft(groupMeta?.groupName || '');
-                              setGroupNameEditOpen(true);
-                            }}
+                  ) : null}
+                  {isGroup ? (
+                    <View style={[styles.dmSettingsRow, styles.groupSettingsRow]}>
+                      <View style={styles.dmSettingSlotLeft}>
+                        <View style={styles.dmSettingGroup}>
+                          <Text
+                            style={[
+                              styles.decryptLabel,
+                              isDark ? styles.decryptLabelDark : null,
+                              styles.dmSettingLabel,
+                              dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                            ]}
+                            numberOfLines={1}
                           >
-                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Name</Text>
+                            Members
+                          </Text>
+                          <Pressable
+                            style={[
+                              styles.toolBtn,
+                              isDark ? styles.toolBtnDark : null,
+                              groupActionBusy ? { opacity: 0.6 } : null,
+                            ]}
+                            disabled={groupActionBusy}
+                            onPress={() => setGroupMembersOpen(true)}
+                          >
+                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                              {`${groupMembersActiveCount || 0}`}
+                            </Text>
                           </Pressable>
-                        ) : null}
-                        <Pressable
-                          style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
-                          disabled={groupActionBusy}
-                          onPress={() => void groupLeave()}
-                        >
-                          <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Leave</Text>
-                        </Pressable>
+                        </View>
+                      </View>
+
+                      <View style={styles.dmSettingSlotCenter}>
+                        <View style={styles.dmSettingGroup}>
+                          <Text
+                            style={[
+                              styles.decryptLabel,
+                              isDark ? styles.decryptLabelDark : null,
+                              styles.dmSettingLabel,
+                              dmSettingsCompact ? styles.dmSettingLabelCompact : null,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            Auto‑Decrypt
+                          </Text>
+                          {dmSettingsCompact ? (
+                            <MiniToggle
+                              value={autoDecrypt}
+                              onValueChange={setAutoDecrypt}
+                              disabled={!myPrivateKey}
+                              isDark={isDark}
+                            />
+                          ) : (
+                            <Switch
+                              value={autoDecrypt}
+                              onValueChange={setAutoDecrypt}
+                              disabled={!myPrivateKey}
+                              trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+                              thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                              ios_backgroundColor="#d1d1d6"
+                            />
+                          )}
+                        </View>
+                      </View>
+
+                      <View style={styles.dmSettingSlotRight}>
+                        <View style={[styles.dmSettingGroup, { justifyContent: 'flex-end', gap: 10 }]}>
+                          {groupMeta?.meIsAdmin ? (
+                            <Pressable
+                              style={[
+                                styles.toolBtn,
+                                isDark ? styles.toolBtnDark : null,
+                                groupActionBusy ? { opacity: 0.6 } : null,
+                              ]}
+                              disabled={groupActionBusy}
+                              onPress={() => {
+                                setGroupNameDraft(groupMeta?.groupName || '');
+                                setGroupNameEditOpen(true);
+                              }}
+                            >
+                              <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Name</Text>
+                            </Pressable>
+                          ) : null}
+                          <Pressable
+                            style={[
+                              styles.toolBtn,
+                              isDark ? styles.toolBtnDark : null,
+                              groupActionBusy ? { opacity: 0.6 } : null,
+                            ]}
+                            disabled={groupActionBusy}
+                            onPress={() => void groupLeave()}
+                          >
+                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Leave</Text>
+                          </Pressable>
+                        </View>
                       </View>
                     </View>
-                  </View>
-                )
+                  ) : null}
+                </>
               ) : null}
             </>
           ) : null}
@@ -5953,6 +6342,19 @@ export default function ChatScreen({
             keyExtractor={(m) => m.id}
             inverted
             keyboardShouldPersistTaps="handled"
+            ListHeaderComponent={
+              isGroup && groupMeta?.meStatus && groupMeta.meStatus !== 'active' ? (
+                <View style={{ paddingVertical: 10, alignItems: 'center' }}>
+                  <Text style={{ color: isDark ? '#a7a7b4' : '#666', fontStyle: 'italic', fontWeight: '700' }}>
+                    {groupMeta.meStatus === 'banned'
+                      ? 'You are banned from this chat'
+                      : groupMeta.meStatus === 'left'
+                        ? 'You left this chat'
+                        : 'This chat is read‑only'}
+                  </Text>
+                </View>
+              ) : null
+            }
             onEndReached={() => {
               if (!API_URL) return;
               if (!historyHasMore) return;
@@ -5993,6 +6395,23 @@ export default function ChatScreen({
             updateCellsBatchingPeriod={50}
             windowSize={7}
             renderItem={({ item, index }) => {
+            if (item.kind === 'system') {
+              return (
+                <View style={{ paddingVertical: 10, alignItems: 'center' }}>
+                  <Text
+                    style={{
+                      color: isDark ? '#a7a7b4' : '#666',
+                      fontStyle: 'italic',
+                      fontWeight: '700',
+                      textAlign: 'center',
+                      paddingHorizontal: 18,
+                    }}
+                  >
+                    {String(item.text || '').trim() || '-'}
+                  </Text>
+                </View>
+              );
+            }
             const timestamp = new Date(item.createdAt);
             const now = new Date();
             const isToday =
@@ -7203,164 +7622,168 @@ export default function ChatScreen({
             <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
               Report
             </Text>
-            <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
-              Reports are sent to the developer for review. Add an optional note to help us understand the issue.
-            </Text>
-
-            {reportNotice ? (
-              <View
-                style={[
-                  styles.reportNoticeBox,
-                  reportNotice.type === 'success' ? styles.reportNoticeBoxSuccess : styles.reportNoticeBoxError,
-                  isDark ? styles.reportNoticeBoxDark : null,
-                  reportNotice.type === 'success'
-                    ? isDark
-                      ? styles.reportNoticeBoxSuccessDark
-                      : null
-                    : isDark
-                      ? styles.reportNoticeBoxErrorDark
-                      : null,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.reportNoticeText,
-                    reportNotice.type === 'success' ? styles.reportNoticeTextSuccess : styles.reportNoticeTextError,
-                    isDark ? styles.reportNoticeTextDark : null,
-                    reportNotice.type === 'success'
-                      ? isDark
-                        ? styles.reportNoticeTextSuccessDark
-                        : null
-                      : isDark
-                        ? styles.reportNoticeTextErrorDark
-                        : null,
-                  ]}
-                >
-                  {reportNotice.message}
+            <View style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }}>
+              <ScrollView style={styles.summaryScroll} contentContainerStyle={{ paddingBottom: 8 }}>
+                <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
+                  Reports are sent to the developer for review. Add an optional note to help us understand the issue.
                 </Text>
-              </View>
-            ) : null}
 
-            <View style={styles.reportTargetSwitchWrap}>
-              <Text style={[styles.reportTargetToggleLabel, isDark ? styles.reportTargetToggleLabelDark : null]}>
-                Message
-              </Text>
-              <Switch
-                value={reportKind === 'user'}
-                disabled={reportSubmitting}
-                onValueChange={(next) => {
-                  if (next) {
-                    // Switch to reporting the user (hydrate from the message if needed)
-                    if (reportTargetUserSub) {
-                      setReportKind('user');
-                      return;
-                    }
-                    const sub = reportTargetMessage?.userSub ? String(reportTargetMessage.userSub) : '';
-                    if (sub) {
-                      setReportTargetUserSub(sub);
-                      setReportTargetUserLabel(String(reportTargetMessage?.user || '').trim());
-                      setReportKind('user');
-                      return;
-                    }
-                    setReportNotice({ type: 'error', message: 'Cannot report user: no user was found for this report.' });
-                    setReportKind('message');
-                    return;
-                  }
-
-                  // Switch back to reporting the message (if we have one)
-                  if (reportTargetMessage) setReportKind('message');
-                }}
-                trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
-                thumbColor={isDark ? '#2a2a33' : '#ffffff'}
-              />
-              <Text style={[styles.reportTargetToggleLabel, isDark ? styles.reportTargetToggleLabelDark : null]}>
-                User
-              </Text>
-            </View>
-
-            <View style={styles.reportCategoryWrap}>
-              {[
-                { key: 'spam', label: 'Spam' },
-                { key: 'harassment', label: 'Harassment' },
-                { key: 'hate', label: 'Hate' },
-                { key: 'impersonation', label: 'Impersonation' },
-                { key: 'illegal', label: 'Illegal' },
-                { key: 'other', label: 'Other' },
-              ].map((c) => {
-                const active = reportCategory === c.key;
-                return (
-                  <Pressable
-                    key={c.key}
-                    disabled={reportSubmitting}
-                    onPress={() => setReportCategory(c.key)}
-                    style={({ pressed }) => [
-                      styles.reportChip,
-                      isDark ? styles.reportChipDark : null,
-                      active ? styles.reportChipActive : null,
-                      active && isDark ? styles.reportChipActiveDark : null,
-                      pressed ? { opacity: 0.9 } : null,
+                {reportNotice ? (
+                  <View
+                    style={[
+                      styles.reportNoticeBox,
+                      reportNotice.type === 'success' ? styles.reportNoticeBoxSuccess : styles.reportNoticeBoxError,
+                      isDark ? styles.reportNoticeBoxDark : null,
+                      reportNotice.type === 'success'
+                        ? isDark
+                          ? styles.reportNoticeBoxSuccessDark
+                          : null
+                        : isDark
+                          ? styles.reportNoticeBoxErrorDark
+                          : null,
                     ]}
                   >
                     <Text
                       style={[
-                        styles.reportChipText,
-                        isDark ? styles.reportChipTextDark : null,
-                        active ? (isDark ? styles.reportChipTextActiveDark : styles.reportChipTextActive) : null,
+                        styles.reportNoticeText,
+                        reportNotice.type === 'success' ? styles.reportNoticeTextSuccess : styles.reportNoticeTextError,
+                        isDark ? styles.reportNoticeTextDark : null,
+                        reportNotice.type === 'success'
+                          ? isDark
+                            ? styles.reportNoticeTextSuccessDark
+                            : null
+                          : isDark
+                            ? styles.reportNoticeTextErrorDark
+                            : null,
                       ]}
                     >
-                      {c.label}
+                      {reportNotice.message}
                     </Text>
-                  </Pressable>
-                );
-              })}
+                  </View>
+                ) : null}
+
+                <View style={styles.reportTargetSwitchWrap}>
+                  <Text style={[styles.reportTargetToggleLabel, isDark ? styles.reportTargetToggleLabelDark : null]}>
+                    Message
+                  </Text>
+                  <Switch
+                    value={reportKind === 'user'}
+                    disabled={reportSubmitting}
+                    onValueChange={(next) => {
+                      if (next) {
+                        // Switch to reporting the user (hydrate from the message if needed)
+                        if (reportTargetUserSub) {
+                          setReportKind('user');
+                          return;
+                        }
+                        const sub = reportTargetMessage?.userSub ? String(reportTargetMessage.userSub) : '';
+                        if (sub) {
+                          setReportTargetUserSub(sub);
+                          setReportTargetUserLabel(String(reportTargetMessage?.user || '').trim());
+                          setReportKind('user');
+                          return;
+                        }
+                        setReportNotice({ type: 'error', message: 'Cannot report user: no user was found for this report.' });
+                        setReportKind('message');
+                        return;
+                      }
+
+                      // Switch back to reporting the message (if we have one)
+                      if (reportTargetMessage) setReportKind('message');
+                    }}
+                    trackColor={{ false: '#d1d1d6', true: '#d1d1d6' }}
+                    thumbColor={isDark ? '#2a2a33' : '#ffffff'}
+                  />
+                  <Text style={[styles.reportTargetToggleLabel, isDark ? styles.reportTargetToggleLabelDark : null]}>
+                    User
+                  </Text>
+                </View>
+
+                <View style={styles.reportCategoryWrap}>
+                  {[
+                    { key: 'spam', label: 'Spam' },
+                    { key: 'harassment', label: 'Harassment' },
+                    { key: 'hate', label: 'Hate' },
+                    { key: 'impersonation', label: 'Impersonation' },
+                    { key: 'illegal', label: 'Illegal' },
+                    { key: 'other', label: 'Other' },
+                  ].map((c) => {
+                    const active = reportCategory === c.key;
+                    return (
+                      <Pressable
+                        key={c.key}
+                        disabled={reportSubmitting}
+                        onPress={() => setReportCategory(c.key)}
+                        style={({ pressed }) => [
+                          styles.reportChip,
+                          isDark ? styles.reportChipDark : null,
+                          active ? styles.reportChipActive : null,
+                          active && isDark ? styles.reportChipActiveDark : null,
+                          pressed ? { opacity: 0.9 } : null,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.reportChipText,
+                            isDark ? styles.reportChipTextDark : null,
+                            active ? (isDark ? styles.reportChipTextActiveDark : styles.reportChipTextActive) : null,
+                          ]}
+                        >
+                          {c.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+
+                {reportKind === 'message' ? (
+                  <View style={[styles.reportPreviewBox, isDark ? styles.reportPreviewBoxDark : null]}>
+                    <Text style={[styles.reportPreviewLabel, isDark ? styles.reportPreviewLabelDark : null]}>
+                      Message Preview
+                    </Text>
+                    <Text style={[styles.reportPreviewText, isDark ? styles.reportPreviewTextDark : null]}>
+                      {(() => {
+                        const t = reportTargetMessage;
+                        if (!t) return '(no message selected)';
+                        if (t.deletedAt) return '(deleted)';
+                        const text =
+                          (typeof t.decryptedText === 'string' && t.decryptedText.trim())
+                            ? t.decryptedText.trim()
+                            : (typeof t.text === 'string' && t.text.trim())
+                              ? t.text.trim()
+                              : '';
+                        return text ? text.slice(0, 200) : '(no text)';
+                      })()}
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={[styles.reportPreviewBox, isDark ? styles.reportPreviewBoxDark : null]}>
+                    <Text style={[styles.reportPreviewLabel, isDark ? styles.reportPreviewLabelDark : null]}>
+                      Reporting User
+                    </Text>
+                    <Text style={[styles.reportPreviewText, isDark ? styles.reportPreviewTextDark : null]}>
+                      {(() => {
+                        const label = String(reportTargetUserLabel || '').trim();
+                        if (label) return label.slice(0, 120);
+                        const sub = String(reportTargetUserSub || '').trim();
+                        return sub ? `User ID: ${sub}` : '(unknown user)';
+                      })()}
+                    </Text>
+                  </View>
+                )}
+
+                <TextInput
+                  value={reportDetails}
+                  onChangeText={(t) => setReportDetails(t)}
+                  placeholder="Optional note (e.g. harassment, spam, impersonation)…"
+                  placeholderTextColor={isDark ? '#8f8fa3' : '#8a8a96'}
+                  multiline
+                  style={[styles.reportInput, isDark ? styles.reportInputDark : null]}
+                  editable={!reportSubmitting}
+                  maxLength={900}
+                />
+              </ScrollView>
             </View>
-
-            {reportKind === 'message' ? (
-              <View style={[styles.reportPreviewBox, isDark ? styles.reportPreviewBoxDark : null]}>
-                <Text style={[styles.reportPreviewLabel, isDark ? styles.reportPreviewLabelDark : null]}>
-                  Message Preview
-                </Text>
-                <Text style={[styles.reportPreviewText, isDark ? styles.reportPreviewTextDark : null]}>
-                  {(() => {
-                    const t = reportTargetMessage;
-                    if (!t) return '(no message selected)';
-                    if (t.deletedAt) return '(deleted)';
-                    const text =
-                      (typeof t.decryptedText === 'string' && t.decryptedText.trim())
-                        ? t.decryptedText.trim()
-                        : (typeof t.text === 'string' && t.text.trim())
-                          ? t.text.trim()
-                          : '';
-                    return text ? text.slice(0, 200) : '(no text)';
-                  })()}
-                </Text>
-              </View>
-            ) : (
-              <View style={[styles.reportPreviewBox, isDark ? styles.reportPreviewBoxDark : null]}>
-                <Text style={[styles.reportPreviewLabel, isDark ? styles.reportPreviewLabelDark : null]}>
-                  Reporting User
-                </Text>
-                <Text style={[styles.reportPreviewText, isDark ? styles.reportPreviewTextDark : null]}>
-                  {(() => {
-                    const label = String(reportTargetUserLabel || '').trim();
-                    if (label) return label.slice(0, 120);
-                    const sub = String(reportTargetUserSub || '').trim();
-                    return sub ? `User ID: ${sub}` : '(unknown user)';
-                  })()}
-                </Text>
-              </View>
-            )}
-
-            <TextInput
-              value={reportDetails}
-              onChangeText={(t) => setReportDetails(t)}
-              placeholder="Optional note (e.g. harassment, spam, impersonation)…"
-              placeholderTextColor={isDark ? '#8f8fa3' : '#8a8a96'}
-              multiline
-              style={[styles.reportInput, isDark ? styles.reportInputDark : null]}
-              editable={!reportSubmitting}
-              maxLength={900}
-            />
 
             <View style={styles.summaryButtons}>
               <Pressable
@@ -7455,6 +7878,7 @@ export default function ChatScreen({
                   let thumbUri: string | null = null;
                   let kind: 'image' | 'video' | 'file' | null = null;
                   let hasMedia = false;
+                  let mediaCount = 0;
 
                   if (t.encrypted || t.groupEncrypted) {
                     if (!t.decryptedText) {
@@ -7471,10 +7895,17 @@ export default function ChatScreen({
                     const gItems = gEnv ? normalizeGroupMediaItems(gEnv) : [];
                     if (dmItems.length || gItems.length) {
                       hasMedia = true;
+                      mediaCount = dmItems.length || gItems.length || 0;
                       caption = String((dmEnv?.caption ?? gEnv?.caption) || '');
                       const first = (dmItems[0]?.media ?? gItems[0]?.media) as any;
                       kind = (first.kind as any) || 'file';
-                      thumbUri = null; // Decrypted thumbs are handled in the main chat list/media viewer.
+                      // Reuse decrypted thumb cache so message options show actual previews.
+                      // (Best-effort: if thumb isn't decrypted yet, we fall back to the placeholder label.)
+                      if (first && first.thumbPath && dmThumbUriByPath[String(first.thumbPath)]) {
+                        thumbUri = dmThumbUriByPath[String(first.thumbPath)];
+                      } else {
+                        thumbUri = null;
+                      }
                     } else {
                       caption = plain;
                     }
@@ -7484,6 +7915,7 @@ export default function ChatScreen({
                     const envList = env ? normalizeChatMediaList(env.media) : [];
                     if (envList.length) {
                       hasMedia = true;
+                      mediaCount = envList.length || 0;
                       caption = String(env?.text || '');
                       const first = envList[0];
                       kind = (first.kind as any) || 'file';
@@ -7503,6 +7935,8 @@ export default function ChatScreen({
                   }
 
                   const label = kind === 'image' ? 'Photo' : kind === 'video' ? 'Video' : 'Attachment';
+                  const multiLabel =
+                    mediaCount > 1 ? `${label} · ${mediaCount} attachments` : label;
                   return (
                     <View style={styles.actionMenuMediaPreview}>
                       <View style={styles.actionMenuMediaThumbWrap}>
@@ -7514,6 +7948,9 @@ export default function ChatScreen({
                           </View>
                         )}
                       </View>
+                      <Text style={[styles.actionMenuMediaMeta, isDark ? styles.actionMenuMediaMetaDark : null]}>
+                        {multiLabel}
+                      </Text>
                       {caption.trim().length ? (
                         <Text style={[styles.actionMenuMediaCaption, isDark ? styles.actionMenuMediaCaptionDark : null]}>
                           {caption.trim()}
@@ -7683,19 +8120,6 @@ export default function ChatScreen({
                 );
               })()}
 
-              <Pressable
-                onPress={() => {
-                  if (!messageActionTarget) return;
-                  void deleteForMe(messageActionTarget);
-                  closeMessageActions();
-                }}
-                style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
-              >
-                <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
-                  Delete for me
-                </Text>
-              </Pressable>
-
               {(() => {
                 const t = messageActionTarget;
                 const sub = t?.userSub ? String(t.userSub) : '';
@@ -7743,12 +8167,14 @@ export default function ChatScreen({
               <Pressable
                 onPress={() => {
                   if (!messageActionTarget) return;
-                  openReportModalForMessage(messageActionTarget);
+                  void deleteForMe(messageActionTarget);
                   closeMessageActions();
                 }}
                 style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
               >
-                    <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Report…</Text>
+                <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>
+                  Delete for me
+                </Text>
               </Pressable>
 
               {(() => {
@@ -7777,6 +8203,17 @@ export default function ChatScreen({
                   </Pressable>
                 );
               })()}
+
+              <Pressable
+                onPress={() => {
+                  if (!messageActionTarget) return;
+                  openReportModalForMessage(messageActionTarget);
+                  closeMessageActions();
+                }}
+                style={({ pressed }) => [styles.actionMenuRow, pressed ? styles.actionMenuRowPressed : null]}
+              >
+                <Text style={[styles.actionMenuText, isDark ? styles.actionMenuTextDark : null]}>Report…</Text>
+              </Pressable>
             </View>
           </Animated.View>
         </View>
@@ -7975,43 +8412,51 @@ export default function ChatScreen({
               Messages will disappear after the selected time from when they are sent
             </Text>
             <View style={{ height: 12 }} />
-            {TTL_OPTIONS.map((opt, idx) => {
-              const selected = idx === ttlIdxDraft;
-              return (
-                <Pressable
-                  key={opt.label}
-                  style={[
-                    styles.ttlOptionRow,
-                    isDark ? styles.ttlOptionRowDark : null,
-                    selected
-                      ? (isDark ? styles.ttlOptionRowSelectedDark : styles.ttlOptionRowSelected)
-                      : null,
-                  ]}
-                  onPress={() => {
-                    setTtlIdxDraft(idx);
-                  }}
-                >
-                  <Text
-                    style={[
-                      styles.ttlOptionLabel,
-                      isDark ? styles.ttlOptionLabelDark : null,
-                      selected && !isDark ? styles.ttlOptionLabelSelected : null,
-                    ]}
-                  >
-                    {opt.label}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.ttlOptionRadio,
-                      isDark ? styles.ttlOptionLabelDark : null,
-                      selected && !isDark ? styles.ttlOptionRadioSelected : null,
-                    ]}
-                  >
-                    {selected ? '◉' : '○'}
-                  </Text>
-                </Pressable>
-              );
-            })}
+            <View style={{ flexGrow: 1, flexShrink: 1, minHeight: 0 }}>
+              <ScrollView
+                style={{ flexGrow: 1 }}
+                contentContainerStyle={{ paddingBottom: 4 }}
+                showsVerticalScrollIndicator
+              >
+                {TTL_OPTIONS.map((opt, idx) => {
+                  const selected = idx === ttlIdxDraft;
+                  return (
+                    <Pressable
+                      key={opt.label}
+                      style={[
+                        styles.ttlOptionRow,
+                        isDark ? styles.ttlOptionRowDark : null,
+                        selected
+                          ? (isDark ? styles.ttlOptionRowSelectedDark : styles.ttlOptionRowSelected)
+                          : null,
+                      ]}
+                      onPress={() => {
+                        setTtlIdxDraft(idx);
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.ttlOptionLabel,
+                          isDark ? styles.ttlOptionLabelDark : null,
+                          selected && !isDark ? styles.ttlOptionLabelSelected : null,
+                        ]}
+                      >
+                        {opt.label}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.ttlOptionRadio,
+                          isDark ? styles.ttlOptionLabelDark : null,
+                          selected && !isDark ? styles.ttlOptionRadioSelected : null,
+                        ]}
+                      >
+                        {selected ? '◉' : '○'}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </View>
             <View style={styles.summaryButtons}>
               <Pressable
                 style={[styles.toolBtn, isDark ? styles.toolBtnDark : null]}
@@ -8033,24 +8478,111 @@ export default function ChatScreen({
       <Modal visible={groupNameEditOpen} transparent animationType="fade" onRequestClose={() => setGroupNameEditOpen(false)}>
         <View style={styles.modalOverlay}>
           <View style={[styles.summaryModal, isDark ? styles.summaryModalDark : null]}>
-            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Group name</Text>
+            <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>Group Name</Text>
             <TextInput
               value={groupNameDraft}
               onChangeText={setGroupNameDraft}
-              placeholder="Optional group name"
+              placeholder="Group Name"
               placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
               selectionColor={isDark ? '#ffffff' : '#111'}
               cursorColor={isDark ? '#ffffff' : '#111'}
-              style={[styles.input, isDark ? styles.inputDark : null, { marginTop: 10 }]}
-              editable={!groupActionBusy}
+              // Use a fully explicit style here (avoid theme/style collisions in Android modals).
+              style={{
+                width: '100%',
+                height: 48,
+                paddingHorizontal: 12,
+                borderWidth: 1,
+                borderRadius: 10,
+                marginTop: 10,
+                backgroundColor: isDark ? '#1c1c22' : '#f2f2f7',
+                borderColor: isDark ? '#3a3a46' : '#e3e3e3',
+                color: isDark ? '#ffffff' : '#111',
+                fontSize: 16,
+              }}
+              // Keep focusable even while requests are running; only the Save button is disabled.
+              editable
+              autoFocus
             />
             <View style={styles.summaryButtons}>
+              <Pressable
+                style={[
+                  styles.toolBtn,
+                  isDark ? styles.toolBtnDark : null,
+                  groupActionBusy ? { opacity: 0.6 } : null,
+                  // Push Save/Cancel to the right.
+                  { marginRight: 'auto' },
+                ]}
+                disabled={groupActionBusy}
+                onPress={async () => {
+                  setGroupNameDraft('');
+                  await groupUpdate('setName', { name: '' });
+                  // Update local header + Chats list immediately (without waiting for a refetch).
+                  setGroupMeta((prev) => (prev ? { ...prev, groupName: undefined } : prev));
+                  try {
+                    if (activeConversationId && onConversationTitleChanged) {
+                      onConversationTitleChanged(activeConversationId, computeDefaultGroupTitleForMe());
+                    }
+                  } catch {
+                    // ignore
+                  }
+                  // Broadcast a generic "group updated" system event so other members refresh titles promptly.
+                  try {
+                    const ws = wsRef.current;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                      ws.send(
+                        JSON.stringify({
+                          action: 'system',
+                          conversationId: activeConversationId,
+                          systemKind: 'update',
+                          updateField: 'groupName',
+                          groupName: '',
+                          createdAt: Date.now(),
+                        })
+                      );
+                    }
+                  } catch {
+                    // ignore
+                  }
+                  setGroupNameEditOpen(false);
+                }}
+              >
+                <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
+                  Default
+                </Text>
+              </Pressable>
               <Pressable
                 style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
                 disabled={groupActionBusy}
                 onPress={async () => {
                   const name = groupNameDraft.trim();
                   await groupUpdate('setName', { name });
+                  // Update local header + Chats list immediately (without waiting for a refetch).
+                  setGroupMeta((prev) => (prev ? { ...prev, groupName: name ? name : undefined } : prev));
+                  try {
+                    if (activeConversationId && onConversationTitleChanged) {
+                      onConversationTitleChanged(activeConversationId, name ? name : computeDefaultGroupTitleForMe());
+                    }
+                  } catch {
+                    // ignore
+                  }
+                  // Broadcast a generic "group updated" system event so other members refresh titles promptly.
+                  try {
+                    const ws = wsRef.current;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                      ws.send(
+                        JSON.stringify({
+                          action: 'system',
+                          conversationId: activeConversationId,
+                          systemKind: 'update',
+                          updateField: 'groupName',
+                          groupName: name,
+                          createdAt: Date.now(),
+                        })
+                      );
+                    }
+                  } catch {
+                    // ignore
+                  }
                   setGroupNameEditOpen(false);
                 }}
               >
@@ -8080,14 +8612,31 @@ export default function ChatScreen({
             {groupMeta?.meIsAdmin ? (
               <View style={{ marginTop: 10 }}>
                 <TextInput
+                  ref={(r) => {
+                    groupAddMembersInputRef.current = r;
+                  }}
                   value={groupAddMembersDraft}
                   onChangeText={setGroupAddMembersDraft}
                   placeholder="Add usernames (comma/space separated)"
                   placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
                   selectionColor={isDark ? '#ffffff' : '#111'}
                   cursorColor={isDark ? '#ffffff' : '#111'}
-                  style={[styles.input, isDark ? styles.inputDark : null]}
-                  editable={!groupActionBusy}
+                  // Use a fully explicit style here (avoid theme/style collisions in Android modals).
+                  style={{
+                    width: '100%',
+                    height: 48,
+                    paddingHorizontal: 12,
+                    borderWidth: 1,
+                    borderRadius: 10,
+                    // Off-color (so it stands out from the modal background).
+                    backgroundColor: isDark ? '#1c1c22' : '#f2f2f7',
+                    borderColor: isDark ? '#3a3a46' : '#e3e3e3',
+                    color: isDark ? '#ffffff' : '#111',
+                    fontSize: 16,
+                  }}
+                  // Keep focusable even while requests are running; only the Add button is disabled.
+                  editable
+                  returnKeyType="done"
                 />
                 <View style={[styles.summaryButtons, { justifyContent: 'flex-end' }]}>
                   <Pressable
@@ -8108,72 +8657,77 @@ export default function ChatScreen({
               </View>
             ) : null}
 
-            <ScrollView style={{ marginTop: 10, maxHeight: 360 }}>
-              {groupMembers
-                .slice()
-                .sort((a, b) => (a.status === b.status ? (a.displayName || a.memberSub).localeCompare(b.displayName || b.memberSub) : a.status.localeCompare(b.status)))
-                .map((m) => {
-                  const label = m.displayName || m.memberSub.slice(0, 10);
-                  const isMe = !!myUserId && m.memberSub === myUserId;
-                  const canAdmin = !!groupMeta?.meIsAdmin && !isMe;
-                  const canKick = canAdmin && m.status === 'active';
-                  return (
-                    <View key={`gm:${m.memberSub}`} style={{ marginBottom: 10 }}>
-                      <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]} numberOfLines={1}>
-                        {label}{m.isAdmin ? ' (admin)' : ''} — {m.status}
-                      </Text>
-                      {canAdmin ? (
-                        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
-                          <Pressable
-                            style={[
-                              styles.toolBtn,
-                              isDark ? styles.toolBtnDark : null,
-                              (groupActionBusy || !canKick) ? { opacity: 0.6 } : null,
-                            ]}
-                            disabled={groupActionBusy || !canKick}
-                            onPress={() => groupKick(m.memberSub)}
-                          >
-                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Kick</Text>
-                          </Pressable>
-                          <Pressable
-                            style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
-                            disabled={groupActionBusy}
-                            onPress={async () => {
-                              if (m.status === 'banned') await groupUpdate('unban', { memberSub: m.memberSub });
-                              else await groupUpdate('ban', { memberSub: m.memberSub });
-                            }}
-                          >
-                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
-                              {m.status === 'banned' ? 'Unban' : 'Ban'}
-                            </Text>
-                          </Pressable>
-                          <Pressable
-                            style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
-                            disabled={groupActionBusy}
-                            onPress={async () => {
-                              await groupUpdate('removeMembers', { memberSubs: [m.memberSub] });
-                            }}
-                          >
-                            <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>Remove</Text>
-                          </Pressable>
-                          {m.status === 'active' ? (
-                            <Pressable
-                              style={[styles.toolBtn, isDark ? styles.toolBtnDark : null, groupActionBusy ? { opacity: 0.6 } : null]}
-                              disabled={groupActionBusy}
-                              onPress={async () => {
-                                await groupUpdate(m.isAdmin ? 'demoteAdmin' : 'promoteAdmin', { memberSub: m.memberSub });
-                              }}
-                            >
-                              <Text style={[styles.toolBtnText, isDark ? styles.toolBtnTextDark : null]}>
-                                {m.isAdmin ? 'Demote' : 'Promote'}
-                              </Text>
-                            </Pressable>
-                          ) : null}
-                        </View>
-                      ) : null}
-                    </View>
-                  );
-                })}
+            <ScrollView
+              style={{ marginTop: 0, maxHeight: 360 }}
+              contentContainerStyle={{ paddingTop: 0 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              <GroupMembersSectionList
+                members={groupMembersVisible as any}
+                mySub={typeof myUserId === 'string' && myUserId.trim() ? myUserId.trim() : ''}
+                isDark={!!isDark}
+                styles={styles}
+                meIsAdmin={!!groupMeta?.meIsAdmin}
+                groupActionBusy={!!groupActionBusy}
+                kickCooldownUntilBySub={kickCooldownUntilBySub}
+                avatarUrlByPath={avatarUrlByPath}
+                onKick={(memberSub) => groupKick(memberSub)}
+                onUnban={(memberSub) => void groupUpdate('unban', { memberSub })}
+                onToggleAdmin={({ memberSub, isAdmin }) =>
+                  void groupUpdate(isAdmin ? 'demoteAdmin' : 'promoteAdmin', { memberSub })
+                }
+                onBan={async ({ memberSub, label }) => {
+                  const ok =
+                    typeof promptConfirm === 'function'
+                      ? await promptConfirm(
+                          'Ban user?',
+                          `Ban ${label}?\n\nThey will be removed from the chat and stop receiving new messages.\n\nUnban removes the ban, but does not automatically re-add them. To add them back, use “Add” above.`,
+                          { confirmText: 'Ban', cancelText: 'Cancel', destructive: true }
+                        )
+                      : await new Promise<boolean>((resolve) => {
+                          Alert.alert(
+                            'Ban user?',
+                            `Ban ${label}?\n\nThey will be removed from the chat and stop receiving new messages.\n\nUnban removes the ban, but does not automatically re-add them. To add them back, use “Add” above.`,
+                            [
+                              { text: 'Ban', style: 'destructive', onPress: () => resolve(true) },
+                              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+                            ],
+                            { cancelable: true }
+                          );
+                        });
+                  if (!ok) return;
+                  await groupUpdate('ban', { memberSub });
+
+                  // Add a system note like kick, but for ban.
+                  // (Server validates admin + persists/broadcasts.)
+                  try {
+                    const ws = wsRef.current;
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                      ws.send(
+                        JSON.stringify({
+                          action: 'system',
+                          conversationId: activeConversationId,
+                          systemKind: 'ban',
+                          targetSub: memberSub,
+                          createdAt: Date.now(),
+                        })
+                      );
+                      // Eject target from UI without also logging a "kicked" system message.
+                      ws.send(
+                        JSON.stringify({
+                          action: 'kick',
+                          conversationId: activeConversationId,
+                          targetSub: memberSub,
+                          suppressSystem: true,
+                          createdAt: Date.now(),
+                        })
+                      );
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }}
+              />
             </ScrollView>
 
             <View style={styles.summaryButtons}>
@@ -8413,7 +8967,9 @@ const styles = StyleSheet.create({
   messageList: { flex: 1 },
   header: {
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 10,
+    // Keep the bottom tight so the message list starts closer to the header content.
+    paddingBottom: 4,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#e3e3e3',
     backgroundColor: '#fafafa',
@@ -8435,15 +8991,15 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 20, fontWeight: '600', color: '#222' },
   titleDark: { color: '#fff' },
-  welcomeText: { fontSize: 14, color: '#555', marginTop: 4, fontWeight: '700' },
+  welcomeText: { fontSize: 14, color: '#555', marginTop: 2, fontWeight: '700' },
   welcomeTextDark: { color: '#b7b7c2' },
   welcomeTextFlex: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   welcomeRow: { flexDirection: 'row', alignItems: 'center', flexGrow: 1, flexShrink: 1, minWidth: 0 },
-  welcomeAvatar: { marginTop: 4, marginRight: 8, flexShrink: 0 },
-  welcomeStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, flexShrink: 0 },
+  welcomeAvatar: { marginTop: 2, marginRight: 8, flexShrink: 0 },
+  welcomeStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2, flexShrink: 0 },
   welcomeStatusText: { fontSize: 12, color: '#666', fontWeight: '800' },
   headerSubRow: {
-    marginTop: 3,
+    marginTop: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -8473,9 +9029,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 8,
+    marginTop: 0,
     // Keep DM settings on a single horizontal line (no stacking).
     flexWrap: 'nowrap',
+  },
+  groupSettingsRow: {
+    marginTop: 0,
   },
   dmSettingSlotLeft: { flex: 1, alignItems: 'flex-start', minWidth: 0 },
   dmSettingSlotCenter: { flex: 1, alignItems: 'center', minWidth: 0 },
@@ -9109,7 +9668,8 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#e7e7ee',
-    backgroundColor: '#fff',
+    // Off-color so it stands out from the modal background.
+    backgroundColor: '#f2f2f7',
     paddingHorizontal: 12,
     paddingVertical: 10,
     color: '#111',
@@ -9117,7 +9677,7 @@ const styles = StyleSheet.create({
   },
   reportInputDark: {
     borderColor: '#2a2a33',
-    backgroundColor: '#14141a',
+    backgroundColor: '#1c1c22',
     color: '#fff',
   },
   reportCategoryWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
@@ -9169,6 +9729,7 @@ const styles = StyleSheet.create({
   summaryModal: {
     width: '88%',
     maxHeight: '80%',
+    minHeight: 0,
     // Modals should be white in light mode.
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -9177,7 +9738,9 @@ const styles = StyleSheet.create({
   summaryTitle: { fontSize: 18, fontWeight: '700', marginBottom: 10, color: '#111' },
   summaryLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
   summaryLoadingText: { color: '#555', fontWeight: '600' },
-  summaryScroll: { maxHeight: 420 },
+  // IMPORTANT: allow scroll areas inside modals to shrink on small screens
+  // so footer buttons (Done/Close/Cancel) remain reachable.
+  summaryScroll: { flexGrow: 1, flexShrink: 1, minHeight: 0 },
   summaryText: { color: '#222', lineHeight: 20 },
   summaryButtons: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 12, gap: 10 },
   summaryModalDark: { backgroundColor: '#14141a' },
@@ -9302,6 +9865,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   actionMenuMediaThumbPlaceholderText: { color: '#555', fontWeight: '700' },
+  actionMenuMediaMeta: { color: '#666', fontWeight: '700', fontSize: 12, marginTop: -4 },
+  actionMenuMediaMetaDark: { color: '#a7a7b4' },
   actionMenuMediaCaption: { color: '#222', lineHeight: 18 },
   actionMenuMediaCaptionDark: { color: '#d7d7e0' },
   actionMenuOptions: { paddingVertical: 6 },

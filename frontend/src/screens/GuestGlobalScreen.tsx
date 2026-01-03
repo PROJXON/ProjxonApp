@@ -558,7 +558,7 @@ export default function GuestGlobalScreen({
         const combined = [...page.items, ...prev];
         return combined.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
       });
-      // IMPORTANT: do not reset cursor/hasMore during a "latest refresh" —
+      // IMPORTANT: do not reset cursor/hasMore during a "latest refresh" -
       // otherwise we can wipe paging state while the user is scrolling back.
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load messages';

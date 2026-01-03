@@ -70,7 +70,7 @@ function ensureExactlyThreeSuggestions(suggestions, instruction) {
       ]
     : [
         'Sounds good.',
-        'Got it — thanks!',
+        'Got it - thanks!',
         'Can you tell me a bit more?',
       ];
 

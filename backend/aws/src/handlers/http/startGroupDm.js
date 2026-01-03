@@ -173,24 +173,47 @@ async function upsertConversationIndex({
   const convId = safeString(conversationId);
   if (!conversationsTable || !owner || !convId) return;
   const nowMs = Date.now();
+  const setParts = [
+    'peerDisplayName = :pd',
+    'lastMessageAt = :lma',
+    'updatedAt = :u',
+    'conversationKind = :ck',
+  ];
+  const removeParts = [];
+  const values = {
+    ':pd': safeString(peerDisplayName) || (convId.startsWith('gdm#') ? 'Group DM' : 'Direct Message'),
+    ':lma': Number(lastMessageAt) || 0,
+    ':u': nowMs,
+    ':ck': safeString(conversationKind) || (convId.startsWith('dm#') ? 'dm' : 'group'),
+  };
+
+  const lss = safeString(lastSenderSub);
+  if (lss) {
+    setParts.push('lastSenderSub = :lss');
+    values[':lss'] = lss;
+  } else {
+    removeParts.push('lastSenderSub');
+  }
+  const lsd = safeString(lastSenderDisplayName);
+  if (lsd) {
+    setParts.push('lastSenderDisplayName = :lsd');
+    values[':lsd'] = lsd;
+  } else {
+    removeParts.push('lastSenderDisplayName');
+  }
+  if (memberStatus) {
+    setParts.push('memberStatus = :ms');
+    values[':ms'] = String(memberStatus);
+  }
+
+  const updateExpr = `SET ${setParts.join(', ')}${removeParts.length ? ` REMOVE ${removeParts.join(', ')}` : ''}`;
   await ddb
     .send(
       new UpdateCommand({
         TableName: conversationsTable,
         Key: { userSub: owner, conversationId: convId },
-        UpdateExpression:
-          'SET peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd, updatedAt = :u' +
-          ', conversationKind = :ck' +
-          (memberStatus ? ', memberStatus = :ms' : ''),
-        ExpressionAttributeValues: {
-          ':pd': safeString(peerDisplayName) || 'Group DM',
-          ':lma': Number(lastMessageAt) || 0,
-          ':lss': safeString(lastSenderSub) || undefined,
-          ':lsd': safeString(lastSenderDisplayName) || undefined,
-          ':u': nowMs,
-          ':ck': safeString(conversationKind) || 'group',
-          ...(memberStatus ? { ':ms': String(memberStatus) } : {}),
-        },
+        UpdateExpression: updateExpr,
+        ExpressionAttributeValues: values,
       })
     )
     .catch(() => {});
@@ -212,7 +235,7 @@ async function markUnreadAdded({ unreadTable, recipientSub, conversationId, grou
         ExpressionAttributeNames: { '#k': 'kind' },
         ExpressionAttributeValues: {
           ':k': 'added',
-          ':ss': safeString(addedBySub) || undefined,
+          ':ss': safeString(addedBySub) || null,
           ':sd': safeString(groupTitle) || 'Added to group',
           ':t': nowMs,
           // For kind=added, store 0; client treats it as a badge anyway.

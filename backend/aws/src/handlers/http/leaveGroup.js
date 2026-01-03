@@ -52,6 +52,13 @@ exports.handler = async (event) => {
   const groupId = parsed.groupId;
 
   try {
+    // NOTE:
+    // This endpoint is intentionally minimal-permissions:
+    // it only requires dynamodb:UpdateItem on GROUP_MEMBERS_TABLE (+ optional conversationsTable),
+    // and dynamodb:DeleteItem on UNREADS_TABLE.
+    //
+    // "Last admin can't leave" is enforced client-side (and can be enforced server-side
+    // only if this Lambda is granted dynamodb:GetItem/dynamodb:Query).
     await ddb.send(
       new UpdateCommand({
         TableName: groupMembersTable,

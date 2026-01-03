@@ -157,23 +157,48 @@ async function upsertConversationIndex({
   const convId = safeString(conversationId);
   if (!table || !owner || !convId) return;
   const nowMs = Date.now();
+
+  const setParts = [
+    'peerDisplayName = :pd',
+    'lastMessageAt = :lma',
+    'updatedAt = :u',
+    'conversationKind = :ck',
+  ];
+  const removeParts = [];
+  const values = {
+    ':pd': safeString(peerDisplayName) || 'Group DM',
+    ':lma': Number(lastMessageAt) || 0,
+    ':u': nowMs,
+    ':ck': 'group',
+  };
+
+  const lss = safeString(lastSenderSub);
+  if (lss) {
+    setParts.push('lastSenderSub = :lss');
+    values[':lss'] = lss;
+  } else {
+    removeParts.push('lastSenderSub');
+  }
+  const lsd = safeString(lastSenderDisplayName);
+  if (lsd) {
+    setParts.push('lastSenderDisplayName = :lsd');
+    values[':lsd'] = lsd;
+  } else {
+    removeParts.push('lastSenderDisplayName');
+  }
+  if (memberStatus) {
+    setParts.push('memberStatus = :ms');
+    values[':ms'] = String(memberStatus);
+  }
+
+  const updateExpr = `SET ${setParts.join(', ')}${removeParts.length ? ` REMOVE ${removeParts.join(', ')}` : ''}`;
   await ddb
     .send(
       new UpdateCommand({
         TableName: table,
         Key: { userSub: owner, conversationId: convId },
-        UpdateExpression:
-          'SET peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd, updatedAt = :u, conversationKind = :ck' +
-          (memberStatus ? ', memberStatus = :ms' : ''),
-        ExpressionAttributeValues: {
-          ':pd': safeString(peerDisplayName) || 'Group DM',
-          ':lma': Number(lastMessageAt) || 0,
-          ':lss': safeString(lastSenderSub) || undefined,
-          ':lsd': safeString(lastSenderDisplayName) || undefined,
-          ':u': nowMs,
-          ':ck': 'group',
-          ...(memberStatus ? { ':ms': String(memberStatus) } : {}),
-        },
+        UpdateExpression: updateExpr,
+        ExpressionAttributeValues: values,
       })
     )
     .catch(() => {});
@@ -196,11 +221,32 @@ async function markUnreadAdded({ unreadTable, recipientSub, conversationId, grou
         ExpressionAttributeNames: { '#k': 'kind' },
         ExpressionAttributeValues: {
           ':k': 'added',
-          ':ss': safeString(addedBySub) || undefined,
+          ':ss': safeString(addedBySub) || null,
           ':sd': safeString(groupTitle) || 'Added to group',
           ':t': nowMs,
           ':c': 0,
         },
+      })
+    )
+    .catch(() => {});
+}
+
+async function updateUnreadTitleIfExists({ unreadTable, recipientSub, conversationId, groupTitle }) {
+  const table = safeString(unreadTable);
+  if (!table) return;
+  const u = safeString(recipientSub);
+  const convId = safeString(conversationId);
+  const title = safeString(groupTitle);
+  if (!u || !convId || !title) return;
+  // Only update if an unread row already exists. We do NOT want to create new unread entries on rename.
+  await ddb
+    .send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { userSub: u, conversationId: convId },
+        UpdateExpression: 'SET senderDisplayName = :sd',
+        ExpressionAttributeValues: { ':sd': title },
+        ConditionExpression: 'attribute_exists(conversationId)',
       })
     )
     .catch(() => {});
@@ -260,6 +306,10 @@ exports.handler = async (event) => {
       if (activeCount > 8) throw new Error('Too many active members');
     };
 
+    // Track newly-active members (used for system messages + client UX).
+    // Only meaningful for addMembers.
+    let addedSubs = [];
+
     if (op === 'setName') {
       const name = safeString(body.name);
       await ddb.send(
@@ -316,6 +366,7 @@ exports.handler = async (event) => {
           );
         }
       }
+      // We'll compute addedSubs after we re-fetch members at the end (authoritative).
     } else if (op === 'removeMembers') {
       const memberSubsRaw = Array.isArray(body.memberSubs) ? body.memberSubs : [];
       const usernamesRaw = Array.isArray(body.usernames) ? body.usernames : [];
@@ -435,10 +486,26 @@ exports.handler = async (event) => {
       )
     );
 
+    // If the group name changed, keep any existing unread hint titles in sync too.
+    // (This helps "unread messages from <group>" show the new name even before entering the chat.)
+    if (op === 'setName' && unreadTable) {
+      await Promise.all(
+        membersAfter.map((m) =>
+          updateUnreadTitleIfExists({
+            unreadTable,
+            recipientSub: m.memberSub,
+            conversationId: convId,
+            groupTitle: groupTitleFor(m.memberSub),
+          })
+        )
+      );
+    }
+
     // Unread "added" for newly active members.
     if (op === 'addMembers' && unreadTable) {
       const beforeSet = new Set(activeBefore);
       const newlyActive = activeAfter.filter((s) => !beforeSet.has(s) && s !== callerSub);
+      addedSubs = newlyActive.slice();
       await Promise.all(
         newlyActive.map((s) =>
           markUnreadAdded({
@@ -452,7 +519,7 @@ exports.handler = async (event) => {
       );
     }
 
-    return json(200, { ok: true });
+    return json(200, { ok: true, ...(op === 'addMembers' ? { addedSubs } : {}) });
   } catch (err) {
     console.error('groupUpdate error', err);
     if (String(err?.name || '').includes('ConditionalCheckFailed')) return json(404, { message: 'Not found' });

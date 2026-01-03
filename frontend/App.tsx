@@ -53,6 +53,11 @@ import {
 import { HeaderMenuModal } from './src/components/HeaderMenuModal';
 import { AVATAR_DEFAULT_COLORS, AvatarBubble, pickDefaultAvatarColor } from './src/components/AvatarBubble';
 import Feather from '@expo/vector-icons/Feather';
+import {
+  applyTitleOverridesToConversations,
+  applyTitleOverridesToUnreadMap,
+  setTitleOverride,
+} from './src/utils/conversationTitles';
 
 import {
   generateKeypair,
@@ -1077,6 +1082,10 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
     });
   }, []);
 
+  // Local title overrides (source of truth from in-chat group meta).
+  // Used to keep Chats list + unread labels consistent even if serverConversations is stale.
+  const titleOverrideByConvIdRef = React.useRef<Record<string, string>>({});
+
   const dmThreadsList = React.useMemo(() => {
     const entries = Object.entries(dmThreads)
       .map(([convId, info]) => ({
@@ -1119,13 +1128,38 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
           lastMessageAt: Number(c?.lastMessageAt ?? 0),
         }))
         .filter((c: any) => c.conversationId);
-      setServerConversations(parsed);
+
+      // Apply any local overrides (e.g. group name changed in-chat).
+      const parsedWithOverrides = applyTitleOverridesToConversations(parsed, titleOverrideByConvIdRef.current);
+      setServerConversations(parsedWithOverrides);
       setConversationsCacheAt(Date.now());
       try {
         await AsyncStorage.setItem(
           'conversations:cache:v1',
-          JSON.stringify({ at: Date.now(), conversations: parsed })
+          JSON.stringify({ at: Date.now(), conversations: parsedWithOverrides })
         );
+      } catch {
+        // ignore
+      }
+
+      // Best-effort: keep "Added to group: <title>" unread labels in sync with renamed group titles.
+      try {
+        const titleByConvId = new Map(
+          parsedWithOverrides
+            .map((c: any) => [String(c.conversationId || ''), String(c.peerDisplayName || '').trim()] as const)
+            .filter(([id, t]: readonly [string, string]) => id && t)
+        );
+        setUnreadDmMap((prev) => {
+          const next = { ...prev };
+          for (const [convId, info] of Object.entries(prev || {})) {
+            const title = titleByConvId.get(convId);
+            if (!title) continue;
+            if (info?.user && String(info.user).startsWith('Added to group:')) {
+              next[convId] = { ...info, user: `Added to group: ${title}` };
+            }
+          }
+          return next;
+        });
       } catch {
         // ignore
       }
@@ -1135,6 +1169,87 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
       setChatsLoading(false);
     }
   }, [API_URL]);
+
+  const fetchUnreads = React.useCallback(async (): Promise<void> => {
+    if (!API_URL) return;
+    try {
+      const { tokens } = await fetchAuthSession();
+      const idToken = tokens?.idToken?.toString();
+      if (!idToken) return;
+      const res = await fetch(`${API_URL.replace(/\/$/, '')}/unreads`, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const unread = Array.isArray(data.unread) ? data.unread : [];
+      const next: Record<string, { user: string; count: number; senderSub?: string }> = {};
+      for (const it of unread) {
+        const convId = String(it.conversationId || '');
+        if (!convId) continue;
+        const kind = typeof it.kind === 'string' ? String(it.kind) : '';
+        // Prefer display name if backend provides it; fall back to legacy `sender`/`user`.
+        // For kind=added, senderDisplayName is treated as the group title.
+        const sender = String(
+          it.senderDisplayName || it.sender || it.user || (kind === 'added' ? 'Added to group' : 'someone')
+        );
+        const senderSub = it.senderSub ? String(it.senderSub) : undefined;
+        const countRaw = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
+        const count = kind === 'added' ? 1 : Math.max(1, Math.floor(countRaw));
+        next[convId] = {
+          user: kind === 'added' ? `Added to group: ${sender}` : sender,
+          senderSub,
+          count,
+        };
+        const lastAt = Number(it.lastMessageCreatedAt || 0);
+        upsertDmThread(convId, sender, Number.isFinite(lastAt) && lastAt > 0 ? lastAt : Date.now());
+      }
+      setUnreadDmMap((prev) => {
+        // Prefer freshly fetched unread info, but apply any local group title overrides
+        // so UI doesn't regress to a stale default name.
+        const merged: Record<string, { user: string; count: number; senderSub?: string }> = { ...prev, ...next };
+        return applyTitleOverridesToUnreadMap(merged, titleOverrideByConvIdRef.current);
+      });
+    } catch {
+      // ignore
+    }
+  }, [API_URL, upsertDmThread]);
+
+  // Used by ChatScreen to instantly update the Chats list + current header title after
+  // a group name change (without waiting for refetch).
+  const handleConversationTitleChanged = React.useCallback(
+    (convIdRaw: string, titleRaw: string) => {
+      const convId = String(convIdRaw || '').trim();
+      if (!convId || convId === 'global') return;
+      const title = String(titleRaw || '').trim();
+      if (!title) return;
+
+      // Persist local override so fetches won't overwrite the UI with stale server titles.
+      titleOverrideByConvIdRef.current = setTitleOverride(titleOverrideByConvIdRef.current, convId, title);
+
+      // Update current chat title if we're in it.
+      if (conversationId === convId) {
+        setPeer(title);
+      }
+
+      // Update server-backed conversations cache + DM threads list (best-effort).
+      setServerConversations((prev) => {
+        const next = prev.map((c) => (c.conversationId === convId ? { ...c, peerDisplayName: title } : c));
+        try {
+          AsyncStorage.setItem('conversations:cache:v1', JSON.stringify({ at: Date.now(), conversations: next })).catch(() => {});
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+
+      // If there's a pending "Added to group: ..." unread label for this conversation, keep it in sync.
+      setUnreadDmMap((prev) => {
+        return applyTitleOverridesToUnreadMap(prev, { [convId]: title });
+      });
+      upsertDmThread(convId, title, Date.now());
+    },
+    [conversationId, upsertDmThread]
+  );
 
   const deleteConversationFromList = React.useCallback(
     async (conversationIdToDelete: string) => {
@@ -1427,15 +1542,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
   // Refresh conversation list when opening the Chats modal.
   React.useEffect(() => {
     if (!chatsOpen) return;
-    // Cache strategy:
-    // - Show whatever we already have immediately (state or persisted cache).
-    // - Refresh in background only if stale.
-    const STALE_MS = 60_000;
-    // IMPORTANT: don't refetch in a loop when the server returns 0 conversations.
-    // Use the last fetch timestamp (even if empty) to gate refreshes.
-    if (conversationsCacheAt && Date.now() - conversationsCacheAt < STALE_MS) return;
     void fetchConversations();
-  }, [chatsOpen, fetchConversations, conversationsCacheAt]);
+    void fetchUnreads();
+  }, [chatsOpen, fetchConversations, fetchUnreads]);
 
   // Load cached conversations on boot so Chats opens instantly.
   React.useEffect(() => {
@@ -1701,43 +1810,9 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
 
   // Hydrate unread DMs on login so the badge survives logout/login.
   React.useEffect(() => {
-    (async () => {
-      if (!API_URL) return;
-      try {
-        const { tokens } = await fetchAuthSession();
-        const idToken = tokens?.idToken?.toString();
-        if (!idToken) return;
-        const res = await fetch(`${API_URL.replace(/\/$/, '')}/unreads`, {
-          headers: { Authorization: `Bearer ${idToken}` },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        const unread = Array.isArray(data.unread) ? data.unread : [];
-        const next: Record<string, { user: string; count: number; senderSub?: string }> = {};
-        for (const it of unread) {
-          const convId = String(it.conversationId || '');
-          if (!convId) continue;
-          const kind = typeof it.kind === 'string' ? String(it.kind) : '';
-          // Prefer display name if backend provides it; fall back to legacy `sender`/`user`.
-          // For kind=added, senderDisplayName is treated as the group title.
-          const sender = String(it.senderDisplayName || it.sender || it.user || (kind === 'added' ? 'Added to group' : 'someone'));
-          const senderSub = it.senderSub ? String(it.senderSub) : undefined;
-          const countRaw = Number.isFinite(Number(it.messageCount)) ? Number(it.messageCount) : 1;
-          const count = kind === 'added' ? 1 : Math.max(1, Math.floor(countRaw));
-          next[convId] = {
-            user: kind === 'added' ? `Added to group: ${sender}` : sender,
-            senderSub,
-            count,
-          };
-          const lastAt = Number(it.lastMessageCreatedAt || 0);
-          upsertDmThread(convId, sender, Number.isFinite(lastAt) && lastAt > 0 ? lastAt : Date.now());
-        }
-        setUnreadDmMap((prev) => ({ ...next, ...prev }));
-      } catch {
-        // ignore
-      }
-    })();
-  }, [API_URL, user, upsertDmThread]);
+    if (!user) return;
+    void fetchUnreads();
+  }, [user, fetchUnreads]);
 
   const promptVisible = !!passphrasePrompt;
   const promptLabel =
@@ -3195,6 +3270,7 @@ const MainAppContent = ({ onSignedOut }: { onSignedOut?: () => void }) => {
             setConversationId('global');
             setPeer(null);
           }}
+          onConversationTitleChanged={handleConversationTitleChanged}
           headerTop={headerTop}
           theme={theme}
           chatBackground={chatBackground}

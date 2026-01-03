@@ -427,21 +427,49 @@ const upsertConversationIndex = async ({
 
   const conversationKind = convId.startsWith('gdm#') ? 'group' : convId.startsWith('dm#') ? 'dm' : undefined;
   try {
+    const setParts = ['peerDisplayName = :pd', 'lastMessageAt = :lma'];
+    const removeParts = [];
+    const values = {
+      ':pd': safeString(peerDisplayName) || (convId.startsWith('gdm#') ? 'Group DM' : 'Direct Message'),
+      ':lma': Number(lastMessageAt) || 0,
+    };
+
+    const ps = safeString(peerSub);
+    if (ps) {
+      setParts.push('peerSub = :ps');
+      values[':ps'] = ps;
+    } else {
+      removeParts.push('peerSub');
+    }
+
+    const lss = safeString(lastSenderSub);
+    if (lss) {
+      setParts.push('lastSenderSub = :lss');
+      values[':lss'] = lss;
+    } else {
+      removeParts.push('lastSenderSub');
+    }
+
+    const lsd = safeString(lastSenderDisplayName);
+    if (lsd) {
+      setParts.push('lastSenderDisplayName = :lsd');
+      values[':lsd'] = lsd;
+    } else {
+      removeParts.push('lastSenderDisplayName');
+    }
+
+    if (conversationKind) {
+      setParts.push('conversationKind = :ck');
+      values[':ck'] = conversationKind;
+    }
+
+    const updateExpr = `SET ${setParts.join(', ')}${removeParts.length ? ` REMOVE ${removeParts.join(', ')}` : ''}`;
     await ddb.send(
       new UpdateCommand({
         TableName: table,
         Key: { userSub: owner, conversationId: convId },
-        UpdateExpression:
-          'SET peerSub = :ps, peerDisplayName = :pd, lastMessageAt = :lma, lastSenderSub = :lss, lastSenderDisplayName = :lsd' +
-          (conversationKind ? ', conversationKind = :ck' : ''),
-        ExpressionAttributeValues: {
-          ':ps': safeString(peerSub) || undefined,
-          ':pd': safeString(peerDisplayName) || undefined,
-          ':lma': Number(lastMessageAt) || 0,
-          ':lss': safeString(lastSenderSub) || undefined,
-          ':lsd': safeString(lastSenderDisplayName) || undefined,
-          ...(conversationKind ? { ':ck': conversationKind } : {}),
-        },
+        UpdateExpression: updateExpr,
+        ExpressionAttributeValues: values,
       })
     );
   } catch (err) {
@@ -666,6 +694,122 @@ exports.handler = async (event) => {
       return { statusCode: 400, body: 'Invalid conversationId.' };
     }
 
+    // ---- SYSTEM (group-only, audit/event message) ----
+    // Allows the client to request a server-validated system message (so it persists + broadcasts).
+    // Most system events are admin-only, except a user may publish their own "left" event.
+    if (action === 'system') {
+      if (!groupId) return { statusCode: 400, body: 'system only supported for group DMs.' };
+      const systemKind = safeString(body.systemKind);
+      const allowed = new Set(['ban', 'unban', 'kick', 'left', 'removed', 'added', 'update']);
+      if (!systemKind || !allowed.has(systemKind)) {
+        return { statusCode: 400, body: 'Invalid systemKind.' };
+      }
+
+      const targetSub = safeString(body.targetSub);
+      // Permission model:
+      // - Admin required for ban/unban/kick/removed/added
+      // - "left" is allowed for any active member, but only for themselves (targetSub === senderSub)
+      const isSelfLeft = systemKind === 'left' && targetSub && targetSub === senderSub;
+      if (systemKind === 'left' && !isSelfLeft) {
+        return { statusCode: 400, body: 'left requires targetSub = senderSub.' };
+      }
+      // Auth rules:
+      // - For admin-only events: require active admin.
+      // - For self-left event: allow either active OR already-left member (so the client can log the event
+      //   after a successful /groups/leave call without racing).
+      if (isSelfLeft) {
+        if (!groupMember || (groupMember.status !== 'active' && groupMember.status !== 'left')) {
+          return { statusCode: 403, body: 'Forbidden.' };
+        }
+      } else {
+        if (!groupMember || groupMember.status !== 'active' || !groupMember.isAdmin) {
+          return { statusCode: 403, body: 'Admin required.' };
+        }
+      }
+
+      let targetLabel = null;
+      if (targetSub) {
+        try {
+          targetLabel = await getUserDisplayNameBySub(targetSub);
+        } catch {
+          targetLabel = null;
+        }
+      }
+      const targetName = targetSub
+        ? (targetLabel || `${String(targetSub).slice(0, 6)}…${String(targetSub).slice(-4)}`)
+        : null;
+
+      let systemText = safeString(body.text);
+      if (!systemText) {
+        if (systemKind === 'ban' && targetName) systemText = `${targetName} was banned by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'added' && targetName) systemText = `${targetName} was added by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'unban' && targetName) systemText = `${targetName} was unbanned by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'kick' && targetName) systemText = `${targetName} was kicked by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'left' && targetName) systemText = `${targetName} left the chat`;
+        else if (systemKind === 'removed' && targetName) systemText = `${targetName} was removed by ${senderDisplayName || 'an admin'}`;
+        else if (systemKind === 'update') {
+          const updateField = safeString(body.updateField || body.field);
+          const groupName = safeString(body.groupName);
+          if (updateField === 'groupName') {
+            systemText = groupName ? `Group name changed to ${groupName}` : 'Group name reset to default';
+          } else {
+            systemText = `${senderDisplayName || 'An admin'} updated the group`;
+          }
+        } else systemText = `${senderDisplayName || 'An admin'} updated the group`;
+      }
+
+      const systemMessageId = `sys-${nowMs}-${Math.random().toString(36).slice(2)}`;
+
+      // Persist (optional) so late joiners can see it in history.
+      if (process.env.MESSAGES_TABLE) {
+        try {
+          await ddb.send(
+            new PutCommand({
+              TableName: process.env.MESSAGES_TABLE,
+              Item: {
+                conversationId,
+                createdAt: nowMs,
+                messageId: systemMessageId,
+                kind: 'system',
+                systemKind,
+                actorSub: senderSub,
+                actorUser: senderDisplayName,
+                ...(targetSub ? { targetSub } : {}),
+                ...(targetName ? { targetUser: targetName } : {}),
+                text: systemText,
+                user: 'System',
+                userLower: 'system',
+              },
+            })
+          );
+        } catch (err) {
+          console.warn('system message persist failed (ignored)', err);
+        }
+      }
+
+      // Realtime broadcast to active members.
+      try {
+        await broadcast(mgmt, recipientConnIds, {
+          type: 'system',
+          kind: 'system',
+          systemKind,
+          conversationId,
+          messageId: systemMessageId,
+          createdAt: nowMs,
+          text: systemText,
+          user: 'System',
+          userLower: 'system',
+          actorSub: senderSub,
+          actorUser: senderDisplayName,
+          ...(targetSub ? { targetSub } : {}),
+          ...(targetName ? { targetUser: targetName } : {}),
+        });
+      } catch (err) {
+        console.warn('system message broadcast failed (ignored)', err);
+      }
+      return { statusCode: 200, body: 'System message sent.' };
+    }
+
     // ---- KICK (group-only, admin-only, UI eject) ----
     if (action === 'kick') {
       if (!groupId) return { statusCode: 400, body: 'kick only supported for group DMs.' };
@@ -674,6 +818,71 @@ exports.handler = async (event) => {
       }
       const targetSub = safeString(body.targetSub);
       if (!targetSub) return { statusCode: 400, body: 'targetSub is required.' };
+      const suppressSystem = body && body.suppressSystem === true;
+
+      if (!suppressSystem) {
+        // Best-effort: broadcast a "system message" to the group chat so everyone sees the event in history/UI.
+        // Kick is UI-only (no membership change), but the event itself can still be logged.
+        let targetLabel = null;
+        try {
+          targetLabel = await getUserDisplayNameBySub(targetSub);
+        } catch {
+          targetLabel = null;
+        }
+        const targetName = targetLabel || `${String(targetSub).slice(0, 6)}…${String(targetSub).slice(-4)}`;
+        const systemText = `${targetName} was kicked by ${senderDisplayName || 'an admin'}`;
+        const systemMessageId = `sys-${nowMs}-${Math.random().toString(36).slice(2)}`;
+
+        // Persist (optional) so late joiners can see it in history.
+        if (process.env.MESSAGES_TABLE) {
+          try {
+            await ddb.send(
+              new PutCommand({
+                TableName: process.env.MESSAGES_TABLE,
+                Item: {
+                  conversationId,
+                  createdAt: nowMs,
+                  messageId: systemMessageId,
+                  kind: 'system',
+                  systemKind: 'kick',
+                  actorSub: senderSub,
+                  actorUser: senderDisplayName,
+                  targetSub,
+                  targetUser: targetName,
+                  text: systemText,
+                  user: 'System',
+                  userLower: 'system',
+                },
+              })
+            );
+          } catch (err) {
+            // Never fail the kick if logging fails.
+            console.warn('kick system message persist failed (ignored)', err);
+          }
+        }
+
+        // Realtime broadcast to active members.
+        try {
+          await broadcast(mgmt, recipientConnIds, {
+            type: 'system',
+            kind: 'system',
+            systemKind: 'kick',
+            conversationId,
+            messageId: systemMessageId,
+            createdAt: nowMs,
+            text: systemText,
+            user: 'System',
+            userLower: 'system',
+            actorSub: senderSub,
+            actorUser: senderDisplayName,
+            targetSub,
+            targetUser: targetName,
+          });
+        } catch (err) {
+          console.warn('kick system message broadcast failed (ignored)', err);
+        }
+      }
+
       const targetConns = await queryConnIdsByUserSub(targetSub).catch(() => []);
       if (Array.isArray(targetConns) && targetConns.length) {
         await broadcast(mgmt, targetConns, {
