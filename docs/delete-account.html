@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Projxon – Delete Account</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <div class="brand"><a href="./index.html">PROJXON</a></div>
+        <div class="muted">Delete Account</div>
+      </header>
+
+      <section class="card">
+        <h1>Delete your account</h1>
+        <p class="muted">Last updated: 2026-01-03</p>
+
+        <div class="callout" id="status">Not signed in.</div>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
+          <button id="btnSignIn" class="toolBtn">Sign in</button>
+          <button id="btnDelete" class="toolBtn" disabled>Delete my account</button>
+          <button id="btnSignOut" class="toolBtn" disabled>Sign out</button>
+        </div>
+
+        <hr style="border:none; border-top:1px solid #e7e7ee; margin:16px 0;" />
+
+        <h2>In-app deletion (recommended)</h2>
+        <ol>
+          <li>Open the app and sign in.</li>
+          <li>Open the menu → <strong>Delete account</strong>.</li>
+          <li>Confirm deletion.</li>
+        </ol>
+
+        <h2>If you can’t access the app</h2>
+        <p>
+          Email us from the email address associated with your account:
+          <a href="mailto:it@projxon.com?subject=Projxon%20Account%20Deletion%20Request">it@projxon.com</a>
+        </p>
+
+        <h2>What gets deleted</h2>
+        <ul>
+          <li>Profile data (display name, avatar settings)</li>
+          <li>Push notification tokens</li>
+          <li>Recovery blob (if set)</li>
+          <li>Blocklist entries and conversation index entries (best-effort)</li>
+        </ul>
+
+        <p class="callout">
+          Note: Messages you already sent may remain visible to other users unless removed by message deletion or other
+          retention policies.
+        </p>
+
+        <p class="callout">
+          <strong>Timeline:</strong> account deletion is typically immediate, but some cleanup (such as cached media)
+          may take a short time to fully disappear.
+        </p>
+      </section>
+
+      <footer class="footer muted">
+        <a href="./privacy.html">Privacy Policy</a> · <a href="./index.html">Back</a>
+      </footer>
+    </main>
+
+    <script>
+      /**
+       * Self-serve web deletion flow (Cognito Hosted UI + PKCE):
+       * 1) User clicks "Sign in" → redirect to Hosted UI authorize endpoint
+       * 2) Cognito redirects back here with ?code=...
+       * 3) This page exchanges code for tokens and uses id_token to call your API:
+       *      POST /account/delete  Authorization: Bearer <id_token>
+       *
+       * IMPORTANT:
+       * - Your API Gateway JWT authorizer "audience" must include the *web* app client id below,
+       *   otherwise the API call will 401.
+       */
+
+      // TODO: Fill these in after you create a Cognito domain + web app client.
+      // Example domain format:
+      //   https://your-prefix.auth.us-east-2.amazoncognito.com
+      const COGNITO_DOMAIN = "https://projxon-delete.auth.us-east-2.amazoncognito.com";
+      const COGNITO_CLIENT_ID = "314g39eeml02vfl8u5rl3iln45";
+
+      // Your HTTP API base (from app.json API_URL).
+      const API_BASE = "https://828bp5ailc.execute-api.us-east-2.amazonaws.com";
+
+      const REDIRECT_URI = window.location.origin + window.location.pathname;
+      const SCOPES = "openid email";
+      const STORAGE_VERIFIER = "pkce_verifier";
+
+      const qs = new URLSearchParams(window.location.search);
+      const statusEl = document.getElementById("status");
+      const btnSignIn = document.getElementById("btnSignIn");
+      const btnDelete = document.getElementById("btnDelete");
+      const btnSignOut = document.getElementById("btnSignOut");
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function base64url(bytes) {
+        let s = btoa(String.fromCharCode(...bytes));
+        return s.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+      }
+
+      async function sha256(str) {
+        const enc = new TextEncoder().encode(str);
+        const hash = await crypto.subtle.digest("SHA-256", enc);
+        return new Uint8Array(hash);
+      }
+
+      function randomString(len) {
+        const bytes = new Uint8Array(len);
+        crypto.getRandomValues(bytes);
+        return base64url(bytes);
+      }
+
+      async function startLogin() {
+        const state = randomString(18);
+        const verifier = randomString(48);
+        localStorage.setItem(STORAGE_VERIFIER, verifier);
+
+        const challenge = base64url(await sha256(verifier));
+        const authUrl =
+          `${COGNITO_DOMAIN}/oauth2/authorize` +
+          `?client_id=${encodeURIComponent(COGNITO_CLIENT_ID)}` +
+          `&response_type=code` +
+          `&scope=${encodeURIComponent(SCOPES)}` +
+          `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+          `&state=${encodeURIComponent(state)}` +
+          `&code_challenge_method=S256` +
+          `&code_challenge=${encodeURIComponent(challenge)}`;
+
+        window.location.assign(authUrl);
+      }
+
+      async function exchangeCodeForTokens(code) {
+        const verifier = localStorage.getItem(STORAGE_VERIFIER) || "";
+        if (!verifier) throw new Error("Missing PKCE verifier. Please Sign in again.");
+
+        const body = new URLSearchParams();
+        body.set("grant_type", "authorization_code");
+        body.set("client_id", COGNITO_CLIENT_ID);
+        body.set("code", code);
+        body.set("redirect_uri", REDIRECT_URI);
+        body.set("code_verifier", verifier);
+
+        const resp = await fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        if (!resp.ok) throw new Error(`Token exchange failed (${resp.status})`);
+        return await resp.json();
+      }
+
+      function clearQueryString() {
+        const clean = window.location.origin + window.location.pathname;
+        window.history.replaceState({}, "", clean);
+      }
+
+      let idToken = "";
+
+      async function initFromRedirect() {
+        const code = qs.get("code");
+        const err = qs.get("error");
+        if (err) {
+          setStatus(`Sign-in error: ${err}`);
+          clearQueryString();
+          return;
+        }
+        if (!code) return;
+
+        setStatus("Signing you in...");
+        try {
+          const tok = await exchangeCodeForTokens(code);
+          idToken = tok.id_token || "";
+          if (!idToken) throw new Error("Missing id_token");
+          setStatus("Signed in. You can delete your account.");
+          btnDelete.disabled = false;
+          btnSignOut.disabled = false;
+        } catch (e) {
+          setStatus(`Sign-in failed: ${e && e.message ? e.message : String(e)}`);
+        } finally {
+          clearQueryString();
+        }
+      }
+
+      async function deleteAccount() {
+        if (!idToken) return;
+        const ok = confirm("This will permanently delete your account. Continue?");
+        if (!ok) return;
+
+        setStatus("Deleting account...");
+        btnDelete.disabled = true;
+
+        const resp = await fetch(`${API_BASE.replace(/\/$/, "")}/account/delete`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            "Content-Type": "application/json",
+          },
+          body: "{}",
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => "");
+          setStatus(`Delete failed (${resp.status}): ${text || "unknown error"}`);
+          btnDelete.disabled = false;
+          return;
+        }
+
+        setStatus("Account deleted. You may close this page.");
+        btnSignOut.disabled = false;
+      }
+
+      function signOut() {
+        const logoutUrl =
+          `${COGNITO_DOMAIN}/logout` +
+          `?client_id=${encodeURIComponent(COGNITO_CLIENT_ID)}` +
+          `&logout_uri=${encodeURIComponent(REDIRECT_URI)}`;
+        window.location.assign(logoutUrl);
+      }
+
+      btnSignIn.addEventListener("click", () => void startLogin());
+      btnDelete.addEventListener("click", () => void deleteAccount());
+      btnSignOut.addEventListener("click", () => signOut());
+
+      void initFromRedirect();
+    </script>
+  </body>
+</html>
+
