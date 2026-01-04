@@ -35,8 +35,19 @@ const {
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
+// Keep group names short so they render well in headers and don't bloat system/update messages.
+const MAX_GROUP_NAME_LEN = 20;
+
 const safeString = (v) => (typeof v === 'string' ? String(v).trim() : '');
 const uniq = (arr) => Array.from(new Set((Array.isArray(arr) ? arr : []).map((s) => safeString(s)).filter(Boolean)));
+
+const normalizeGroupName = (v) => {
+  if (typeof v !== 'string') return '';
+  // Avoid multi-line / control whitespace names that can break UI layout.
+  const s = String(v).replace(/[\r\n\t]/g, ' ').trim();
+  // Collapse repeated spaces for nicer display.
+  return s.replace(/ {2,}/g, ' ');
+};
 
 const json = (statusCode, bodyObj) => ({
   statusCode,
@@ -311,7 +322,10 @@ exports.handler = async (event) => {
     let addedSubs = [];
 
     if (op === 'setName') {
-      const name = safeString(body.name);
+      const name = normalizeGroupName(body.name);
+      if (name.length > MAX_GROUP_NAME_LEN) {
+        return json(400, { message: `Group name too long (max ${MAX_GROUP_NAME_LEN} characters)` });
+      }
       await ddb.send(
         new UpdateCommand({
           TableName: groupsTable,

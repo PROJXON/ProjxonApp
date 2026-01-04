@@ -5988,7 +5988,7 @@ export default function ChatScreen({
         <View style={[styles.header, isDark ? styles.headerDark : null]}>
           {headerTop ? <View style={styles.headerTopSlot}>{headerTop}</View> : null}
           <View style={styles.titleRow}>
-            <Text style={[styles.title, isDark ? styles.titleDark : null]} numberOfLines={1}>
+            <Text style={[styles.title, isDark ? styles.titleDark : null]} numberOfLines={1} ellipsizeMode="tail">
               {peer
                 ? (isGroup ? (groupMeta?.groupName?.trim() ? groupMeta.groupName.trim() : peer) : `DM with ${peer}`)
                 : 'Global Chat'}
@@ -8483,6 +8483,7 @@ export default function ChatScreen({
               value={groupNameDraft}
               onChangeText={setGroupNameDraft}
               placeholder="Group Name"
+              maxLength={20}
               placeholderTextColor={isDark ? '#8f8fa3' : '#999'}
               selectionColor={isDark ? '#ffffff' : '#111'}
               cursorColor={isDark ? '#ffffff' : '#111'}
@@ -8989,7 +8990,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 10,
   },
-  title: { fontSize: 20, fontWeight: '600', color: '#222' },
+  title: { fontSize: 20, fontWeight: '600', color: '#222', flexGrow: 1, flexShrink: 1, minWidth: 0 },
   titleDark: { color: '#fff' },
   welcomeText: { fontSize: 14, color: '#555', marginTop: 2, fontWeight: '700' },
   welcomeTextDark: { color: '#b7b7c2' },
