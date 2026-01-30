@@ -4,30 +4,6 @@ Open‑source (**MIT‑licensed**) cross‑platform chat app (iOS / Android / We
 
 Primary web app: **`https://chat.orkaos.com/`**
 
-Legacy redirects:
-- `https://app.orkaos.com/` → `https://chat.orkaos.com/`
-- `https://orkaos.com/chat` → `https://chat.orkaos.com/`
-
-## Legal & support
-
-- Legal index: `https://projxon.github.io/OrkaChat/index.html`
-- Privacy policy: `https://projxon.github.io/OrkaChat/privacy.html`
-- Delete account: `https://projxon.github.io/OrkaChat/delete-account.html`
-
-## SEO / indexing (Google)
-
-For Google to crawl the web app and rank the brand query (“OrkaChat”), we publish:
-
-- `frontend/public/robots.txt` → `https://chat.orkaos.com/robots.txt`
-- `frontend/public/sitemap.xml` → `https://chat.orkaos.com/sitemap.xml`
-
-After deploying those files, set up **Google Search Console**:
-
-- Add a **Domain property** for `orkaos.com` (recommended; covers `chat.orkaos.com`)
-- Verify via **DNS TXT record**
-- Submit the sitemap (`https://chat.orkaos.com/sitemap.xml`)
-- Use **URL inspection** to request indexing for `https://chat.orkaos.com/`
-
 ## Features
 
 ### Messaging
@@ -255,6 +231,30 @@ The signer Lambda behind `POST /media/dm/signed-url` must have:
 - Terraform staging backend (IaC): `infra/terraform/staging/README.md`
 - Backend routes (HTTP + WebSocket): `backend/aws/src/handlers/README.md`
 - Web portal hosting (Amplify Hosting / S3+CloudFront): `docs/web-portal-deploy.md`
+
+- Legacy redirects:
+- `https://app.orkaos.com/` → `https://chat.orkaos.com/`
+- `https://orkaos.com/chat` → `https://chat.orkaos.com/`
+
+## SEO / indexing (Google)
+
+For Google to crawl the web app and rank the brand query (“OrkaChat”), we publish:
+
+- `frontend/public/robots.txt` → `https://chat.orkaos.com/robots.txt`
+- `frontend/public/sitemap.xml` → `https://chat.orkaos.com/sitemap.xml`
+
+After deploying those files, set up **Google Search Console**:
+
+- Add a **Domain property** for `orkaos.com` (recommended; covers `chat.orkaos.com`)
+- Verify via **DNS TXT record**
+- Submit the sitemap (`https://chat.orkaos.com/sitemap.xml`)
+- Use **URL inspection** to request indexing for `https://chat.orkaos.com/`
+
+## Legal & support
+
+- Legal index: `https://projxon.github.io/OrkaChat/index.html`
+- Privacy policy: `https://projxon.github.io/OrkaChat/privacy.html`
+- Delete account: `https://projxon.github.io/OrkaChat/delete-account.html`
 
 ## License
 
