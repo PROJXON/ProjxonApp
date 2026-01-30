@@ -1048,3 +1048,114 @@ resource "aws_lambda_permission" "ws_authorizer_invoke" {
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.ws_api.execution_arn}/authorizers/*"
 }
+
+# -------------------------
+# Alarms (core)
+# -------------------------
+
+locals {
+  alarms_enabled = trim(var.alarm_email) != ""
+
+  # Create the topic only when alarms_enabled is true.
+  alarm_topic_arn = try(aws_sns_topic.alarms[0].arn, null)
+
+  # CloudWatch alarm_actions must be a list; empty list disables notifications.
+  alarm_actions = local.alarm_topic_arn == null ? [] : [local.alarm_topic_arn]
+
+  # Minimal: “is chat working?” alarms
+  alarm_lambda_functions = {
+    getMessages       = aws_lambda_function.get_messages.function_name
+    getPublicMessages = aws_lambda_function.get_public_messages.function_name
+    wsMessage         = aws_lambda_function.ws_message.function_name
+    wsAuthorizer      = aws_lambda_function.ws_authorizer.function_name
+  }
+}
+
+resource "aws_sns_topic" "alarms" {
+  count = local.alarms_enabled ? 1 : 0
+  name  = "chat-app-alarms-${local.suffix}"
+  tags  = local.tags
+}
+
+resource "aws_sns_topic_subscription" "alarms_email" {
+  count     = local.alarms_enabled ? 1 : 0
+  topic_arn = aws_sns_topic.alarms[0].arn
+  protocol  = "email"
+  endpoint  = var.alarm_email
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
+  for_each = local.alarms_enabled ? local.alarm_lambda_functions : {}
+
+  alarm_name        = "lambda-errors-${each.key}-${local.suffix}"
+  alarm_description = "Lambda Errors >= 1 in 1 minute (${each.key})"
+
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    FunctionName = each.value
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
+  for_each = local.alarms_enabled ? local.alarm_lambda_functions : {}
+
+  alarm_name        = "lambda-throttles-${each.key}-${local.suffix}"
+  alarm_description = "Lambda Throttles >= 1 in 1 minute (${each.key})"
+
+  namespace           = "AWS/Lambda"
+  metric_name         = "Throttles"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    FunctionName = each.value
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "http_5xx" {
+  count = local.alarms_enabled ? 1 : 0
+
+  alarm_name        = "http-api-5xx-${local.suffix}"
+  alarm_description = "HTTP API 5XX >= 1 in 1 minute"
+
+  namespace           = "AWS/ApiGateway"
+  metric_name         = "5XXError"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ApiId = aws_apigatewayv2_api.http_api.id
+    Stage = aws_apigatewayv2_stage.http_default.name
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+
+  tags = local.tags
+}

@@ -42,8 +42,8 @@ If you prefer to do it manually (or want to inspect the output folder), you can 
 
 ```bash
 ORKA_ENV=staging \
-STAGING_API_URL="https://xvgh1xcxq4.execute-api.us-east-2.amazonaws.com/staging" \
-STAGING_WS_URL="wss://odi40ea4if.execute-api.us-east-2.amazonaws.com/staging" \
+STAGING_API_URL="https://biihelt40a.execute-api.us-east-2.amazonaws.com/" \
+STAGING_WS_URL="wss://ux6kuwr0o0.execute-api.us-east-2.amazonaws.com/tf-staging" \
 npx expo export -p web --output-dir dist-staging --clear
 
 npx http-server dist-staging -p 4173 -c-1
