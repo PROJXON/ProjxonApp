@@ -1,0 +1,11 @@
+cognito_user_pool_id        = "us-east-2_XXXXXXXXX"
+cognito_user_pool_client_id = "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Path is relative to infra/terraform/staging
+lambda_zip_path = "../../../backend/aws/dist/backend.zip"
+
+name_suffix = "tf-staging"
+
+# Empty string disables alarms.
+alarm_email = "you@example.com"
+

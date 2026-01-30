@@ -30,6 +30,14 @@ URLs are sourced from:
 - `amplify_outputs.web.json` / `amplify_outputs.json` (preferred for CDN + signer URLs)
 - Code: `src/config/env.ts`
 
+### Staging backend (Terraform)
+
+For Playwright E2E (CI + local), the staging backend is provisioned by Terraform in `infra/terraform/staging/`.
+Use `terraform output` from that folder to get the current:
+
+- `STAGING_API_URL` (HTTP API base URL)
+- `STAGING_WS_URL` (WebSocket `wss://...` URL)
+
 ## AI streaming (SSE)
 
 The app supports **streamed AI responses** for:

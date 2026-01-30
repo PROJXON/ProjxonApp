@@ -32,8 +32,8 @@ From `frontend/` (recommended: one command; Playwright will export + serve autom
 
 ```bash
 ORKA_ENV=staging \
-STAGING_API_URL="https://xvgh1xcxq4.execute-api.us-east-2.amazonaws.com/staging" \
-STAGING_WS_URL="wss://odi40ea4if.execute-api.us-east-2.amazonaws.com/staging" \
+STAGING_API_URL="https://biihelt40a.execute-api.us-east-2.amazonaws.com/" \
+STAGING_WS_URL="wss://ux6kuwr0o0.execute-api.us-east-2.amazonaws.com/tf-staging" \
 E2E_BASE_URL="http://127.0.0.1:4173" \
 npm run e2e
 ```

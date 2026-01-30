@@ -90,7 +90,10 @@ This project has not been independently security‑audited. Don’t rely on it f
 
 - **Frontend**: `frontend/` is an Expo app (React Native + RN Web), written in **TypeScript**
 - **Auth**: **AWS Cognito** (via Amplify Auth)
-- **Backend**: AWS resources are currently **provisioned manually** (API Gateway + Lambdas + DynamoDB; no IaC). See `backend/README.md` for **API Gateway route mapping** (currently documented: ~23 HTTP routes + 3 WebSocket routes, plus the WS authorizer) and **DynamoDB table/GSI setup** (currently documented: 16 tables).
+- **Backend**:
+  - **Staging (Terraform)**: Terraform provisions a **staging** backend (DynamoDB + Lambdas + API Gateway HTTP + WebSocket) under `infra/terraform/staging/`. This is the environment used by Playwright E2E and is intended for learning/resume (greenfield, Terraform-managed resources).
+  - **Other envs**: Some resources may still be created manually depending on the environment.
+  - See `backend/aws/src/handlers/README.md` for route → handler mapping and table/index expectations.
 - **Realtime (signed‑in users)**: **API Gateway WebSockets** → Lambda route handler(s)
 - **HTTP (guest/public + some hydration)**: **API Gateway HTTP API** → Lambda handlers
 - **Data**: DynamoDB (users, messages, conversations, reads/unreads, blocks, reports, quotas, connections)
@@ -117,7 +120,7 @@ ProjxonApp/
 │   └── aws/
 │       └── src/
 │           └── handlers/             # Lambda handlers (HTTP, WebSocket, async workers)
-├── layer/                            # Lambda layer(s)
+├── infra/                            # Terraform (staging) + other infra
 └── docs/                             # Deployment docs (web portal, policies, etc.)
 ```
 
@@ -249,7 +252,7 @@ The signer Lambda behind `POST /media/dm/signed-url` must have:
 
 ## Docs / reference
 
-- Backend setup (manual AWS resources, routes, DynamoDB tables/GSIs): `backend/README.md`
+- Terraform staging backend (IaC): `infra/terraform/staging/README.md`
 - Backend routes (HTTP + WebSocket): `backend/aws/src/handlers/README.md`
 - Web portal hosting (Amplify Hosting / S3+CloudFront): `docs/web-portal-deploy.md`
 
