@@ -7,7 +7,11 @@ This folder stores the **source code** for the AWS Lambdas used by OrkaChat.
 - `http/`: Lambdas invoked by the HTTP API (API Gateway HTTP API v2)
 - `ws/`: Lambdas invoked by the WebSocket API (API Gateway WebSockets)
 
-## Required AWS resources (manual backend)
+## Terraform staging backend (recommended for this repo)
+
+This repo includes a Terraform-managed **staging** backend under `infra/terraform/staging/` (DynamoDB + Lambdas + API Gateway HTTP + WebSocket). That environment packages these handlers + `backend/aws/src/lib` into a single Lambda zip deployment package.
+
+## Required AWS resources (manual backend reference)
 
 This repo **tracks Lambda source**, but if you deploy by copy/paste in the AWS Console you must also create the backing AWS resources manually (API Gateway routes + DynamoDB tables + GSIs, etc.).
 

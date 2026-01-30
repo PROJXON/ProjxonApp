@@ -1,11 +1,21 @@
-# Backend (manual AWS setup)
+# Backend
 
-This repo **tracks the Lambda source code**, but the backend resources are currently **created manually in AWS** (no IaC).
+This repo tracks the Lambda source code under `backend/aws/src/handlers/`.
+
+## Terraform staging (IaC)
+
+For staging (used by Playwright E2E and learning/resume work), the backend is provisioned with **Terraform**:
+
+- Terraform config: `infra/terraform/staging/`
+- Deploy artifact: `backend/aws/dist/backend.zip` (built from `backend/aws/src` + `backend/aws/node_modules`)
+- Outputs: `terraform output` prints the **HTTP** and **WebSocket** URLs used by CI (`STAGING_API_URL`, `STAGING_WS_URL`)
+
+See `infra/terraform/staging/README.md` for the exact workflow.
 
 ## Where the backend code lives
 
 - Lambda handlers (HTTP + WebSocket + async worker): `backend/aws/src/handlers/`
-- Lambda layers: `layer/`
+  - Note: Terraform staging bundles shared libs directly into the Lambda zip (no Lambda Layers).
 
 ## Setup docs
 
