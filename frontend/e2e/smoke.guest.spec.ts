@@ -23,5 +23,5 @@ test('guest loads and can open sign-in modal', async ({ page }) => {
   await signInToChat.click();
 
   // Assert the modal opened by checking for a known label.
-  await expect(page.getByText(/sign in/i)).toBeVisible();
+  await expect(page.getByPlaceholder('Enter your Email')).toBeVisible({ timeout: 30_000 });
 });

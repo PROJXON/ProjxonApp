@@ -43,6 +43,23 @@ frontend/eas-build-logs/
 **/build/
 **/.cxx/
 
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
 # IDE and OS
 .DS_Store
 .vscode/

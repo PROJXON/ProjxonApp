@@ -35,7 +35,7 @@ const {
 
 // Lambda Layer import (required):
 // - Layer must contain: /opt/nodejs/lib/channels.js
-const channelsLib = require('/opt/nodejs/lib/channels.js');
+const channelsLib = require('../../lib/channels.js');
 if (!channelsLib || typeof channelsLib.hashPassword !== 'function' || typeof channelsLib.validateChannelName !== 'function') {
   throw new Error(
     'Channels layer is missing required exports (hashPassword/validateChannelName). Publish the latest channels-lib-layer.zip and attach the updated Layer version to this Lambda.'
