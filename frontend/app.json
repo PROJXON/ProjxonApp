@@ -9,6 +9,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.projxon.orkachat",
       "infoPlist": {
         "NSCameraUsageDescription": "We use your camera to capture photos and videos to attach to messages.",
         "NSMicrophoneUsageDescription": "We use your microphone when recording video attachments.",
