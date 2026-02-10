@@ -14,7 +14,8 @@
         "NSCameraUsageDescription": "We use your camera to capture photos and videos to attach to messages.",
         "NSMicrophoneUsageDescription": "We use your microphone when recording video attachments.",
         "NSPhotoLibraryUsageDescription": "We use your photo library to pick media to attach to messages.",
-        "NSPhotoLibraryAddUsageDescription": "We save attachments you download to your photo library."
+        "NSPhotoLibraryAddUsageDescription": "We save attachments you download to your photo library.",
+        "ITSAppUsesNonExemptEncryption": false
       },
       "icon": {
         "dark": "./assets/icons/ios-dark.png",
@@ -32,7 +33,10 @@
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.projxon.orkachat",
       "googleServicesFile": "./google-services.json",
-      "permissions": ["android.permission.CAMERA", "android.permission.RECORD_AUDIO"]
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./public/favicon-32.png"
