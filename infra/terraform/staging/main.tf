@@ -1054,7 +1054,7 @@ resource "aws_lambda_permission" "ws_authorizer_invoke" {
 # -------------------------
 
 locals {
-  alarms_enabled = trim(var.alarm_email) != ""
+  alarms_enabled = trimspace(var.alarm_email) != ""
 
   # Create the topic only when alarms_enabled is true.
   alarm_topic_arn = try(aws_sns_topic.alarms[0].arn, null)
