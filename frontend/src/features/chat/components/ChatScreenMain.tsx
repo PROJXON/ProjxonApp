@@ -244,6 +244,11 @@ export function ChatScreenMain({
     (Platform.OS === 'web' && list.visibleMessagesCount > 0 && !list.webPinned.ready) ||
     (list.visibleMessagesCount === 0 && !!list.API_URL && list.historyLoading);
 
+  // iOS: A positive keyboardVerticalOffset makes KeyboardAvoidingView add less padding, so the
+  // composer sits lower and the input stays just above the keyboard (visible gap). Zero or negative
+  // offset adds more padding and the keyboard can cover the input.
+  const iosKeyboardVerticalOffset = 10;
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -254,6 +259,7 @@ export function ChatScreenMain({
       // On Android we do an explicit composer lift (below) based on keyboard + window resize.
       // Keeping KAV enabled on Android can create double-adjust gaps depending on IME settings.
       enabled={Platform.OS === 'ios'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? iosKeyboardVerticalOffset : 0}
     >
       {/* Stage 3 loader: center relative to the full screen (same as root spinners),
           not just the message-list area below the header. */}
