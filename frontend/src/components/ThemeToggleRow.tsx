@@ -24,7 +24,14 @@ export function ThemeToggleRow({
   styles: ThemeToggleRowStyles;
 }): React.JSX.Element {
   return (
-    <View style={[styles.themeToggle, isDark && styles.themeToggleDark]}>
+    <View
+      style={[
+        styles.themeToggle,
+        isDark && styles.themeToggleDark,
+        // iOS: native Switch is larger; use tighter padding so row fits and left padding can show.
+        Platform.OS === 'ios' && { paddingHorizontal: 6, marginLeft: 8 },
+      ]}
+    >
       <Feather
         name={isDark ? 'moon' : 'sun'}
         size={16}

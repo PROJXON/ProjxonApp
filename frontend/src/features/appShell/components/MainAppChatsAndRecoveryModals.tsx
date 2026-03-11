@@ -93,6 +93,137 @@ export function MainAppChatsAndRecoveryModals({
       ),
     [chatsKb.keyboardVisible, chatsKb.remainingOverlap, chatsKb.windowHeight, chatsSheetHeight],
   );
+
+  // Chats panel content (shared by Modal and iOS View overlay).
+  const chatsPanelContent = (
+    <View
+      style={[
+        styles.modalOverlay,
+        Platform.OS !== 'web' && chatsBottomPad > 0 ? { paddingBottom: chatsBottomPad } : null,
+      ]}
+    >
+      <Pressable style={StyleSheet.absoluteFill} onPress={() => setChatsOpen(false)} />
+      <View
+        style={[
+          styles.chatsCard,
+          isDark ? styles.chatsCardDark : null,
+          Platform.OS !== 'web' && chatsKb.keyboardVisible
+            ? { maxHeight: chatsKb.availableHeightAboveKeyboard, minHeight: 0 }
+            : null,
+        ]}
+        onLayout={(e) => {
+          const h = e?.nativeEvent?.layout?.height;
+          if (typeof h === 'number' && Number.isFinite(h) && h > 0) setChatsSheetHeight(h);
+        }}
+      >
+        <View style={styles.chatsTopRow}>
+          <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Chats</Text>
+        </View>
+        <ScrollView style={styles.chatsScroll}>
+          {chatsLoading ? (
+            <View style={styles.chatsLoadingRow}>
+              <Text
+                style={[
+                  styles.modalHelperText,
+                  isDark ? styles.modalHelperTextDark : null,
+                  styles.chatsLoadingText,
+                ]}
+              >
+                Loading
+              </Text>
+              <View style={styles.chatsLoadingDotsWrap}>
+                <AnimatedDots
+                  color={isDark ? APP_COLORS.dark.text.primary : APP_COLORS.light.text.primary}
+                  size={18}
+                />
+              </View>
+            </View>
+          ) : chatsList.length ? (
+            chatsList.map((t) => (
+              <Pressable
+                key={`chat:${t.conversationId}`}
+                style={({ pressed }) => [
+                  styles.chatRow,
+                  isDark ? styles.chatRowDark : null,
+                  pressed ? { opacity: 0.9 } : null,
+                ]}
+                onPress={() => {
+                  setChatsOpen(false);
+                  goToConversation(t.conversationId);
+                }}
+              >
+                <View style={styles.chatRowLeft}>
+                  <Text
+                    style={[styles.chatRowName, isDark ? styles.chatRowNameDark : null]}
+                    numberOfLines={1}
+                  >
+                    {t.peer || 'Direct Message'}
+                  </Text>
+                </View>
+                <View style={styles.chatRowRight}>
+                  {t.lastActivityAt ? (
+                    <Text
+                      style={[styles.chatRowDate, isDark ? styles.chatRowDateDark : null]}
+                      numberOfLines={1}
+                      accessibilityLabel="Last message date"
+                    >
+                      {formatChatActivityDate(t.lastActivityAt)}
+                    </Text>
+                  ) : null}
+                  {(t.unreadCount || 0) > 0 ? (
+                    <View style={[styles.unreadChip, isDark ? styles.unreadChipDark : null]}>
+                      <Text
+                        style={[styles.unreadChipText, isDark ? styles.unreadChipTextDark : null]}
+                      >
+                        {t.unreadCount}
+                      </Text>
+                    </View>
+                  ) : null}
+                  <Pressable
+                    onPress={() =>
+                      void Promise.resolve(deleteConversationFromList(t.conversationId))
+                    }
+                    style={({ pressed }) => [
+                      styles.chatDeleteBtn,
+                      isDark ? styles.chatDeleteBtnDark : null,
+                      pressed ? { opacity: 0.85 } : null,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove chat"
+                  >
+                    <Feather
+                      name="trash-2"
+                      size={16}
+                      color={isDark ? APP_COLORS.dark.text.primary : APP_COLORS.light.text.primary}
+                    />
+                  </Pressable>
+                </View>
+              </Pressable>
+            ))
+          ) : (
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+              No active chats
+            </Text>
+          )}
+        </ScrollView>
+        <View style={styles.modalButtons}>
+          <Pressable
+            style={[
+              styles.modalButton,
+              styles.modalButtonSmall,
+              isDark ? styles.modalButtonDark : null,
+            ]}
+            onPress={() => setChatsOpen(false)}
+          >
+            <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+              Close
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+
   return (
     <>
       <Modal
@@ -245,137 +376,7 @@ export function MainAppChatsAndRecoveryModals({
         animationType="fade"
         onRequestClose={() => setChatsOpen(false)}
       >
-        <View
-          style={[
-            styles.modalOverlay,
-            Platform.OS !== 'web' && chatsBottomPad > 0 ? { paddingBottom: chatsBottomPad } : null,
-          ]}
-        >
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setChatsOpen(false)} />
-          <View
-            style={[
-              styles.chatsCard,
-              isDark ? styles.chatsCardDark : null,
-              Platform.OS !== 'web' && chatsKb.keyboardVisible
-                ? { maxHeight: chatsKb.availableHeightAboveKeyboard, minHeight: 0 }
-                : null,
-            ]}
-            onLayout={(e) => {
-              const h = e?.nativeEvent?.layout?.height;
-              if (typeof h === 'number' && Number.isFinite(h) && h > 0) setChatsSheetHeight(h);
-            }}
-          >
-            <View style={styles.chatsTopRow}>
-              <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>Chats</Text>
-            </View>
-            <ScrollView style={styles.chatsScroll}>
-              {chatsLoading ? (
-                <View style={styles.chatsLoadingRow}>
-                  <Text
-                    style={[
-                      styles.modalHelperText,
-                      isDark ? styles.modalHelperTextDark : null,
-                      styles.chatsLoadingText,
-                    ]}
-                  >
-                    Loading
-                  </Text>
-                  <View style={styles.chatsLoadingDotsWrap}>
-                    <AnimatedDots
-                      color={isDark ? APP_COLORS.dark.text.primary : APP_COLORS.light.text.primary}
-                      size={18}
-                    />
-                  </View>
-                </View>
-              ) : chatsList.length ? (
-                chatsList.map((t) => (
-                  <Pressable
-                    key={`chat:${t.conversationId}`}
-                    style={({ pressed }) => [
-                      styles.chatRow,
-                      isDark ? styles.chatRowDark : null,
-                      pressed ? { opacity: 0.9 } : null,
-                    ]}
-                    onPress={() => {
-                      setChatsOpen(false);
-                      goToConversation(t.conversationId);
-                    }}
-                  >
-                    <View style={styles.chatRowLeft}>
-                      <Text
-                        style={[styles.chatRowName, isDark ? styles.chatRowNameDark : null]}
-                        numberOfLines={1}
-                      >
-                        {t.peer || 'Direct Message'}
-                      </Text>
-                    </View>
-                    <View style={styles.chatRowRight}>
-                      {t.lastActivityAt ? (
-                        <Text
-                          style={[styles.chatRowDate, isDark ? styles.chatRowDateDark : null]}
-                          numberOfLines={1}
-                          accessibilityLabel="Last message date"
-                        >
-                          {formatChatActivityDate(t.lastActivityAt)}
-                        </Text>
-                      ) : null}
-                      {(t.unreadCount || 0) > 0 ? (
-                        <View style={[styles.unreadChip, isDark ? styles.unreadChipDark : null]}>
-                          <Text
-                            style={[
-                              styles.unreadChipText,
-                              isDark ? styles.unreadChipTextDark : null,
-                            ]}
-                          >
-                            {t.unreadCount}
-                          </Text>
-                        </View>
-                      ) : null}
-                      <Pressable
-                        onPress={() =>
-                          void Promise.resolve(deleteConversationFromList(t.conversationId))
-                        }
-                        style={({ pressed }) => [
-                          styles.chatDeleteBtn,
-                          isDark ? styles.chatDeleteBtnDark : null,
-                          pressed ? { opacity: 0.85 } : null,
-                        ]}
-                        accessibilityRole="button"
-                        accessibilityLabel="Remove chat"
-                      >
-                        <Feather
-                          name="trash-2"
-                          size={16}
-                          color={
-                            isDark ? APP_COLORS.dark.text.primary : APP_COLORS.light.text.primary
-                          }
-                        />
-                      </Pressable>
-                    </View>
-                  </Pressable>
-                ))
-              ) : (
-                <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
-                  No active chats
-                </Text>
-              )}
-            </ScrollView>
-            <View style={styles.modalButtons}>
-              <Pressable
-                style={[
-                  styles.modalButton,
-                  styles.modalButtonSmall,
-                  isDark ? styles.modalButtonDark : null,
-                ]}
-                onPress={() => setChatsOpen(false)}
-              >
-                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
-                  Close
-                </Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
+        {chatsPanelContent}
       </Modal>
     </>
   );
