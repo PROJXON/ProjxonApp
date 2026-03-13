@@ -167,11 +167,7 @@ export function HeaderMenuModal({
               accessibilityLabel={it.label}
             >
               <Text
-                style={[
-                  styles.rowText,
-                  { color: text },
-                  !it.right ? styles.rowTextCenter : null,
-                ]}
+                style={[styles.rowText, { color: text }, !it.right ? styles.rowTextCenter : null]}
                 numberOfLines={1}
                 ellipsizeMode="tail"
               >
@@ -234,10 +230,7 @@ export function HeaderMenuModal({
           ]}
         >
           <View style={[cardStyle, { zIndex: 1 }]}>{cardContent}</View>
-          <Pressable
-            style={[StyleSheet.absoluteFill, { zIndex: 0 }]}
-            onPress={onClose}
-          />
+          <Pressable style={[StyleSheet.absoluteFill, { zIndex: 0 }]} onPress={onClose} />
         </View>
       </View>
     );

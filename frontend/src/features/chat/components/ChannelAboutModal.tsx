@@ -90,9 +90,7 @@ export function ChannelAboutModal({
           if (typeof h === 'number' && Number.isFinite(h) && h > 0) setSheetHeight(h);
         }}
       >
-        <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>
-          {title}
-        </Text>
+        <Text style={[styles.summaryTitle, isDark ? styles.summaryTitleDark : null]}>{title}</Text>
 
         {edit ? (
           <>
@@ -121,9 +119,7 @@ export function ChannelAboutModal({
                 paddingVertical: 10,
                 borderWidth: 1,
                 borderRadius: 10,
-                backgroundColor: isDark
-                  ? APP_COLORS.dark.bg.header
-                  : APP_COLORS.light.bg.surface2,
+                backgroundColor: isDark ? APP_COLORS.dark.bg.header : APP_COLORS.light.bg.surface2,
                 borderColor: isDark
                   ? APP_COLORS.dark.border.default
                   : APP_COLORS.light.border.subtle,
@@ -132,11 +128,7 @@ export function ChannelAboutModal({
               }}
             />
             <Text
-              style={[
-                styles.summaryText,
-                isDark ? styles.summaryTextDark : null,
-                { marginTop: 6 },
-              ]}
+              style={[styles.summaryText, isDark ? styles.summaryTextDark : null, { marginTop: 6 }]}
             >
               {`${String(draft || '').length}/4000`}
             </Text>

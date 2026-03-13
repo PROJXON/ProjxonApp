@@ -33,10 +33,7 @@
       "softwareKeyboardLayoutMode": "resize",
       "package": "com.projxon.orkachat",
       "googleServicesFile": "./google-services.json",
-      "permissions": [
-        "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
-      ]
+      "permissions": ["android.permission.CAMERA", "android.permission.RECORD_AUDIO"]
     },
     "web": {
       "favicon": "./public/favicon-32.png"
