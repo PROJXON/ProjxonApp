@@ -7,7 +7,7 @@ import { getRandomBytes } from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import React from 'react';
 import type { AppStateStatus, TextInput } from 'react-native';
-import { AppState, Platform, useWindowDimensions } from 'react-native';
+import { AppState, Keyboard, Platform, useWindowDimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AI_API_URL, API_URL, CDN_URL, WS_URL } from '../config/env';
@@ -227,21 +227,48 @@ export default function ChatScreen({
   // Android can report different bottom insets when an input is focused / keyboard shows.
   // Cache a stable bottom inset so the composer doesn't "jump" or change height.
   const [androidBottomInsetStable, setAndroidBottomInsetStable] = React.useState<number>(0);
+  // Track whether the iOS keyboard is visible so we can adjust padding separately
+  // for "idle" vs "keyboard-up" states.
+  const [iosKeyboardVisible, setIosKeyboardVisible] = React.useState(false);
   React.useEffect(() => {
     if (Platform.OS !== 'android') return;
     const b =
       typeof insets.bottom === 'number' && Number.isFinite(insets.bottom) ? insets.bottom : 0;
     // Keep the maximum seen value (gesture/nav area). When the keyboard shows, some devices report 0.
     if (b > androidBottomInsetStable) setAndroidBottomInsetStable(b);
-  }, [androidBottomInsetStable, insets.bottom]);
+  }, [androidBottomInsetStable, insets.bottom, iosKeyboardVisible]);
+
+  React.useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    const showSub = Keyboard.addListener('keyboardDidShow', () => setIosKeyboardVisible(true));
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => setIosKeyboardVisible(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const composerSafeAreaStyle = React.useMemo(() => {
-    const bottomInset =
-      Platform.OS === 'android'
-        ? Math.min(androidBottomInsetStable, ANDROID_COMPOSER_BOTTOM_PAD_MAX)
-        : insets.bottom;
-    return { paddingBottom: bottomInset };
-  }, [androidBottomInsetStable, insets.bottom]);
+    if (Platform.OS === 'android') {
+      const bottomInset = Math.min(androidBottomInsetStable, ANDROID_COMPOSER_BOTTOM_PAD_MAX);
+      return { paddingBottom: bottomInset };
+    }
+    if (Platform.OS === 'ios') {
+      const raw =
+        typeof insets.bottom === 'number' && Number.isFinite(insets.bottom) ? insets.bottom : 0;
+      if (iosKeyboardVisible) {
+        // When keyboard is up, respect the full inset and add a small buffer so
+        // the keyboard doesn't visually touch the bottom of the input.
+        return { paddingBottom: raw };
+      }
+      // When keyboard is hidden, reduce the inset so the idle gap is smaller (tighter than before).
+      const IOS_REDUCE_PX = 20;
+      const bottomInset = Math.max(0, raw - IOS_REDUCE_PX);
+      return { paddingBottom: bottomInset };
+    }
+    // Web and any other platforms: preserve original behavior.
+    return { paddingBottom: insets.bottom };
+  }, [androidBottomInsetStable, insets.bottom, iosKeyboardVisible]);
   const composerBottomInsetBgHeight = Platform.OS === 'android' ? androidBottomInsetStable : 0;
   const composerHorizontalInsetsStyle = React.useMemo(
     () => ({ paddingLeft: 12 + insets.left, paddingRight: 12 + insets.right }),
