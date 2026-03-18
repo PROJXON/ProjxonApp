@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Platform } from 'react-native';
 
 import type { ChannelMeta } from './useChannelRoster';
 
@@ -51,14 +52,20 @@ export function useChannelSettingsPanelActions(opts: {
         try {
           setChannelMeta((p) => (p ? { ...p, isPublic: next } : p));
           await channelUpdate('setPublic', { isPublic: next });
-          showToast(next ? 'Channel is now public' : 'Channel is now private', 'success');
-          // Theme-appropriate FYI modal (not a gate).
+
+          // Always show the informational modal (all platforms).
           void uiAlert(
             next ? 'Channel is public' : 'Channel is Private',
             next
-              ? 'This channel is now discoverable in search, and people can join publicly'
-              : 'This channel is no longer discoverable in search to non-members, and people cannot join it publicly',
+              ? 'This channel is now discoverable in search, and people can join publicly.'
+              : 'This channel is no longer discoverable in search to non-members, and people cannot join it publicly.',
           );
+
+          // Only show the toast on non‑iOS platforms; on iOS it appears to
+          // contribute to touch issues when combined with other overlays.
+          if (Platform.OS !== 'ios') {
+            showToast(next ? 'Channel is now public' : 'Channel is now private', 'success');
+          }
         } finally {
           setChannelActionBusy(false);
         }

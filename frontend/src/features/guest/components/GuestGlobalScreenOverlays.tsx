@@ -1,5 +1,5 @@
 import React from 'react';
-import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { GlobalAboutContent } from '../../../components/globalAbout/GlobalAboutContent';
 import { HeaderMenuModal } from '../../../components/HeaderMenuModal';
