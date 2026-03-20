@@ -749,12 +749,31 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
         setViewerState={viewer.setState}
         dmFileUriByPath={dmFileUriByPath}
         saving={viewer.saving}
+        saveConfirm={
+          Platform.OS === 'ios'
+            ? {
+                title: 'Save to Phone?',
+                message: 'Save this media to your device?',
+                confirmText: 'Save',
+                cancelText: 'Cancel',
+                dontShowAgain: {
+                  storageKey: SAVE_TO_PHONE_DONT_SHOW_AGAIN_KEY,
+                  label: SAVE_TO_PHONE_DONT_SHOW_AGAIN_LABEL,
+                },
+              }
+            : undefined
+        }
         onSave={async () => {
           if (Platform.OS === 'web') {
             await viewer.saveToDevice();
             return;
           }
-          const ok = await uiConfirm('Save to phone?', 'Save this media to your device?', {
+          if (Platform.OS === 'ios') {
+            await viewer.saveToDevice();
+            return;
+          }
+
+          const ok = await uiConfirm('Save to Phone?', 'Save this media to your device?', {
             confirmText: 'Save',
             cancelText: 'Cancel',
             dontShowAgain: {

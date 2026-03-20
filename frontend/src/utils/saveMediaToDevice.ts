@@ -22,7 +22,9 @@ function getErrorMessage(err: unknown): string {
 }
 
 type ExpoFileSystemLike = {
-  Paths?: { cache?: string; document?: string };
+  Paths?: { cache?: unknown; document?: unknown };
+  cacheDirectory?: string;
+  documentDirectory?: string;
   getInfoAsync?: (uri: string) => Promise<{ exists?: boolean }>;
   deleteAsync?: (uri: string, opts?: { idempotent?: boolean }) => Promise<void>;
   makeDirectoryAsync?: (uri: string, opts?: { intermediates?: boolean }) => Promise<void>;
@@ -59,9 +61,9 @@ function isUserCancelledError(msg: string): boolean {
 
 async function ensureEmptyDest(fs: ExpoFileSystemLike, uri: string): Promise<void> {
   try {
-    if (typeof fs.getInfoAsync !== 'function' || typeof fs.deleteAsync !== 'function') return;
-    const info = await fs.getInfoAsync(uri);
-    if (info?.exists) await fs.deleteAsync(uri, { idempotent: true });
+    if (typeof fs.deleteAsync !== 'function') return;
+    // Avoid deprecated getInfoAsync; idempotent delete is sufficient for our temp paths.
+    await fs.deleteAsync(uri, { idempotent: true });
   } catch {
     // ignore
   }
@@ -88,6 +90,42 @@ function parseDataUriBase64(url: string): string | null {
   const b64 = url.slice(comma + 1);
   const isBase64 = /;base64/i.test(header);
   return isBase64 ? b64 : null;
+}
+
+function toFileUri(uri: string): string {
+  const u = String(uri || '').trim();
+  if (!u) return u;
+  if (u.startsWith('file://')) return u;
+  if (u.startsWith('/')) return `file://${u}`;
+  return u;
+}
+
+function dirLikeToString(v: unknown): string {
+  if (typeof v === 'string') return v.trim();
+  if (isRecord(v)) {
+    const uri = v.uri;
+    if (typeof uri === 'string') return uri.trim();
+    const path = (v as Record<string, unknown>).path;
+    if (typeof path === 'string') return path.trim();
+  }
+  return '';
+}
+
+function pickWritableRoot(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    const s = dirLikeToString(c);
+    if (s) return s;
+  }
+  return '';
+}
+
+function tryRequireLegacyFileSystem(): ExpoFileSystemLike {
+  try {
+    const legacyMod: unknown = require('expo-file-system/legacy');
+    return isRecord(legacyMod) ? (legacyMod as ExpoFileSystemLike) : {};
+  } catch {
+    return {};
+  }
 }
 
 const ANDROID_SAF_DIR_KEY = 'downloads:safDirectoryUri:v1';
@@ -121,7 +159,7 @@ export async function saveMediaUrlToDevice({
   url,
   kind,
   fileName,
-  onPermissionDenied,
+  onPermissionDenied: _onPermissionDenied,
   onSuccess,
   onError,
 }: {
@@ -144,7 +182,6 @@ export async function saveMediaUrlToDevice({
   const downloadName = `${baseName}.${ext}`;
   const tmpId = `${Date.now()}-${Math.floor(Math.random() * 1_000_000_000)}`;
   const uniqueLeaf = `${tmpId}-${downloadName}`;
-  const uniqueDir = `dl-${tmpId}`;
 
   try {
     // Web: use a browser download flow (MediaLibrary/FileSystem aren't applicable).
@@ -213,10 +250,14 @@ export async function saveMediaUrlToDevice({
       }
     }
 
-    // Native "download/save" flow: for files + audio + images + videos.
-    // - iOS: share sheet so user can "Save to Files" (handles name collisions like (1))
-    // - Android: Downloads module (above), with fallbacks below if module not present
-    if (kind === 'file' || kind === 'image' || kind === 'video') {
+    // Native "download/save" flow:
+    // - Android: files/images/videos go through Downloads/share fallbacks.
+    // - iOS: use the system share/save sheet for all kinds to maximize reliability in dev-client builds.
+    if (
+      kind === 'file' ||
+      Platform.OS === 'ios' ||
+      (Platform.OS === 'android' && (kind === 'image' || kind === 'video'))
+    ) {
       const fsMod: unknown = require('expo-file-system');
       const fs: ExpoFileSystemLike = isRecord(fsMod) ? (fsMod as ExpoFileSystemLike) : {};
       const mimeType = mimeTypeFromExt(extFromName || ext);
@@ -224,8 +265,7 @@ export async function saveMediaUrlToDevice({
       // Android: fallback path when the native module isn't present (e.g. old dev-client build).
       if (Platform.OS === 'android') {
         // SAF lives on expo-file-system legacy in many builds.
-        const legacyMod: unknown = require('expo-file-system/legacy');
-        const legacy: any = isRecord(legacyMod) ? legacyMod : {};
+        const legacy: any = tryRequireLegacyFileSystem();
         const SAF = legacy.StorageAccessFramework;
         const encBase64 = legacy.EncodingType?.Base64;
         const readAsStringAsync = legacy.readAsStringAsync as
@@ -371,126 +411,70 @@ export async function saveMediaUrlToDevice({
         return;
       }
 
-      // iOS: use the system share sheet ("Save to Files" is available there).
-      // If it's already a local file, prompt directly.
+      // iOS: use system share sheet. Build a local file first for remote/data URLs.
       if (url.startsWith('file:')) {
-        await shareLocalFile({ localUri: url, mimeType });
+        await shareLocalFile({ localUri: toFileUri(url), mimeType });
         if (onSuccess) onSuccess();
         return;
       }
 
-      // Download to a *unique folder* but keep the leaf filename intact so the share sheet
-      // shows the real filename (not a temp prefix).
-      const root = fs.Paths?.cache ?? fs.Paths?.document;
+      const legacy: ExpoFileSystemLike = tryRequireLegacyFileSystem();
+      const root = pickWritableRoot(
+        fs.Paths?.cache,
+        fs.Paths?.document,
+        fs.cacheDirectory,
+        fs.documentDirectory,
+        legacy.cacheDirectory,
+        legacy.documentDirectory,
+      );
       if (!root) throw new Error('No writable cache directory');
-      const File = fs.File;
-      if (!File) throw new Error('File API not available');
-      const dir = `${root.replace(/\/+$/, '')}/dl-${tmpId}`;
-      if (typeof fs.makeDirectoryAsync === 'function') {
-        await fs.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
-      }
-      const dest = new File(dir, downloadName);
-      await ensureEmptyDest(fs, dest.uri);
+      const rootBase = root.replace(/\/+$/, '');
+      // iOS/dev-client: write directly to known cache root to avoid mkdir path issues.
+      const localDestUri = `${rootBase}/${tmpId}-${downloadName}`;
+      await ensureEmptyDest(fs, localDestUri);
+      await ensureEmptyDest(legacy, localDestUri);
 
-      // Handle data URIs by writing bytes to cache.
+      let localUri = '';
       if (url.startsWith('data:')) {
         const b64 = parseDataUriBase64(url);
         if (!b64) throw new Error('Unsupported data URI encoding');
-        if (typeof dest.write !== 'function') throw new Error('File write API not available');
-        await ensureEmptyDest(fs, dest.uri);
-        await dest.write(b64, { encoding: 'base64' });
-        await shareLocalFile({ localUri: dest.uri, mimeType });
-        if (onSuccess) onSuccess();
-        return;
-      }
-
-      // Remote URL: download to cache then prompt.
-      if (typeof dest?.downloadFileAsync === 'function') {
-        await dest.downloadFileAsync(url);
-      } else if (typeof File?.downloadFileAsync === 'function') {
-        await File.downloadFileAsync(url, dest);
+        if (typeof fs.writeAsStringAsync === 'function' && fs.EncodingType?.Base64) {
+          await fs.writeAsStringAsync(localDestUri, b64, { encoding: fs.EncodingType.Base64 });
+          localUri = toFileUri(localDestUri);
+        } else if (typeof legacy.writeAsStringAsync === 'function' && legacy.EncodingType?.Base64) {
+          await legacy.writeAsStringAsync(localDestUri, b64, {
+            encoding: legacy.EncodingType.Base64,
+          });
+          localUri = toFileUri(localDestUri);
+        } else {
+          throw new Error('File write API not available');
+        }
       } else {
-        throw new Error('File download API not available');
+        const File = fs.File;
+        // iOS/dev-client: use legacy downloadAsync to avoid deprecation-guard exceptions.
+        if (typeof legacy.downloadAsync === 'function') {
+          const out = await legacy.downloadAsync(url, localDestUri);
+          localUri = toFileUri(String(out?.uri || localDestUri));
+        }
+        if (!localUri && File) {
+          const dest = new File(rootBase, `${tmpId}-${downloadName}`);
+          await ensureEmptyDest(fs, dest.uri);
+          if (typeof dest.downloadFileAsync === 'function') {
+            await dest.downloadFileAsync(url);
+            localUri = toFileUri(dest.uri);
+          } else if (typeof File.downloadFileAsync === 'function') {
+            await File.downloadFileAsync(url, dest);
+            localUri = toFileUri(dest.uri);
+          }
+        }
+        if (!localUri) throw new Error('File download API not available');
       }
 
-      await shareLocalFile({ localUri: dest.uri, mimeType });
+      await shareLocalFile({ localUri, mimeType });
       if (onSuccess) onSuccess();
       return;
     }
-
-    const MediaLibrary = require('expo-media-library') as typeof import('expo-media-library');
-    const perm = await MediaLibrary.requestPermissionsAsync();
-    if (!perm.granted) {
-      if (onPermissionDenied) onPermissionDenied();
-      else Alert.alert('Permission required', 'Please allow photo library access to save media.');
-      return;
-    }
-
-    // Handle data URIs.
-    if (url.startsWith('data:')) {
-      const comma = url.indexOf(',');
-      if (comma < 0) throw new Error('Invalid data URI');
-      const header = url.slice(0, comma);
-      const b64 = url.slice(comma + 1);
-      const isBase64 = /;base64/i.test(header);
-      if (!isBase64) throw new Error('Unsupported data URI encoding');
-
-      const fsMod: unknown = require('expo-file-system');
-      const fs: ExpoFileSystemLike = isRecord(fsMod) ? (fsMod as ExpoFileSystemLike) : {};
-      const root = fs.Paths?.cache ?? fs.Paths?.document;
-      if (!root) throw new Error('No writable cache directory');
-      const File = fs.File;
-      if (!File) throw new Error('File API not available');
-      // Put the "real" filename at the leaf so Photos/Gallery has the best chance to preserve it.
-      const subdir = `${root.replace(/\/+$/, '')}/${uniqueDir}`;
-      if (typeof fs.makeDirectoryAsync === 'function') {
-        await fs.makeDirectoryAsync(subdir, { intermediates: true }).catch(() => {});
-      }
-      const dest = new File(subdir, downloadName);
-      if (typeof dest.write !== 'function') throw new Error('File write API not available');
-      await ensureEmptyDest(fs, dest.uri);
-      await dest.write(b64, { encoding: 'base64' });
-      await MediaLibrary.saveToLibraryAsync(dest.uri);
-      if (onSuccess) onSuccess();
-      else if (Platform.OS === 'android') ToastAndroid.show('Saved to Photos', ToastAndroid.SHORT);
-      return;
-    }
-
-    // If it's already a local file, save it directly.
-    if (url.startsWith('file:')) {
-      await MediaLibrary.saveToLibraryAsync(url);
-      if (onSuccess) onSuccess();
-      else if (Platform.OS === 'android') ToastAndroid.show('Saved to Photos', ToastAndroid.SHORT);
-      return;
-    }
-
-    // Modern Expo FileSystem API (SDK 54+).
-    const fsMod: unknown = require('expo-file-system');
-    const fs: ExpoFileSystemLike = isRecord(fsMod) ? (fsMod as ExpoFileSystemLike) : {};
-    const root = fs.Paths?.cache ?? fs.Paths?.document;
-    if (!root) throw new Error('No writable cache directory');
-    const File = fs.File;
-    if (!File) throw new Error('File API not available');
-    // Put the "real" filename at the leaf so Photos/Gallery has the best chance to preserve it.
-    const subdir = `${root.replace(/\/+$/, '')}/${uniqueDir}`;
-    if (typeof fs.makeDirectoryAsync === 'function') {
-      await fs.makeDirectoryAsync(subdir, { intermediates: true }).catch(() => {});
-    }
-    const dest = new File(subdir, downloadName);
-    await ensureEmptyDest(fs, dest.uri);
-
-    // The docs support either instance or static download; support both for safety.
-    if (typeof dest?.downloadFileAsync === 'function') {
-      await dest.downloadFileAsync(url);
-    } else if (typeof File?.downloadFileAsync === 'function') {
-      await File.downloadFileAsync(url, dest);
-    } else {
-      throw new Error('File download API not available');
-    }
-
-    await MediaLibrary.saveToLibraryAsync(dest.uri);
-    if (onSuccess) onSuccess();
-    else if (Platform.OS === 'android') ToastAndroid.show('Saved to Photos', ToastAndroid.SHORT);
+    throw new Error(`Unsupported save path for platform ${Platform.OS}`);
   } catch (e: unknown) {
     const msg = getErrorMessage(e) || 'Could not save attachment';
     // Avoid noisy errors when a user closes the system share sheet.
