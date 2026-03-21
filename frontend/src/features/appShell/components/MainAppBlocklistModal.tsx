@@ -46,7 +46,7 @@ export function MainAppBlocklistModal({
     blockedUsernameLower?: string;
   }>;
   unblockUser: (sub: string, label?: string) => void | Promise<void>;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const kb = useKeyboardOverlap({ enabled: blocklistOpen });
   const [sheetHeight, setSheetHeight] = React.useState<number>(0);
   const bottomPad = React.useMemo(
