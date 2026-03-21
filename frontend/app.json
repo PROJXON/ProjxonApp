@@ -15,6 +15,7 @@
         "NSMicrophoneUsageDescription": "We use your microphone when recording video attachments.",
         "NSPhotoLibraryUsageDescription": "We use your photo library to pick media to attach to messages.",
         "NSPhotoLibraryAddUsageDescription": "We save attachments you download to your photo library.",
+        "NSUserNotificationUsageDescription": "We send notifications for direct messages and mentions.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "icon": {
