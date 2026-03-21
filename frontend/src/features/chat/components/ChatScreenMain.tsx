@@ -457,23 +457,23 @@ export function ChatScreenMain({
                   { minHeight: 44 },
                 ]}
               >
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'flex-end',
-                    gap: 10,
-                  }}
-                >
-                  {selection.canCopy ? (
+                {selection.count === 0 ? (
+                  <View
+                    style={{
+                      width: '100%',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'flex-end',
+                    }}
+                  >
                     <Pressable
-                      onPress={selection.onCopy}
+                      onPress={selection.onCancel}
                       style={({ pressed }) => [
                         { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
                         pressed ? { opacity: 0.85 } : null,
                       ]}
                       accessibilityRole="button"
-                      accessibilityLabel="Copy selected messages"
+                      accessibilityLabel="Cancel selection"
                     >
                       <Text
                         style={{
@@ -483,20 +483,140 @@ export function ChatScreenMain({
                           fontWeight: '900',
                         }}
                       >
-                        Copy
+                        Cancel
                       </Text>
                     </Pressable>
-                  ) : null}
+                  </View>
+                ) : selection.canDeleteForEveryone ? (
+                  <View style={{ width: '100%', rowGap: 4 }}>
+                    {/* Top: both delete actions */}
+                    <View
+                      style={{
+                        width: '100%',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <Pressable
+                        onPress={selection.onDelete}
+                        style={({ pressed }) => [
+                          { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Delete selected messages for me"
+                      >
+                        <Text
+                          style={{
+                            color: isDark
+                              ? APP_COLORS.dark.text.primary
+                              : APP_COLORS.light.text.primary,
+                            fontWeight: '900',
+                          }}
+                        >
+                          Delete for me
+                        </Text>
+                      </Pressable>
 
-                  {selection.canDeleteForEveryone ? (
+                      <Pressable
+                        onPress={selection.onDeleteForEveryone}
+                        style={({ pressed }) => [
+                          { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Delete selected messages for everyone"
+                      >
+                        <Text
+                          style={{
+                            color: isDark
+                              ? APP_COLORS.dark.text.primary
+                              : APP_COLORS.light.text.primary,
+                            fontWeight: '900',
+                          }}
+                        >
+                          Delete for everyone
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    {/* Bottom: copy + cancel */}
+                    <View
+                      style={{
+                        width: '100%',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      {selection.canCopy ? (
+                        <Pressable
+                          onPress={selection.onCopy}
+                          style={({ pressed }) => [
+                            { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
+                            pressed ? { opacity: 0.85 } : null,
+                          ]}
+                          accessibilityRole="button"
+                          accessibilityLabel="Copy selected messages"
+                        >
+                          <Text
+                            style={{
+                              color: isDark
+                                ? APP_COLORS.dark.text.primary
+                                : APP_COLORS.light.text.primary,
+                              fontWeight: '900',
+                            }}
+                          >
+                            Copy
+                          </Text>
+                        </Pressable>
+                      ) : (
+                        <View />
+                      )}
+
+                      <Pressable
+                        onPress={selection.onCancel}
+                        style={({ pressed }) => [
+                          { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Cancel selection"
+                      >
+                        <Text
+                          style={{
+                            color: isDark
+                              ? APP_COLORS.dark.text.primary
+                              : APP_COLORS.light.text.primary,
+                            fontWeight: '900',
+                          }}
+                        >
+                          Cancel
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : (
+                  <View
+                    style={{
+                      width: '100%',
+                      flexDirection: 'row',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      columnGap: 8,
+                      rowGap: 4,
+                    }}
+                  >
                     <Pressable
-                      onPress={selection.onDeleteForEveryone}
+                      onPress={selection.onDelete}
                       style={({ pressed }) => [
                         { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
                         pressed ? { opacity: 0.85 } : null,
                       ]}
                       accessibilityRole="button"
-                      accessibilityLabel="Delete selected messages for everyone"
+                      accessibilityLabel="Delete selected messages for me"
                     >
                       <Text
                         style={{
@@ -506,53 +626,55 @@ export function ChatScreenMain({
                           fontWeight: '900',
                         }}
                       >
-                        Delete for everyone
+                        Delete for me
                       </Text>
                     </Pressable>
-                  ) : null}
 
-                  <Pressable
-                    onPress={selection.onDelete}
-                    style={({ pressed }) => [
-                      { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
-                      pressed ? { opacity: 0.85 } : null,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel="Delete selected messages for me"
-                  >
-                    <Text
-                      style={{
-                        color: isDark
-                          ? APP_COLORS.dark.text.primary
-                          : APP_COLORS.light.text.primary,
-                        fontWeight: '900',
-                      }}
-                    >
-                      Delete for me
-                    </Text>
-                  </Pressable>
+                    {selection.canCopy ? (
+                      <Pressable
+                        onPress={selection.onCopy}
+                        style={({ pressed }) => [
+                          { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
+                          pressed ? { opacity: 0.85 } : null,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel="Copy selected messages"
+                      >
+                        <Text
+                          style={{
+                            color: isDark
+                              ? APP_COLORS.dark.text.primary
+                              : APP_COLORS.light.text.primary,
+                            fontWeight: '900',
+                          }}
+                        >
+                          Copy
+                        </Text>
+                      </Pressable>
+                    ) : null}
 
-                  <Pressable
-                    onPress={selection.onCancel}
-                    style={({ pressed }) => [
-                      { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
-                      pressed ? { opacity: 0.85 } : null,
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel="Cancel selection"
-                  >
-                    <Text
-                      style={{
-                        color: isDark
-                          ? APP_COLORS.dark.text.primary
-                          : APP_COLORS.light.text.primary,
-                        fontWeight: '900',
-                      }}
+                    <Pressable
+                      onPress={selection.onCancel}
+                      style={({ pressed }) => [
+                        { height: 44, justifyContent: 'center', paddingHorizontal: 10 },
+                        pressed ? { opacity: 0.85 } : null,
+                      ]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel selection"
                     >
-                      Cancel
-                    </Text>
-                  </Pressable>
-                </View>
+                      <Text
+                        style={{
+                          color: isDark
+                            ? APP_COLORS.dark.text.primary
+                            : APP_COLORS.light.text.primary,
+                          fontWeight: '900',
+                        }}
+                      >
+                        Cancel
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
               </View>
             </View>
           ) : (
