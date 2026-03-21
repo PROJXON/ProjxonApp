@@ -702,9 +702,7 @@ export function MainAppChannelsModals({
                     maxWidth: 400,
                     borderRadius: 14,
                     padding: 16,
-                    backgroundColor: isDark
-                      ? APP_COLORS.dark.bg.surface
-                      : APP_COLORS.light.bg.app,
+                    backgroundColor: isDark ? APP_COLORS.dark.bg.surface : APP_COLORS.light.bg.app,
                   }}
                 >
                   <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
@@ -717,7 +715,9 @@ export function MainAppChannelsModals({
                   </Text>
 
                   {leaveIosPrompt.kind === 'alert' ? (
-                    <View style={[styles.modalButtons, { marginTop: 14, justifyContent: 'flex-end' }]}>
+                    <View
+                      style={[styles.modalButtons, { marginTop: 14, justifyContent: 'flex-end' }]}
+                    >
                       <Pressable
                         style={[
                           styles.modalButton,
@@ -783,7 +783,10 @@ export function MainAppChannelsModals({
                         accessibilityLabel={leaveIosPrompt.cancelText}
                       >
                         <Text
-                          style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}
+                          style={[
+                            styles.modalButtonText,
+                            isDark ? styles.modalButtonTextDark : null,
+                          ]}
                         >
                           {leaveIosPrompt.cancelText}
                         </Text>

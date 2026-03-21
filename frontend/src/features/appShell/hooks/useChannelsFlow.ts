@@ -43,9 +43,7 @@ export type LeaveChannelDecision =
       destructive?: boolean;
     };
 
-export type LeaveChannelResult =
-  | { ok: true }
-  | { ok: false; title: string; message: string };
+export type LeaveChannelResult = { ok: true } | { ok: false; title: string; message: string };
 
 export function useChannelsFlow({
   apiUrl,
@@ -600,13 +598,7 @@ export function useChannelsFlow({
         void promptAlert('Unable to leave', e instanceof Error ? e.message : 'Leave failed');
       }
     },
-    [
-      apiUrl,
-      currentConversationId,
-      enterChannelConversation,
-      promptAlert,
-      promptConfirm,
-    ],
+    [apiUrl, currentConversationId, enterChannelConversation, promptAlert, promptConfirm],
   );
 
   const getLeaveChannelDecisionForIos = React.useCallback(
@@ -645,7 +637,8 @@ export function useChannelsFlow({
           const data =
             raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : ({} as const);
 
-          const me = data.me && typeof data.me === 'object' ? (data.me as Record<string, unknown>) : {};
+          const me =
+            data.me && typeof data.me === 'object' ? (data.me as Record<string, unknown>) : {};
           const meIsAdmin = !!me.isAdmin;
 
           const membersRaw: unknown[] = Array.isArray(data.members) ? data.members : [];
@@ -697,7 +690,8 @@ export function useChannelsFlow({
     async (channelId: string): Promise<LeaveChannelResult> => {
       const cid = String(channelId || '').trim();
       if (!cid) return { ok: false, title: 'Unable to leave', message: 'Invalid channel.' };
-      if (!apiUrl) return { ok: false, title: 'Unable to leave', message: 'Backend not configured.' };
+      if (!apiUrl)
+        return { ok: false, title: 'Unable to leave', message: 'Backend not configured.' };
 
       const leavingActiveChannel = String(currentConversationId || '').trim() === `ch#${cid}`;
 
@@ -730,7 +724,11 @@ export function useChannelsFlow({
               .toLowerCase()
               .includes('promote');
 
-          return { ok: false, title: looksLikeLastAdmin ? 'Wait!' : 'Unable to leave', message: msg };
+          return {
+            ok: false,
+            title: looksLikeLastAdmin ? 'Wait!' : 'Unable to leave',
+            message: msg,
+          };
         }
 
         setMyChannels((prev) =>

@@ -387,7 +387,8 @@ export function AiHelperModal({
                                                     isDark ? styles.toolBtnTextDark : null,
                                                   ]}
                                                 >
-                                                  {copiedSuggestionKey === `turn:${idx}:sugg:${sIdx}`
+                                                  {copiedSuggestionKey ===
+                                                  `turn:${idx}:sugg:${sIdx}`
                                                     ? 'Copied'
                                                     : 'Copy'}
                                                 </Text>

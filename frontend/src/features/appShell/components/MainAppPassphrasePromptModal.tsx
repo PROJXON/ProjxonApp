@@ -309,17 +309,13 @@ export function MainAppPassphrasePromptModal({
               maxWidth: 360,
               borderRadius: 14,
               padding: 16,
-              backgroundColor: isDark
-                ? APP_COLORS.dark.bg.surface
-                : APP_COLORS.light.bg.app,
+              backgroundColor: isDark ? APP_COLORS.dark.bg.surface : APP_COLORS.light.bg.app,
             }}
           >
             <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
               Skip Recovery Setup?
             </Text>
-            <Text
-              style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}
-            >
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
               {
                 "If you don't set a recovery passphrase, you won't be able to restore older encrypted messages if you switch devices.\n\nWe do NOT store your passphrase, so make sure you remember it."
               }
@@ -350,7 +346,11 @@ export function MainAppPassphrasePromptModal({
                 </Text>
               </Pressable>
               <Pressable
-                style={[styles.modalButton, styles.modalButtonSmall, isDark ? styles.modalButtonDark : null]}
+                style={[
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  isDark ? styles.modalButtonDark : null,
+                ]}
                 onPress={onDismissSkipRecovery}
                 accessibilityRole="button"
                 accessibilityLabel="Go back"

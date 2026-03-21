@@ -23,7 +23,6 @@ import {
   fileIconNameForMedia,
 } from '../../../utils/mediaKinds';
 import { getCopyableMessageText } from '../getCopyableMessageText';
-import type { ChatCopyToClipboardOptions } from '../useChatCopyToClipboard';
 import {
   normalizeChatMediaList,
   normalizeDmMediaItems,
@@ -34,6 +33,7 @@ import {
   parseGroupMediaEnvelope,
 } from '../parsers';
 import type { ChatMessage } from '../types';
+import type { ChatCopyToClipboardOptions } from '../useChatCopyToClipboard';
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message || 'Unknown error';
