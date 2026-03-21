@@ -1,5 +1,5 @@
 import React from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import type { AppStyles } from '../../../../App.styles';
 import { GlobalAboutContent } from '../../../components/globalAbout/GlobalAboutContent';
@@ -117,6 +117,12 @@ export function MainAppMenuAndAboutOverlays({
   globalAboutOpen: boolean;
   dismissGlobalAbout: () => void | Promise<void>;
 }): React.JSX.Element {
+  // On iOS, defer opening the next panel by one frame so the menu view is gone before the next Modal presents.
+  const scheduleOpen = React.useCallback((fn: () => void) => {
+    if (Platform.OS === 'ios') requestAnimationFrame(fn);
+    else fn();
+  }, []);
+
   const items = React.useMemo(() => {
     const base: Array<{ key: string; label: string; onPress: () => void | Promise<void> }> = [];
 
@@ -126,15 +132,11 @@ export function MainAppMenuAndAboutOverlays({
         label: 'About',
         onPress: () => {
           setMenuOpen(false);
-          // About is tied to the Channels-side conversation (Global or a channel).
           const cid = String(activeChannelConversationId || '').trim() || 'global';
           if (cid === 'global') {
             setGlobalAboutOpen(true);
-            return;
-          }
-          if (cid.startsWith('ch#')) {
+          } else if (cid.startsWith('ch#')) {
             setChannelAboutRequestEpoch((v) => v + 1);
-            return;
           }
         },
       });
@@ -146,7 +148,7 @@ export function MainAppMenuAndAboutOverlays({
         label: 'Chats',
         onPress: () => {
           setMenuOpen(false);
-          setChatsOpen(true);
+          scheduleOpen(() => setChatsOpen(true));
         },
       },
       {
@@ -154,17 +156,19 @@ export function MainAppMenuAndAboutOverlays({
         label: 'Channels',
         onPress: () => {
           setMenuOpen(false);
-          setMyChannelsError(null);
-          setCreateChannelError(null);
-          setCreateChannelOpen(false);
-          setCreateChannelName('');
-          setCreateChannelPassword('');
-          setCreateChannelIsPublic(true);
-          setChannelSearchOpen(false);
-          setChannelsError(null);
-          setChannelJoinError(null);
-          setChannelsQuery('');
-          setChannelsOpen(true);
+          scheduleOpen(() => {
+            setMyChannelsError(null);
+            setCreateChannelError(null);
+            setCreateChannelOpen(false);
+            setCreateChannelName('');
+            setCreateChannelPassword('');
+            setCreateChannelIsPublic(true);
+            setChannelSearchOpen(false);
+            setChannelsError(null);
+            setChannelJoinError(null);
+            setChannelsQuery('');
+            setChannelsOpen(true);
+          });
         },
       },
       {
@@ -172,8 +176,10 @@ export function MainAppMenuAndAboutOverlays({
         label: 'Avatar',
         onPress: () => {
           setMenuOpen(false);
-          setAvatarError(null);
-          setAvatarOpen(true);
+          scheduleOpen(() => {
+            setAvatarError(null);
+            setAvatarOpen(true);
+          });
         },
       },
       {
@@ -181,23 +187,27 @@ export function MainAppMenuAndAboutOverlays({
         label: 'Background',
         onPress: () => {
           setMenuOpen(false);
-          setBackgroundError(null);
-          setBackgroundOpen(true);
+          scheduleOpen(() => {
+            setBackgroundError(null);
+            setBackgroundOpen(true);
+          });
         },
       },
       {
         key: 'recovery',
         label: 'Recovery',
-        onPress: async () => {
+        onPress: () => {
           setMenuOpen(false);
-          setRecoveryOpen(true);
-          // After a Metro refresh, Amplify may take a moment to rehydrate tokens.
-          // Refresh recovery state so the modal shows "Change" vs "Set up" correctly.
-          const token = await getIdTokenWithRetry({ maxAttempts: 10, delayMs: 200 });
-          if (token) {
-            const exists = await checkRecoveryBlobExists(token);
-            if (exists !== null) applyRecoveryBlobExists(exists);
-          }
+          scheduleOpen(() => {
+            setRecoveryOpen(true);
+            void (async () => {
+              const token = await getIdTokenWithRetry({ maxAttempts: 10, delayMs: 200 });
+              if (token) {
+                const exists = await checkRecoveryBlobExists(token);
+                if (exists !== null) applyRecoveryBlobExists(exists);
+              }
+            })();
+          });
         },
       },
       {
@@ -205,15 +215,15 @@ export function MainAppMenuAndAboutOverlays({
         label: 'Blocklist',
         onPress: () => {
           setMenuOpen(false);
-          setBlocklistOpen(true);
+          scheduleOpen(() => setBlocklistOpen(true));
         },
       },
       {
         key: 'deleteAccount',
         label: 'Delete account',
-        onPress: async () => {
+        onPress: () => {
           setMenuOpen(false);
-          await deleteMyAccount();
+          scheduleOpen(() => void deleteMyAccount());
         },
       },
       {
@@ -233,6 +243,7 @@ export function MainAppMenuAndAboutOverlays({
 
     return base;
   }, [
+    scheduleOpen,
     activeChannelConversationId,
     applyRecoveryBlobExists,
     checkRecoveryBlobExists,
@@ -296,7 +307,6 @@ export function MainAppMenuAndAboutOverlays({
                 bodyStyle={[
                   styles.modalHelperText,
                   ...(isDark ? [styles.modalHelperTextDark] : []),
-                  // Slightly more comfortable reading in the About modal.
                   { marginBottom: 0 },
                 ]}
               />

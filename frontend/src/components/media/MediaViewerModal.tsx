@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import React from 'react';
 import {
@@ -41,6 +42,7 @@ export function MediaViewerModal<S extends MediaViewerState = MediaViewerState>(
   onClose,
   onSave,
   saving,
+  saveConfirm,
 }: {
   open: boolean;
   viewerState: S;
@@ -49,6 +51,13 @@ export function MediaViewerModal<S extends MediaViewerState = MediaViewerState>(
   onClose: () => void;
   onSave?: () => void | Promise<void>;
   saving?: boolean;
+  saveConfirm?: {
+    title: string;
+    message?: string;
+    confirmText?: string;
+    cancelText?: string;
+    dontShowAgain?: { storageKey: string; label?: string };
+  };
 }): React.JSX.Element {
   const insets = useSafeAreaInsets();
   const viewerScrollRef = React.useRef<ScrollView | null>(null);
@@ -57,6 +66,75 @@ export function MediaViewerModal<S extends MediaViewerState = MediaViewerState>(
   const chromeOpacity = React.useRef(new Animated.Value(1)).current;
   const chromeLastPointerAtRef = React.useRef<number>(0);
   const isTouchWeb = Platform.OS === 'web' && isWebCoarsePointer();
+
+  const [saveConfirmOpen, setSaveConfirmOpen] = React.useState(false);
+  const [saveDontShowAgain, setSaveDontShowAgain] = React.useState(false);
+  const [saveConfirmBusy, setSaveConfirmBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    // Reset any pending confirmation when the viewer closes.
+    if (open) return;
+    setSaveConfirmOpen(false);
+    setSaveDontShowAgain(false);
+    setSaveConfirmBusy(false);
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!saveConfirmOpen) return;
+    setSaveDontShowAgain(false);
+    setSaveConfirmBusy(false);
+  }, [saveConfirmOpen]);
+
+  const maybeShowSaveConfirm = React.useCallback(async () => {
+    // Only iOS should use a View overlay instead of the native prompt Modal.
+    if (Platform.OS !== 'ios' || !saveConfirm || !onSave) {
+      void onSave?.();
+      return;
+    }
+
+    const dontShowKey = String(saveConfirm.dontShowAgain?.storageKey || '').trim();
+    if (dontShowKey) {
+      try {
+        const v = await AsyncStorage.getItem(dontShowKey);
+        if (v === '1') {
+          void onSave();
+          return;
+        }
+      } catch {
+        // Best-effort: fall back to showing the confirmation.
+      }
+    }
+
+    setSaveConfirmOpen(true);
+  }, [onSave, saveConfirm]);
+
+  const confirmSave = React.useCallback(async () => {
+    if (!onSave || !saveConfirm) return;
+    if (saveConfirmBusy) return;
+    setSaveConfirmBusy(true);
+
+    try {
+      setSaveConfirmOpen(false);
+
+      const dontShowKey = String(saveConfirm.dontShowAgain?.storageKey || '').trim();
+      if (saveDontShowAgain && dontShowKey) {
+        try {
+          await AsyncStorage.setItem(dontShowKey, '1');
+        } catch {
+          // ignore (user choice still applies for this tap)
+        }
+      }
+
+      await onSave();
+    } finally {
+      setSaveConfirmBusy(false);
+    }
+  }, [onSave, saveConfirm, saveConfirmBusy, saveDontShowAgain]);
+
+  const cancelSaveConfirm = React.useCallback(() => {
+    if (saveConfirmBusy) return;
+    setSaveConfirmOpen(false);
+  }, [saveConfirmBusy]);
 
   const getItemAt = React.useCallback(
     (vs: S, i: number): MediaViewerGlobalItem | null => {
@@ -255,7 +333,9 @@ export function MediaViewerModal<S extends MediaViewerState = MediaViewerState>(
                 <Pressable
                   style={[styles.viewerCloseBtn, saving ? { opacity: 0.6 } : null]}
                   disabled={!!saving}
-                  onPress={() => void onSave()}
+                  onPress={() => {
+                    void maybeShowSaveConfirm();
+                  }}
                 >
                   <Text style={styles.viewerCloseText}>{saving ? 'Saving…' : 'Save'}</Text>
                 </Pressable>
@@ -265,6 +345,79 @@ export function MediaViewerModal<S extends MediaViewerState = MediaViewerState>(
               </Pressable>
             </View>
           </Animated.View>
+
+          {/* iOS: avoid nested-native-modal stacking by rendering confirmation as a View overlay. */}
+          {Platform.OS === 'ios' && saveConfirmOpen && saveConfirm ? (
+            <View style={styles.saveConfirmOverlay} pointerEvents="auto">
+              <View style={styles.saveConfirmCard}>
+                <Text style={styles.saveConfirmTitle}>{saveConfirm.title}</Text>
+                {saveConfirm.message ? (
+                  <Text style={styles.saveConfirmMessage}>{saveConfirm.message}</Text>
+                ) : null}
+
+                {saveConfirm.dontShowAgain?.label ? (
+                  <View style={styles.saveConfirmCheckboxRow}>
+                    <Pressable
+                      accessibilityRole="checkbox"
+                      accessibilityLabel={saveConfirm.dontShowAgain.label}
+                      accessibilityState={{ checked: saveDontShowAgain }}
+                      onPress={() => {
+                        if (saveConfirmBusy) return;
+                        setSaveDontShowAgain((v) => !v);
+                      }}
+                      style={({ pressed }) => [
+                        styles.saveConfirmCheckboxBtn,
+                        pressed ? { opacity: 0.9 } : null,
+                      ]}
+                    >
+                      <View
+                        style={[
+                          styles.saveConfirmCheckboxBox,
+                          saveDontShowAgain ? styles.saveConfirmCheckboxBoxChecked : null,
+                        ]}
+                      >
+                        {saveDontShowAgain ? (
+                          <Text style={styles.saveConfirmCheckboxCheck}>✓</Text>
+                        ) : null}
+                      </View>
+                      <Text style={styles.saveConfirmCheckboxLabel}>
+                        {saveConfirm.dontShowAgain.label}
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+
+                <View style={styles.saveConfirmButtons}>
+                  <Pressable
+                    style={[
+                      styles.saveConfirmButton,
+                      styles.saveConfirmButtonPrimary,
+                      saveConfirmBusy || saving ? { opacity: 0.6 } : null,
+                    ]}
+                    disabled={saveConfirmBusy || !!saving}
+                    onPress={() => void confirmSave()}
+                  >
+                    <Text style={styles.saveConfirmButtonTextPrimary}>
+                      {saveConfirm.confirmText || 'Save'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.saveConfirmButton,
+                      styles.saveConfirmButtonSecondary,
+                      saveConfirmBusy || saving ? { opacity: 0.6 } : null,
+                    ]}
+                    disabled={saveConfirmBusy || !!saving}
+                    onPress={cancelSaveConfirm}
+                  >
+                    <Text style={styles.saveConfirmButtonTextSecondary}>
+                      {saveConfirm.cancelText || 'Cancel'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          ) : null}
 
           <View style={styles.viewerBody}>
             {(() => {
@@ -722,4 +875,82 @@ const styles = StyleSheet.create({
   viewerImage: { width: '100%', height: '100%' },
   viewerVideo: { width: '100%', height: '100%' },
   viewerFallback: { color: APP_COLORS.dark.text.primary },
+  saveConfirmOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: withAlpha(PALETTE.black, 0.45),
+    zIndex: 100,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  saveConfirmCard: {
+    width: '100%',
+    backgroundColor: withAlpha(PALETTE.black, 0.78),
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: withAlpha(PALETTE.white, 0.18),
+    padding: 18,
+    elevation: 8,
+  },
+  saveConfirmTitle: {
+    color: APP_COLORS.dark.text.primary,
+    fontWeight: '700',
+    fontSize: 18,
+    marginBottom: 8,
+  },
+  saveConfirmMessage: {
+    color: withAlpha(PALETTE.white, 0.75),
+    fontWeight: '500',
+    fontSize: 14,
+    marginBottom: 14,
+  },
+  saveConfirmCheckboxRow: { alignSelf: 'stretch', marginBottom: 14 },
+  saveConfirmCheckboxBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  saveConfirmCheckboxBox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: withAlpha(PALETTE.white, 0.35),
+    backgroundColor: withAlpha(PALETTE.black, 0.25),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveConfirmCheckboxBoxChecked: {
+    backgroundColor: withAlpha(PALETTE.white, 0.12),
+    borderColor: withAlpha(PALETTE.white, 0.65),
+  },
+  saveConfirmCheckboxCheck: {
+    color: APP_COLORS.dark.text.primary,
+    fontWeight: '900',
+    fontSize: 16,
+    lineHeight: 16,
+  },
+  saveConfirmCheckboxLabel: {
+    color: withAlpha(PALETTE.white, 0.85),
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  saveConfirmButtons: { flexDirection: 'row', gap: 10 },
+  saveConfirmButton: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: withAlpha(PALETTE.white, 0.16),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveConfirmButtonPrimary: { backgroundColor: withAlpha(PALETTE.white, 0.14) },
+  saveConfirmButtonSecondary: { backgroundColor: withAlpha(PALETTE.black, 0.05) },
+  saveConfirmButtonTextPrimary: { color: APP_COLORS.dark.text.primary, fontWeight: '800' },
+  saveConfirmButtonTextSecondary: { color: withAlpha(PALETTE.white, 0.8), fontWeight: '800' },
 });

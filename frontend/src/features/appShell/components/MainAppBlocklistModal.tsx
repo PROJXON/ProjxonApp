@@ -11,6 +11,9 @@ import {
 } from '../../../hooks/useKeyboardOverlap';
 import { APP_COLORS } from '../../../theme/colors';
 
+/** iOS: avoid Modal + UiPromptModal (unblock confirm) stacking native modals. */
+const BLOCKLIST_IOS_OVERLAY_Z = 50000;
+
 export function MainAppBlocklistModal({
   styles,
   isDark,
@@ -43,7 +46,7 @@ export function MainAppBlocklistModal({
     blockedUsernameLower?: string;
   }>;
   unblockUser: (sub: string, label?: string) => void | Promise<void>;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const kb = useKeyboardOverlap({ enabled: blocklistOpen });
   const [sheetHeight, setSheetHeight] = React.useState<number>(0);
   const bottomPad = React.useMemo(
@@ -59,13 +62,8 @@ export function MainAppBlocklistModal({
       ),
     [kb.keyboardVisible, kb.remainingOverlap, kb.windowHeight, sheetHeight],
   );
-  return (
-    <Modal
-      visible={blocklistOpen}
-      transparent
-      animationType="fade"
-      onRequestClose={() => setBlocklistOpen(false)}
-    >
+  const sheet = (
+    <>
       <View
         style={[
           styles.modalOverlay,
@@ -214,6 +212,31 @@ export function MainAppBlocklistModal({
           </View>
         </View>
       </View>
+    </>
+  );
+
+  // iOS: Modal + UiPromptModal (unblock confirm) stacks native modals and can freeze / swallow updates.
+  // Render as an in-tree overlay (MainAppContent places this last so z-order is above chat).
+  if (Platform.OS === 'ios') {
+    if (!blocklistOpen) return null;
+    return (
+      <View
+        pointerEvents="box-none"
+        style={[StyleSheet.absoluteFillObject, { zIndex: BLOCKLIST_IOS_OVERLAY_Z }]}
+      >
+        {sheet}
+      </View>
+    );
+  }
+
+  return (
+    <Modal
+      visible={blocklistOpen}
+      transparent
+      animationType="fade"
+      onRequestClose={() => setBlocklistOpen(false)}
+    >
+      {sheet}
     </Modal>
   );
 }

@@ -134,6 +134,10 @@ export function GuestGlobalScreenOverlays({
   confirmLinkModal: React.ReactNode;
   styles: typeof import('../../../screens/GuestGlobalScreen.styles').styles;
 }): React.JSX.Element {
+  const scheduleOpen = React.useCallback((fn: () => void) => {
+    fn();
+  }, []);
+
   return (
     <>
       <HeaderMenuModal
@@ -150,12 +154,12 @@ export function GuestGlobalScreenOverlays({
             label: 'About',
             onPress: () => {
               setMenuOpen(false);
-              if (isChannel) {
-                setChannelAboutText(String(activeChannelMetaAboutText || ''));
-                setChannelAboutOpen(true);
-                return;
-              }
-              setGlobalAboutOpen(true);
+              scheduleOpen(() => {
+                if (isChannel) {
+                  setChannelAboutText(String(activeChannelMetaAboutText || ''));
+                  setChannelAboutOpen(true);
+                } else setGlobalAboutOpen(true);
+              });
             },
           },
           {
@@ -163,7 +167,7 @@ export function GuestGlobalScreenOverlays({
             label: 'Sign in',
             onPress: () => {
               setMenuOpen(false);
-              requestSignIn();
+              scheduleOpen(() => requestSignIn());
             },
           },
         ]}

@@ -21,6 +21,7 @@ import {
 } from '../../../hooks/useKeyboardOverlap';
 import { APP_COLORS } from '../../../theme/colors';
 import { shouldShowGlobalForChannelSearch } from '../../../utils/channelSearch';
+import type { LeaveChannelDecision, LeaveChannelResult } from '../hooks/useChannelsFlow';
 
 type ChannelSearchResult = {
   channelId: string;
@@ -42,6 +43,8 @@ export function MainAppChannelsModals({
   myChannels,
   enterChannelConversation,
   leaveChannelFromSettings,
+  getLeaveChannelDecisionForIos,
+  leaveChannelFromSettingsIosConfirmed,
   // Inline create channel
   createChannelOpen,
   setCreateChannelOpen,
@@ -91,6 +94,9 @@ export function MainAppChannelsModals({
   myChannels: Array<{ channelId: string; name: string; isPublic?: boolean; hasPassword?: boolean }>;
   enterChannelConversation: (conversationId: string) => void;
   leaveChannelFromSettings: (channelId: string) => void | Promise<void>;
+  // iOS: render leave confirmations as a View overlay inside this modal tree.
+  getLeaveChannelDecisionForIos: (channelId: string) => Promise<LeaveChannelDecision>;
+  leaveChannelFromSettingsIosConfirmed: (channelId: string) => Promise<LeaveChannelResult>;
 
   createChannelOpen: boolean;
   setCreateChannelOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -216,6 +222,89 @@ export function MainAppChannelsModals({
     setChannelPasswordVisible(false);
   }, [channelPasswordPrompt]);
 
+  type IosLeavePrompt =
+    | {
+        kind: 'confirm';
+        channelId: string;
+        title: string;
+        message: string;
+        confirmText: string;
+        cancelText: string;
+      }
+    | {
+        kind: 'alert';
+        channelId: string;
+        title: string;
+        message: string;
+      };
+
+  const [leaveIosPrompt, setLeaveIosPrompt] = React.useState<IosLeavePrompt | null>(null);
+  const [leaveIosBusy, setLeaveIosBusy] = React.useState<boolean>(false);
+
+  const beginIosLeaveFlow = React.useCallback(
+    async (channelId: string) => {
+      if (leaveIosBusy) return;
+      const cid = String(channelId || '').trim();
+      if (!cid) return;
+
+      setLeaveIosBusy(true);
+      try {
+        const decision = await getLeaveChannelDecisionForIos(cid);
+        if (decision.kind === 'block') {
+          setLeaveIosPrompt({
+            kind: 'alert',
+            channelId: cid,
+            title: decision.title,
+            message: decision.message,
+          });
+          return;
+        }
+
+        setLeaveIosPrompt({
+          kind: 'confirm',
+          channelId: cid,
+          title: decision.title,
+          message: decision.message,
+          confirmText: decision.confirmText,
+          cancelText: decision.cancelText,
+        });
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : 'Unable to leave';
+        setLeaveIosPrompt({
+          kind: 'alert',
+          channelId: cid,
+          title: 'Unable to leave',
+          message,
+        });
+      } finally {
+        setLeaveIosBusy(false);
+      }
+    },
+    [getLeaveChannelDecisionForIos, leaveIosBusy],
+  );
+
+  const confirmIosLeave = React.useCallback(async () => {
+    if (!leaveIosPrompt || leaveIosPrompt.kind !== 'confirm') return;
+    if (leaveIosBusy) return;
+
+    setLeaveIosBusy(true);
+    try {
+      const res = await leaveChannelFromSettingsIosConfirmed(leaveIosPrompt.channelId);
+      if (res.ok) {
+        setLeaveIosPrompt(null);
+        return;
+      }
+      setLeaveIosPrompt({
+        kind: 'alert',
+        channelId: leaveIosPrompt.channelId,
+        title: res.title,
+        message: res.message,
+      });
+    } finally {
+      setLeaveIosBusy(false);
+    }
+  }, [leaveChannelFromSettingsIosConfirmed, leaveIosBusy, leaveIosPrompt]);
+
   return (
     <>
       {/* Settings → Channels: list joined channels (like Chats) */}
@@ -233,13 +322,28 @@ export function MainAppChannelsModals({
               : null,
           ]}
         >
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setChannelsOpen(false)} />
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => {
+              if (leaveIosPrompt) return;
+              if (leaveIosBusy) return;
+              setChannelsOpen(false);
+            }}
+          />
           <View
             style={[
               styles.chatsCard,
               isDark ? styles.chatsCardDark : null,
               Platform.OS !== 'web' && channelsKb.keyboardVisible
                 ? { maxHeight: channelsKb.availableHeightAboveKeyboard, minHeight: 0 }
+                : null,
+              // iOS leave overlay: `chatsCard` hairline border sits outside the dim layer’s fill and
+              // reads as a bright ring in light mode — hide it while the overlay is up.
+              Platform.OS === 'ios' && leaveIosPrompt
+                ? {
+                    borderWidth: 0,
+                    overflow: 'hidden',
+                  }
                 : null,
             ]}
             onLayout={(e) => {
@@ -511,7 +615,13 @@ export function MainAppChannelsModals({
                     </View>
                     <View style={[styles.chatRowRight, { marginLeft: 10 }]}>
                       <Pressable
-                        onPress={() => void Promise.resolve(leaveChannelFromSettings(c.channelId))}
+                        onPress={() => {
+                          if (Platform.OS === 'ios') {
+                            void Promise.resolve(beginIosLeaveFlow(c.channelId));
+                            return;
+                          }
+                          void Promise.resolve(leaveChannelFromSettings(c.channelId));
+                        }}
                         style={({ pressed }) => [
                           styles.leaveChip,
                           isDark ? styles.leaveChipDark : null,
@@ -569,6 +679,123 @@ export function MainAppChannelsModals({
                 </Text>
               </Pressable>
             </View>
+
+            {Platform.OS === 'ios' && leaveIosPrompt ? (
+              <View
+                style={[
+                  StyleSheet.absoluteFillObject,
+                  {
+                    // Match parent `chatsCard` radius so dim + corners align (avoids a visible “ring”).
+                    borderRadius: 16,
+                    overflow: 'hidden',
+                    backgroundColor: 'rgba(0,0,0,0.45)',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    zIndex: 999,
+                  },
+                ]}
+              >
+                {/* Do not reuse `chatsCard` here — it adds a hairline border and stacks with the parent card. */}
+                <View
+                  style={{
+                    width: '88%',
+                    maxWidth: 400,
+                    borderRadius: 14,
+                    padding: 16,
+                    backgroundColor: isDark ? APP_COLORS.dark.bg.surface : APP_COLORS.light.bg.app,
+                  }}
+                >
+                  <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
+                    {leaveIosPrompt.title}
+                  </Text>
+                  <Text
+                    style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}
+                  >
+                    {leaveIosPrompt.message}
+                  </Text>
+
+                  {leaveIosPrompt.kind === 'alert' ? (
+                    <View
+                      style={[styles.modalButtons, { marginTop: 14, justifyContent: 'flex-end' }]}
+                    >
+                      <Pressable
+                        style={[
+                          styles.modalButton,
+                          styles.modalButtonSmall,
+                          styles.modalButtonCta,
+                          isDark ? styles.modalButtonCtaDark : null,
+                          leaveIosBusy ? { opacity: 0.7 } : null,
+                        ]}
+                        onPress={() => {
+                          if (leaveIosBusy) return;
+                          setLeaveIosPrompt(null);
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel="OK"
+                      >
+                        <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>OK</Text>
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginTop: 14,
+                        gap: 8,
+                        width: '100%',
+                      }}
+                    >
+                      <Pressable
+                        style={[
+                          styles.modalButton,
+                          styles.modalButtonSmall,
+                          styles.modalButtonCta,
+                          isDark ? styles.modalButtonCtaDark : null,
+                          leaveIosBusy ? { opacity: 0.7 } : null,
+                          { flex: 1 },
+                        ]}
+                        onPress={() => {
+                          if (leaveIosBusy) return;
+                          void Promise.resolve(confirmIosLeave());
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel={leaveIosPrompt.confirmText}
+                      >
+                        <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>
+                          {leaveIosBusy ? 'Leaving…' : leaveIosPrompt.confirmText}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[
+                          styles.modalButton,
+                          styles.modalButtonSmall,
+                          isDark ? styles.modalButtonDark : null,
+                          leaveIosBusy ? { opacity: 0.7 } : null,
+                          { flex: 1 },
+                        ]}
+                        onPress={() => {
+                          if (leaveIosBusy) return;
+                          setLeaveIosPrompt(null);
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel={leaveIosPrompt.cancelText}
+                      >
+                        <Text
+                          style={[
+                            styles.modalButtonText,
+                            isDark ? styles.modalButtonTextDark : null,
+                          ]}
+                        >
+                          {leaveIosPrompt.cancelText}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  )}
+                </View>
+              </View>
+            ) : null}
           </View>
         </View>
       </Modal>

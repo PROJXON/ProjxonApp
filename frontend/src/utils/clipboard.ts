@@ -1,12 +1,16 @@
 export async function copyToClipboardSafe(opts: {
   text: string;
   onUnavailable: () => void;
-}): Promise<void> {
-  const { text, onUnavailable } = opts;
+  onCopied?: () => void;
+}): Promise<boolean> {
+  const { text, onUnavailable, onCopied } = opts;
   try {
     const Clipboard = await import('expo-clipboard');
     await Clipboard.setStringAsync(text);
+    onCopied?.();
+    return true;
   } catch {
     onUnavailable();
+    return false;
   }
 }

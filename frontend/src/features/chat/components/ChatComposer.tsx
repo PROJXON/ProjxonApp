@@ -171,6 +171,10 @@ export function ChatComposer(props: {
   const MAX_INPUT_HEIGHT = 140;
   const [inputHeight, setInputHeight] = React.useState<number>(MIN_INPUT_HEIGHT);
 
+  // All platforms use inputHeight from onContentSizeChange. On iOS we avoid a fixed height in style
+  // (use only minHeight/maxHeight) so the native view can size by content and fire onContentSizeChange.
+  const effectiveInputHeight = inputHeight;
+
   const isMobileWeb = React.useMemo(() => {
     if (Platform.OS !== 'web') return false;
     try {
@@ -629,15 +633,15 @@ export function ChatComposer(props: {
             ref={(r) => {
               textInputRef.current = r;
             }}
-            // Keep the TextInput instance stable to avoid keyboard/focus glitches.
-            // We still use `inputEpoch` to reset *layout* state (see effect above), without remounting.
             key="chat-input"
             style={[
               styles.input,
               isDark ? styles.inputDark : null,
-              { height: inputHeight, maxHeight: MAX_INPUT_HEIGHT },
+              // iOS: no fixed height so the native view can size by content and fire onContentSizeChange.
+              Platform.OS === 'ios'
+                ? { minHeight: MIN_INPUT_HEIGHT, maxHeight: MAX_INPUT_HEIGHT }
+                : { height: effectiveInputHeight, maxHeight: MAX_INPUT_HEIGHT },
             ]}
-            // Keep the composer baseline stable across devices (prevents occasional clipping).
             allowFontScaling={false}
             underlineColorAndroid="transparent"
             placeholder={
@@ -656,7 +660,7 @@ export function ChatComposer(props: {
             onChangeText={onChangeInput}
             multiline
             blurOnSubmit={false}
-            scrollEnabled={inputHeight >= MAX_INPUT_HEIGHT}
+            scrollEnabled={Platform.OS === 'ios' ? true : effectiveInputHeight >= MAX_INPUT_HEIGHT}
             onContentSizeChange={(e) => {
               const hRaw = e?.nativeEvent?.contentSize?.height;
               const h =
@@ -691,8 +695,6 @@ export function ChatComposer(props: {
                       typeof (ev as { nativeEvent?: unknown }).nativeEvent === 'object' &&
                       (ev as { nativeEvent?: { isComposing?: unknown } }).nativeEvent?.isComposing
                     );
-                    // Desktop web UX: Enter sends, Shift+Enter inserts a newline.
-                    // Mobile web matches native: Enter inserts a newline; users send via the Send button.
                     if (key === 'Enter' && !shift && !isComposing && !isMobileWeb) {
                       ev.preventDefault?.();
                       ev.stopPropagation?.();

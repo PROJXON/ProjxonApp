@@ -7,7 +7,7 @@ import { getRandomBytes } from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import React from 'react';
 import type { AppStateStatus, TextInput } from 'react-native';
-import { AppState, Platform, useWindowDimensions } from 'react-native';
+import { AppState, Keyboard, Platform, useWindowDimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AI_API_URL, API_URL, CDN_URL, WS_URL } from '../config/env';
@@ -227,21 +227,48 @@ export default function ChatScreen({
   // Android can report different bottom insets when an input is focused / keyboard shows.
   // Cache a stable bottom inset so the composer doesn't "jump" or change height.
   const [androidBottomInsetStable, setAndroidBottomInsetStable] = React.useState<number>(0);
+  // Track whether the iOS keyboard is visible so we can adjust padding separately
+  // for "idle" vs "keyboard-up" states.
+  const [iosKeyboardVisible, setIosKeyboardVisible] = React.useState(false);
   React.useEffect(() => {
     if (Platform.OS !== 'android') return;
     const b =
       typeof insets.bottom === 'number' && Number.isFinite(insets.bottom) ? insets.bottom : 0;
     // Keep the maximum seen value (gesture/nav area). When the keyboard shows, some devices report 0.
     if (b > androidBottomInsetStable) setAndroidBottomInsetStable(b);
-  }, [androidBottomInsetStable, insets.bottom]);
+  }, [androidBottomInsetStable, insets.bottom, iosKeyboardVisible]);
+
+  React.useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    const showSub = Keyboard.addListener('keyboardDidShow', () => setIosKeyboardVisible(true));
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => setIosKeyboardVisible(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const composerSafeAreaStyle = React.useMemo(() => {
-    const bottomInset =
-      Platform.OS === 'android'
-        ? Math.min(androidBottomInsetStable, ANDROID_COMPOSER_BOTTOM_PAD_MAX)
-        : insets.bottom;
-    return { paddingBottom: bottomInset };
-  }, [androidBottomInsetStable, insets.bottom]);
+    if (Platform.OS === 'android') {
+      const bottomInset = Math.min(androidBottomInsetStable, ANDROID_COMPOSER_BOTTOM_PAD_MAX);
+      return { paddingBottom: bottomInset };
+    }
+    if (Platform.OS === 'ios') {
+      const raw =
+        typeof insets.bottom === 'number' && Number.isFinite(insets.bottom) ? insets.bottom : 0;
+      if (iosKeyboardVisible) {
+        // When keyboard is up, respect the full inset and add a small buffer so
+        // the keyboard doesn't visually touch the bottom of the input.
+        return { paddingBottom: raw };
+      }
+      // When keyboard is hidden, reduce the inset so the idle gap is smaller (tighter than before).
+      const IOS_REDUCE_PX = 20;
+      const bottomInset = Math.max(0, raw - IOS_REDUCE_PX);
+      return { paddingBottom: bottomInset };
+    }
+    // Web and any other platforms: preserve original behavior.
+    return { paddingBottom: insets.bottom };
+  }, [androidBottomInsetStable, insets.bottom, iosKeyboardVisible]);
   const composerBottomInsetBgHeight = Platform.OS === 'android' ? androidBottomInsetStable : 0;
   const composerHorizontalInsetsStyle = React.useMemo(
     () => ({ paddingLeft: 12 + insets.left, paddingRight: 12 + insets.right }),
@@ -468,6 +495,19 @@ export default function ChatScreen({
     maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
     showAlert,
   });
+
+  // Leaving a chat (DM / channel / group) should end inline edit, reply, and attachment-replace
+  // flows so another conversation doesn't show stale UI ("Finish editing…", open editor, etc.).
+  React.useEffect(() => {
+    setInlineEditTargetId(null);
+    setInlineEditDraft('');
+    setInlineEditAttachmentMode('keep');
+    setInlineEditUploading(false);
+    clearPendingMedia();
+    setReplyTarget(null);
+    closeMessageActions();
+  }, [conversationId, clearPendingMedia, closeMessageActions]);
+
   const cdnMedia = useCdnUrlCache(CDN_URL);
   const mediaUrlByPath = cdnMedia.urlByPath;
   const cdnAvatar = useCdnUrlCache(CDN_URL);
@@ -557,17 +597,38 @@ export default function ChatScreen({
   ]);
 
   const { toast, anim: toastAnim, showToast } = useToast();
+  const viewerOpenRef = React.useRef(false);
+  const pendingViewerSaveToastRef = React.useRef<null | {
+    kind: 'success' | 'error';
+    message: string;
+  }>(null);
 
   const onViewerSavePermissionDenied = React.useCallback(() => {
+    if (Platform.OS === 'ios' && viewerOpenRef.current) {
+      pendingViewerSaveToastRef.current = {
+        kind: 'error',
+        message: 'Allow Photos permission to save.',
+      };
+      return;
+    }
     showToast('Allow Photos permission to save.', 'error');
   }, [showToast]);
   const onViewerSaveSuccess = React.useCallback(() => {
+    if (Platform.OS === 'ios' && viewerOpenRef.current) {
+      pendingViewerSaveToastRef.current = { kind: 'success', message: 'Media saved' };
+      return;
+    }
     showToast('Media saved', 'success');
   }, [showToast]);
   const onViewerSaveError = React.useCallback(
     (msg: string) => {
       const m = String(msg || '');
-      showToast(m.length > 120 ? `${m.slice(0, 120)}…` : m, 'error');
+      const clipped = m.length > 120 ? `${m.slice(0, 120)}…` : m;
+      if (Platform.OS === 'ios' && viewerOpenRef.current) {
+        pendingViewerSaveToastRef.current = { kind: 'error', message: clipped };
+        return;
+      }
+      showToast(clipped, 'error');
     },
     [showToast],
   );
@@ -606,13 +667,19 @@ export default function ChatScreen({
   const saveViewerToDevice = React.useCallback(async () => {
     if (viewerSaving) return;
     const vs = viewerBase.state;
-    if (!vs) return;
+    if (!vs) {
+      onViewerSaveError('No media selected to save.');
+      return;
+    }
 
     setViewerSaving(true);
     try {
       if (vs.mode === 'global') {
         const it = vs.globalItems?.[vs.index];
-        if (!it?.url) return;
+        if (!it?.url) {
+          onViewerSaveError('Could not resolve media URL for save.');
+          return;
+        }
         await saveMediaUrlToDevice({
           url: it.url,
           kind: it.kind,
@@ -628,14 +695,20 @@ export default function ChatScreen({
         const msg = vs.dmMsg;
         const it = vs.dmItems?.[vs.index];
         const key = it?.media?.path;
-        if (!msg || !it || !key) return;
+        if (!msg || !it || !key) {
+          onViewerSaveError('Could not resolve encrypted media for save.');
+          return;
+        }
         const uri =
           dmFileUriByPath[key] ||
           (await decryptDmFileToCacheUri(
             msg,
             it as unknown as Parameters<typeof decryptDmFileToCacheUri>[1],
           ).catch(() => ''));
-        if (!uri) return;
+        if (!uri) {
+          onViewerSaveError('Could not decrypt media for save.');
+          return;
+        }
         const kind =
           it.media.kind === 'video' ? 'video' : it.media.kind === 'image' ? 'image' : 'file';
         await saveMediaUrlToDevice({
@@ -653,14 +726,20 @@ export default function ChatScreen({
         const msg = vs.gdmMsg;
         const it = vs.gdmItems?.[vs.index];
         const key = it?.media?.path;
-        if (!msg || !it || !key) return;
+        if (!msg || !it || !key) {
+          onViewerSaveError('Could not resolve group media for save.');
+          return;
+        }
         const uri =
           dmFileUriByPath[key] ||
           (await decryptGroupFileToCacheUri(
             msg,
             it as unknown as Parameters<typeof decryptGroupFileToCacheUri>[1],
           ).catch(() => ''));
-        if (!uri) return;
+        if (!uri) {
+          onViewerSaveError('Could not decrypt group media for save.');
+          return;
+        }
         const kind =
           it.media.kind === 'video' ? 'video' : it.media.kind === 'image' ? 'image' : 'file';
         await saveMediaUrlToDevice({
@@ -672,6 +751,9 @@ export default function ChatScreen({
           onError: onViewerSaveError,
         });
       }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err || 'Unknown save failure');
+      onViewerSaveError(msg);
     } finally {
       setViewerSaving(false);
     }
@@ -694,6 +776,15 @@ export default function ChatScreen({
     }),
     [saveViewerToDevice, viewerBase, viewerSaving],
   );
+  React.useEffect(() => {
+    viewerOpenRef.current = !!viewer.open;
+    if (Platform.OS !== 'ios') return;
+    if (viewer.open) return;
+    const pending = pendingViewerSaveToastRef.current;
+    if (!pending) return;
+    pendingViewerSaveToastRef.current = null;
+    showToast(pending.message, pending.kind);
+  }, [showToast, viewer.open]);
   // DM media caches + decrypt helpers are managed by useChatMediaDecryptCache().
   const inFlightDmViewerDecryptRef = React.useRef<Set<string>>(new Set());
   const [attachOpen, setAttachOpen] = React.useState<boolean>(false);
@@ -1628,7 +1719,10 @@ export default function ChatScreen({
   useChatConversationJoin({ activeConversationId, wsRef, pendingJoinConversationIdRef });
 
   const { onChangeInput } = useChatComposerInput({ setInput, inputRef, isTypingRef, sendTyping });
-  const { copyToClipboard } = useChatCopyToClipboard({ openInfo });
+  const { copyToClipboard } = useChatCopyToClipboard({
+    openInfo,
+    onCopied: () => showToast('Copied', 'success'),
+  });
 
   const onPressMessage = useChatPressToDecrypt({
     isDm,

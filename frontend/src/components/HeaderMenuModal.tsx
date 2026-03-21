@@ -102,6 +102,140 @@ export function HeaderMenuModal({
     : 0;
   const maxCardH = Math.max(160, Math.floor(windowHeight - anchorTop - 12));
 
+  const cardContent = (
+    <>
+      <View style={styles.topRightCloseRow}>
+        {headerRight ? <View style={styles.headerRightSlot}>{headerRight}</View> : null}
+        <Pressable
+          onPress={onClose}
+          style={({ pressed }) => [
+            styles.closeIconBtn,
+            {
+              backgroundColor: btnBg,
+              borderColor: btnBorder,
+              borderWidth: btnBorderWidth,
+            },
+            pressed ? { opacity: 0.88 } : null,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="Close menu"
+        >
+          <AppBrandIcon
+            isDark={isDark}
+            fit="contain"
+            slotWidth={32}
+            slotHeight={32}
+            accessible={false}
+          />
+        </Pressable>
+      </View>
+      {title ? (
+        <Text style={[styles.title, { color: text, borderBottomColor: divider }]}>{title}</Text>
+      ) : null}
+      <ScrollView style={styles.listScroll} contentContainerStyle={styles.list} bounces={false}>
+        {items.map((it) =>
+          it.staticRow ? (
+            <View key={it.key} style={styles.row}>
+              {it.label ? (
+                <Text
+                  style={[styles.rowText, { color: text }]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
+                  {it.label}
+                </Text>
+              ) : null}
+              {it.right ? <View style={styles.rowRight}>{it.right}</View> : null}
+            </View>
+          ) : (
+            <Pressable
+              key={it.key}
+              onPress={() => {
+                if (it.disabled) return;
+                it.onPress?.();
+              }}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              style={({ pressed }) => [
+                styles.row,
+                styles.rowBtn,
+                { backgroundColor: btnBg, borderColor: btnBorder, borderWidth: btnBorderWidth },
+                !it.right ? styles.rowCenter : null,
+                it.disabled ? styles.rowDisabled : null,
+                pressed && !it.disabled ? { backgroundColor: pressedBg } : null,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={it.label}
+            >
+              <Text
+                style={[styles.rowText, { color: text }, !it.right ? styles.rowTextCenter : null]}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {it.label}
+              </Text>
+              {it.right ? <View style={styles.rowRight}>{it.right}</View> : null}
+            </Pressable>
+          ),
+        )}
+      </ScrollView>
+    </>
+  );
+
+  const cardStyle = [
+    styles.card,
+    {
+      backgroundColor: cardBg,
+      borderColor: border,
+      width: cardWidth,
+      ...(hasAnchor
+        ? {
+            position: 'absolute' as const,
+            top: anchorTop,
+            left: cardLeft,
+            maxHeight: maxCardH,
+          }
+        : null),
+    },
+  ];
+
+  // On iOS, render the menu as a View overlay so closing it doesn't leave a Modal in the tree.
+  // The next screen (Chats, About, etc.) can then use a Modal and present immediately.
+  // Use explicit window dimensions and top:0, left:0 so the overlay matches Modal positioning.
+  if (Platform.OS === 'ios') {
+    if (!open) return <></>;
+    return (
+      <View
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            zIndex: 10000,
+            width: windowWidth,
+            height: windowHeight,
+            top: 0,
+            left: 0,
+          },
+        ]}
+      >
+        <View
+          style={[
+            styles.overlay,
+            hasAnchor ? styles.overlayAnchored : null,
+            hasAnchor
+              ? null
+              : {
+                  // Use minimal top so panel aligns with header; avoid double safe-area.
+                  paddingTop: 8,
+                  paddingRight: 10,
+                },
+          ]}
+        >
+          <View style={[cardStyle, { zIndex: 1 }]}>{cardContent}</View>
+          <Pressable style={[StyleSheet.absoluteFill, { zIndex: 0 }]} onPress={onClose} />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <Modal visible={mounted} transparent animationType="fade" onRequestClose={onClose}>
       <View
@@ -110,8 +244,8 @@ export function HeaderMenuModal({
           hasAnchor ? styles.overlayAnchored : null,
           hasAnchor ? null : { paddingTop: insets.top + 10, paddingRight: 10 },
         ]}
+        pointerEvents={open ? 'auto' : 'none'}
       >
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <Animated.View
           style={[
             styles.card,
@@ -132,86 +266,13 @@ export function HeaderMenuModal({
             },
           ]}
         >
-          <View style={styles.topRightCloseRow}>
-            {headerRight ? <View style={styles.headerRightSlot}>{headerRight}</View> : null}
-            <Pressable
-              onPress={onClose}
-              style={({ pressed }) => [
-                styles.closeIconBtn,
-                {
-                  backgroundColor: btnBg,
-                  borderColor: btnBorder,
-                  borderWidth: btnBorderWidth,
-                },
-                pressed ? { opacity: 0.88 } : null,
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Close menu"
-            >
-              <AppBrandIcon
-                isDark={isDark}
-                fit="contain"
-                slotWidth={32}
-                slotHeight={32}
-                accessible={false}
-              />
-            </Pressable>
-          </View>
-          {title ? (
-            <Text style={[styles.title, { color: text, borderBottomColor: divider }]}>{title}</Text>
-          ) : null}
-          <ScrollView style={styles.listScroll} contentContainerStyle={styles.list} bounces={false}>
-            {items.map((it) =>
-              it.staticRow ? (
-                // Static rows are used for embedded controls (like Switch).
-                <View key={it.key} style={styles.row}>
-                  {it.label ? (
-                    <Text
-                      style={[styles.rowText, { color: text }]}
-                      numberOfLines={1}
-                      ellipsizeMode="tail"
-                    >
-                      {it.label}
-                    </Text>
-                  ) : null}
-                  {it.right ? <View style={styles.rowRight}>{it.right}</View> : null}
-                </View>
-              ) : (
-                <Pressable
-                  key={it.key}
-                  onPress={() => {
-                    if (it.disabled) return;
-                    it.onPress?.();
-                  }}
-                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                  style={({ pressed }) => [
-                    styles.row,
-                    styles.rowBtn,
-                    { backgroundColor: btnBg, borderColor: btnBorder, borderWidth: btnBorderWidth },
-                    !it.right ? styles.rowCenter : null,
-                    it.disabled ? styles.rowDisabled : null,
-                    pressed && !it.disabled ? { backgroundColor: pressedBg } : null,
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel={it.label}
-                >
-                  <Text
-                    style={[
-                      styles.rowText,
-                      { color: text },
-                      !it.right ? styles.rowTextCenter : null,
-                    ]}
-                    numberOfLines={1}
-                    ellipsizeMode="tail"
-                  >
-                    {it.label}
-                  </Text>
-                  {it.right ? <View style={styles.rowRight}>{it.right}</View> : null}
-                </Pressable>
-              ),
-            )}
-          </ScrollView>
+          {cardContent}
         </Animated.View>
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={onClose}
+          pointerEvents={open ? 'auto' : 'none'}
+        />
       </View>
     </Modal>
   );

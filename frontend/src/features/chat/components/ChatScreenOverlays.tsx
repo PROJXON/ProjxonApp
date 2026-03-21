@@ -13,6 +13,7 @@ import {
   SAVE_TO_PHONE_DONT_SHOW_AGAIN_LABEL,
 } from '../../../utils/saveToPhonePrompt';
 import type { ChatMessage } from '../types';
+import type { ChatCopyToClipboardOptions } from '../useChatCopyToClipboard';
 import type { ChatMediaViewerState } from '../viewerTypes';
 import { AiConsentModal } from './AiConsentModal';
 import { AiHelperModal } from './AiHelperModal';
@@ -160,7 +161,7 @@ export type ChatScreenOverlaysProps = {
 
   // AI helper
   aiHelper: AiHelperController;
-  copyToClipboard: (text: string) => Promise<void>;
+  copyToClipboard: (text: string, opts?: ChatCopyToClipboardOptions) => Promise<boolean>;
   setInput: (t: string) => void;
 
   // Reporting
@@ -458,7 +459,7 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
         onSubmit={aiHelper.submit}
         onResetThread={aiHelper.resetHelperThread}
         onClose={aiHelper.closeHelper}
-        onCopySuggestion={(s: string) => void copyToClipboard(s)}
+        onCopySuggestion={async (s: string) => copyToClipboard(s, { skipToast: true })}
         onUseSuggestion={(s: string) => {
           setInput(s);
           aiHelper.closeHelper();
@@ -749,12 +750,31 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
         setViewerState={viewer.setState}
         dmFileUriByPath={dmFileUriByPath}
         saving={viewer.saving}
+        saveConfirm={
+          Platform.OS === 'ios'
+            ? {
+                title: 'Save to Phone?',
+                message: 'Save this media to your device?',
+                confirmText: 'Save',
+                cancelText: 'Cancel',
+                dontShowAgain: {
+                  storageKey: SAVE_TO_PHONE_DONT_SHOW_AGAIN_KEY,
+                  label: SAVE_TO_PHONE_DONT_SHOW_AGAIN_LABEL,
+                },
+              }
+            : undefined
+        }
         onSave={async () => {
           if (Platform.OS === 'web') {
             await viewer.saveToDevice();
             return;
           }
-          const ok = await uiConfirm('Save to phone?', 'Save this media to your device?', {
+          if (Platform.OS === 'ios') {
+            await viewer.saveToDevice();
+            return;
+          }
+
+          const ok = await uiConfirm('Save to Phone?', 'Save this media to your device?', {
             confirmText: 'Save',
             cancelText: 'Cancel',
             dontShowAgain: {
@@ -772,9 +792,11 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
         ? (() => {
             const toastNode = (
               <Animated.View
+                pointerEvents="none"
                 style={[
                   styles.toastWrap,
-                  ...(Platform.OS === 'web' ? [{ pointerEvents: 'none' as const }] : []),
+                  // iOS + web: toast is not wrapped in Modal — keep above main content.
+                  ...(Platform.OS !== 'android' ? [{ zIndex: 999999 } as const] : []),
                   {
                     bottom: Math.max(16, insets.bottom + 12),
                     opacity: toastAnim,
@@ -788,7 +810,6 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
                     ],
                   },
                 ]}
-                {...(Platform.OS === 'web' ? {} : { pointerEvents: 'none' as const })}
               >
                 <View
                   style={[
@@ -812,9 +833,14 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
               </Animated.View>
             );
 
-            // On native, other UI is often rendered inside Modal portals (e.g. MediaViewerModal).
-            // Render the toast in its own transparent Modal so it appears above those.
-            if (Platform.OS !== 'web') {
+            // Android: wrap in Modal so the toast stays above other full-screen Modal portals
+            // (e.g. MediaViewerModal).
+            //
+            // iOS + web: do NOT wrap in Modal. On iOS a second Modal is a separate UIWindow — it
+            // captures all touches until dismissed, even with pointerEvents="none", so the app
+            // feels frozen while the toast is visible. Inline toast in the root view + zIndex
+            // keeps touches passing through to the chat below.
+            if (Platform.OS === 'android') {
               return (
                 <Modal
                   visible

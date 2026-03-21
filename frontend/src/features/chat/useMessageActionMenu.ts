@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Animated, Platform } from 'react-native';
+import { Animated, Keyboard, Platform } from 'react-native';
 
 export function useMessageActionMenu<TTarget = unknown>() {
   const [open, setOpen] = React.useState(false);
@@ -14,6 +14,8 @@ export function useMessageActionMenu<TTarget = unknown>() {
   const openMenu = React.useCallback(
     (msg: TTarget, nextAnchor?: { x: number; y: number }) => {
       if (!msg) return;
+      // Dismiss IME so the anchored menu isn’t clipped; redundant on some platforms but safe.
+      Keyboard.dismiss();
       setTarget(msg);
       if (nextAnchor && Number.isFinite(nextAnchor.x) && Number.isFinite(nextAnchor.y))
         setAnchor(nextAnchor);

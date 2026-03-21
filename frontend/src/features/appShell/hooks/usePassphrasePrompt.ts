@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Platform } from 'react-native';
 
 type PassphrasePromptMode = 'setup' | 'restore' | 'change' | 'reset';
 
@@ -48,6 +49,10 @@ export function usePassphrasePrompt({
     processing: boolean;
     onSubmit: () => void;
     onCancel: () => void;
+    /** iOS: skip confirmation uses a View overlay instead of `promptConfirm` (nested native Modal freeze). */
+    skipRecoveryConfirmVisible: boolean;
+    onConfirmSkipRecovery: () => void;
+    onDismissSkipRecovery: () => void;
   };
 } {
   const [passphrasePrompt, setPassphrasePrompt] = React.useState<PassphrasePromptState>(null);
@@ -56,14 +61,31 @@ export function usePassphrasePrompt({
   const [passphraseVisible, setPassphraseVisible] = React.useState(false);
   const [passphraseError, setPassphraseError] = React.useState<string | null>(null);
   const [processing, setProcessing] = React.useState(false);
+  const [skipRecoveryConfirmVisible, setSkipRecoveryConfirmVisible] = React.useState(false);
+  const activePromptRef = React.useRef<PassphrasePromptState | null>(null);
+  React.useEffect(() => {
+    activePromptRef.current = passphrasePrompt;
+  }, [passphrasePrompt]);
 
   const closePrompt = React.useCallback(() => {
+    setSkipRecoveryConfirmVisible(false);
     setPassphrasePrompt(null);
     setPassphraseInput('');
     setPassphraseConfirmInput('');
     setPassphraseVisible(false);
     setPassphraseError(null);
     setProcessing(false);
+  }, []);
+
+  const onConfirmSkipRecovery = React.useCallback(() => {
+    setSkipRecoveryConfirmVisible(false);
+    const p = activePromptRef.current;
+    if (p) p.reject(new Error('Prompt cancelled'));
+    closePrompt();
+  }, [closePrompt]);
+
+  const onDismissSkipRecovery = React.useCallback(() => {
+    setSkipRecoveryConfirmVisible(false);
   }, []);
 
   const promptPassphrase = React.useCallback((mode: PassphrasePromptMode): Promise<string> => {
@@ -132,6 +154,11 @@ export function usePassphrasePrompt({
       }
 
       // Setup flow: user is choosing to skip creating a recovery passphrase.
+      // iOS: avoid stacking UiPromptModal on top of this screen’s native Modal (freezes / unresponsive UI).
+      if (Platform.OS === 'ios') {
+        setSkipRecoveryConfirmVisible(true);
+        return;
+      }
       const ok = await promptConfirm(
         'Skip Recovery Setup?',
         "If you don't set a recovery passphrase, you won't be able to restore older encrypted messages if you switch devices.\n\nWe do NOT store your passphrase, so make sure you remember it.",
@@ -173,6 +200,9 @@ export function usePassphrasePrompt({
       processing,
       onSubmit: handlePromptSubmit,
       onCancel: handlePromptCancel,
+      skipRecoveryConfirmVisible,
+      onConfirmSkipRecovery,
+      onDismissSkipRecovery,
     },
   };
 }

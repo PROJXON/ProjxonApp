@@ -1,7 +1,7 @@
 import { icons } from '@aws-amplify/ui-react-native/dist/assets';
 import React from 'react';
 import type { TextInput } from 'react-native';
-import { Image, Modal, Platform, Pressable, Text, View } from 'react-native';
+import { Image, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { AppStyles } from '../../../../App.styles';
 import { AnimatedDots } from '../../../components/AnimatedDots';
@@ -33,6 +33,10 @@ export function MainAppPassphrasePromptModal({
   processing,
   onSubmit,
   onCancel,
+
+  skipRecoveryConfirmVisible,
+  onConfirmSkipRecovery,
+  onDismissSkipRecovery,
 }: {
   styles: AppStyles;
   isDark: boolean;
@@ -52,6 +56,10 @@ export function MainAppPassphrasePromptModal({
   processing: boolean;
   onSubmit: () => void;
   onCancel: () => void | Promise<void>;
+
+  skipRecoveryConfirmVisible: boolean;
+  onConfirmSkipRecovery: () => void;
+  onDismissSkipRecovery: () => void;
 }): React.JSX.Element {
   const kb = useKeyboardOverlap({ enabled: visible });
   const [sheetHeight, setSheetHeight] = React.useState<number>(0);
@@ -101,13 +109,24 @@ export function MainAppPassphrasePromptModal({
     mode === 'restore'
       ? 'Decrypting'
       : mode === 'change'
-        ? 'Updating backup'
+        ? 'Updating'
         : mode === 'reset'
-          ? 'Resetting recovery'
-          : 'Encrypting backup';
+          ? 'Resetting'
+          : 'Encrypting';
 
   const content = (
-    <View style={[styles.modalContent, isDark ? styles.modalContentDark : null]}>
+    <View
+      style={[
+        styles.modalContent,
+        isDark ? styles.modalContentDark : null,
+        Platform.OS === 'ios' && skipRecoveryConfirmVisible
+          ? {
+              borderWidth: 0,
+              overflow: 'hidden',
+            }
+          : null,
+      ]}
+    >
       <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>{label}</Text>
       {helperText ? (
         <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
@@ -225,20 +244,30 @@ export function MainAppPassphrasePromptModal({
             submitDisabled && { opacity: 0.45 },
           ]}
           onPress={onSubmit}
-          disabled={submitDisabled}
+          disabled={submitDisabled || skipRecoveryConfirmVisible}
         >
           {processing ? (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 2,
-              }}
-            >
-              <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>{busyLabel}</Text>
-              <AnimatedDots color={APP_COLORS.dark.text.primary} size={18} />
-            </View>
+            mode === 'reset' || mode === 'setup' || mode === 'change' ? (
+              // Setup / change / reset: short label only (no dots) — long label + dots overflowed narrow CTA on iOS.
+              <Text
+                style={[styles.modalButtonText, styles.modalButtonCtaText, { textAlign: 'center' }]}
+              >
+                {busyLabel}
+              </Text>
+            ) : (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 2,
+                  width: '100%',
+                }}
+              >
+                <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>{busyLabel}</Text>
+                <AnimatedDots color={APP_COLORS.dark.text.primary} size={18} />
+              </View>
+            )
           ) : (
             <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>Submit</Text>
           )}
@@ -251,13 +280,89 @@ export function MainAppPassphrasePromptModal({
             processing && { opacity: 0.45 },
           ]}
           onPress={() => void Promise.resolve(onCancel())}
-          disabled={processing}
+          disabled={processing || skipRecoveryConfirmVisible}
         >
           <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
             Cancel
           </Text>
         </Pressable>
       </View>
+
+      {Platform.OS === 'ios' && skipRecoveryConfirmVisible && mode === 'setup' ? (
+        <View
+          style={[
+            StyleSheet.absoluteFillObject,
+            {
+              borderRadius: 12,
+              overflow: 'hidden',
+              backgroundColor: 'rgba(0,0,0,0.45)',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 999,
+              padding: 12,
+            },
+          ]}
+        >
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 360,
+              borderRadius: 14,
+              padding: 16,
+              backgroundColor: isDark ? APP_COLORS.dark.bg.surface : APP_COLORS.light.bg.app,
+            }}
+          >
+            <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
+              Skip Recovery Setup?
+            </Text>
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+              {
+                "If you don't set a recovery passphrase, you won't be able to restore older encrypted messages if you switch devices.\n\nWe do NOT store your passphrase, so make sure you remember it."
+              }
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginTop: 14,
+                gap: 8,
+                width: '100%',
+              }}
+            >
+              <Pressable
+                style={[
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  styles.modalButtonCta,
+                  isDark ? styles.modalButtonCtaDark : null,
+                ]}
+                onPress={onConfirmSkipRecovery}
+                accessibilityRole="button"
+                accessibilityLabel="Skip for now"
+              >
+                <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>
+                  Skip for now
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.modalButton,
+                  styles.modalButtonSmall,
+                  isDark ? styles.modalButtonDark : null,
+                ]}
+                onPress={onDismissSkipRecovery}
+                accessibilityRole="button"
+                accessibilityLabel="Go back"
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                  Go back
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 
