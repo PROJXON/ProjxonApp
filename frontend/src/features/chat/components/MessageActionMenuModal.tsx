@@ -23,6 +23,7 @@ import {
   fileIconNameForMedia,
 } from '../../../utils/mediaKinds';
 import { getCopyableMessageText } from '../getCopyableMessageText';
+import type { ChatCopyToClipboardOptions } from '../useChatCopyToClipboard';
 import {
   normalizeChatMediaList,
   normalizeDmMediaItems,
@@ -103,7 +104,7 @@ type Props = {
   showAlert: (title: string, body: string) => void;
 
   close: () => void;
-  copyToClipboard: (text: string) => Promise<void>;
+  copyToClipboard: (text: string, opts?: ChatCopyToClipboardOptions) => Promise<boolean>;
   selectionActive: boolean;
   onSelectMessage?: (msg: ChatMessage) => void;
   sendReaction: (msg: ChatMessage, emoji: string) => void;

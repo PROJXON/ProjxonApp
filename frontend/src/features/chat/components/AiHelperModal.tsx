@@ -41,7 +41,8 @@ type Props = {
   onSubmit: () => void;
   onResetThread: () => void;
   onClose: () => void;
-  onCopySuggestion: (s: string) => void;
+  /** Return `false` when copy did not succeed (caller should not show “Copied”). */
+  onCopySuggestion: (s: string) => boolean | void | Promise<boolean | void>;
   onUseSuggestion: (s: string) => void;
 
   scrollRef: React.MutableRefObject<ScrollView | null>;
@@ -93,6 +94,8 @@ export function AiHelperModal({
 }: Props) {
   const kb = useKeyboardOverlap({ enabled: visible });
   const [sheetHeight, setSheetHeight] = React.useState<number>(0);
+  /** Inline confirmation — global toast can sit under this Modal on iOS. */
+  const [copiedSuggestionKey, setCopiedSuggestionKey] = React.useState<string | null>(null);
   const bottomPad = React.useMemo(
     () =>
       calcCenteredModalBottomPadding(
@@ -360,7 +363,23 @@ export function AiHelperModal({
                                                   styles.toolBtn,
                                                   isDark ? styles.toolBtnDark : null,
                                                 ]}
-                                                onPress={() => onCopySuggestion(s)}
+                                                onPress={async () => {
+                                                  const rowKey = `turn:${idx}:sugg:${sIdx}`;
+                                                  try {
+                                                    const ok = await Promise.resolve(
+                                                      onCopySuggestion(s),
+                                                    );
+                                                    if (ok === false) return;
+                                                    setCopiedSuggestionKey(rowKey);
+                                                    setTimeout(() => {
+                                                      setCopiedSuggestionKey((k) =>
+                                                        k === rowKey ? null : k,
+                                                      );
+                                                    }, 2000);
+                                                  } catch {
+                                                    // ignore
+                                                  }
+                                                }}
                                               >
                                                 <Text
                                                   style={[
@@ -368,7 +387,9 @@ export function AiHelperModal({
                                                     isDark ? styles.toolBtnTextDark : null,
                                                   ]}
                                                 >
-                                                  Copy
+                                                  {copiedSuggestionKey === `turn:${idx}:sugg:${sIdx}`
+                                                    ? 'Copied'
+                                                    : 'Copy'}
                                                 </Text>
                                               </Pressable>
                                               <Pressable

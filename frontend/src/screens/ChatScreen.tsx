@@ -1706,7 +1706,10 @@ export default function ChatScreen({
   useChatConversationJoin({ activeConversationId, wsRef, pendingJoinConversationIdRef });
 
   const { onChangeInput } = useChatComposerInput({ setInput, inputRef, isTypingRef, sendTyping });
-  const { copyToClipboard } = useChatCopyToClipboard({ openInfo });
+  const { copyToClipboard } = useChatCopyToClipboard({
+    openInfo,
+    onCopied: () => showToast('Copied', 'success'),
+  });
 
   const onPressMessage = useChatPressToDecrypt({
     isDm,
