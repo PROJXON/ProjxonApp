@@ -765,11 +765,21 @@ export const styles = StyleSheet.create({
   avatarTextColorBtnSelectedDark: { borderWidth: 2, borderColor: APP_COLORS.dark.text.primary },
   avatarTextColorLabel: { fontWeight: '800', color: APP_COLORS.light.text.primary },
   avatarTextColorLabelDark: { color: APP_COLORS.dark.text.primary },
-  profileActionsRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
+  // flexWrap + minWidth: lets long labels (e.g. "Choose Image") wrap to a second row on narrow
+  // modals (iOS width ~80%); without flexWrap, flex:1 children shrink and text clips.
+  profileActionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'stretch',
+    gap: 10,
+    marginTop: 12,
+  },
   toolBtn: {
     flex: 1,
-    height: 40,
+    minWidth: 124,
+    minHeight: 40,
     paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 12,
     backgroundColor: APP_COLORS.light.bg.surface2,
     borderWidth: StyleSheet.hairlineWidth,

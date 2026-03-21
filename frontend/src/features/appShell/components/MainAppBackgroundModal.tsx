@@ -313,7 +313,7 @@ export function MainAppBackgroundModal({
                   style={[
                     styles.modalHelperText,
                     isDark ? styles.modalHelperTextDark : null,
-                    { marginTop: 6 },
+                    { marginTop: 6, marginBottom: 4 },
                   ]}
                 >
                   Photo background enabled - remove the photo to use a solid color
@@ -322,18 +322,19 @@ export function MainAppBackgroundModal({
 
               {photoEnabled ? (
                 <>
-                  <View style={styles.bgEffectsHeaderRow}>
+                  <View style={[styles.bgEffectsHeaderRow, { marginTop: 2 }]}>
                     <Text
                       style={[
                         styles.modalHelperText,
                         isDark ? styles.modalHelperTextDark : null,
                         styles.profileSectionTitle,
+                        { marginTop: 0, marginBottom: 0 },
                       ]}
                     >
-                      Image scale
+                      Image Scale
                     </Text>
                   </View>
-                  <View style={[styles.avatarTextColorRow, { marginTop: 6 }]}>
+                  <View style={[styles.avatarTextColorRow, { marginTop: 4 }]}>
                     <Pressable
                       onPress={() => setBgImageScaleModeDraft('fill')}
                       style={[
@@ -382,12 +383,13 @@ export function MainAppBackgroundModal({
                     </Pressable>
                   </View>
 
-                  <View style={styles.bgEffectsHeaderRow}>
+                  <View style={[styles.bgEffectsHeaderRow, { marginTop: 4 }]}>
                     <Text
                       style={[
                         styles.modalHelperText,
                         isDark ? styles.modalHelperTextDark : null,
                         styles.profileSectionTitle,
+                        { marginTop: 0, marginBottom: 0 },
                       ]}
                     >
                       Photo effects
@@ -416,7 +418,7 @@ export function MainAppBackgroundModal({
                     </Pressable>
                   </View>
 
-                  <View style={styles.bgSliderSection}>
+                  <View style={[styles.bgSliderSection, { marginTop: 6 }]}>
                     <View style={styles.bgSliderLabelRow}>
                       <Text
                         style={[styles.bgSliderLabel, isDark ? styles.bgSliderLabelDark : null]}
