@@ -519,18 +519,27 @@ export const styles = StyleSheet.create({
   },
   modalInput: {
     height: 48,
-    // Keep explicit text metrics so modal inputs match other 48px controls.
     fontSize: 16,
-    lineHeight: 48,
-    paddingVertical: 0,
     paddingHorizontal: 12,
     borderWidth: 1,
     borderColor: PALETTE.lineDark,
     borderRadius: 10,
-    // Helps avoid descender clipping on Android.
-    includeFontPadding: false,
-    textAlignVertical: 'center',
     marginBottom: 12,
+    // Android / web: lineHeight === height centers single-line text in 48px fields.
+    // iOS: that pattern misaligns placeholder + secure entry (same as `blocksInput`).
+    ...Platform.select({
+      ios: {
+        paddingVertical: 13,
+        lineHeight: 20,
+      },
+      default: {
+        paddingVertical: 0,
+        lineHeight: 48,
+        // Helps avoid descender clipping on Android.
+        includeFontPadding: false,
+        textAlignVertical: 'center',
+      },
+    }),
   },
   passphraseFieldWrapper: {
     position: 'relative',
@@ -968,13 +977,23 @@ export const styles = StyleSheet.create({
     borderColor: APP_COLORS.light.border.subtle,
     backgroundColor: APP_COLORS.light.bg.surface2,
     paddingHorizontal: 12,
-    paddingVertical: 0,
     fontSize: 16,
-    lineHeight: 48,
-    // Helps avoid descender clipping on Android.
-    includeFontPadding: false,
-    textAlignVertical: 'center',
     color: APP_COLORS.light.text.primary,
+    // Android / web: single-line vertical centering via lineHeight === height.
+    // iOS: that pattern misaligns placeholder + typed text (placeholder looks “sunk”).
+    ...Platform.select({
+      ios: {
+        paddingVertical: 13,
+        lineHeight: 20,
+      },
+      default: {
+        paddingVertical: 0,
+        lineHeight: 48,
+        // Helps avoid descender clipping on Android.
+        includeFontPadding: false,
+        textAlignVertical: 'center',
+      },
+    }),
   },
   blocksInputDark: {
     backgroundColor: APP_COLORS.dark.bg.header,
