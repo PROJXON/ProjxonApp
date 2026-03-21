@@ -495,6 +495,19 @@ export default function ChatScreen({
     maxAttachmentsPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
     showAlert,
   });
+
+  // Leaving a chat (DM / channel / group) should end inline edit, reply, and attachment-replace
+  // flows so another conversation doesn't show stale UI ("Finish editing…", open editor, etc.).
+  React.useEffect(() => {
+    setInlineEditTargetId(null);
+    setInlineEditDraft('');
+    setInlineEditAttachmentMode('keep');
+    setInlineEditUploading(false);
+    clearPendingMedia();
+    setReplyTarget(null);
+    closeMessageActions();
+  }, [conversationId, clearPendingMedia, closeMessageActions]);
+
   const cdnMedia = useCdnUrlCache(CDN_URL);
   const mediaUrlByPath = cdnMedia.urlByPath;
   const cdnAvatar = useCdnUrlCache(CDN_URL);
