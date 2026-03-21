@@ -246,7 +246,7 @@ export function useChatAdminOps(opts: {
     }
 
     if (!skipStandardConfirm) {
-      const ok = await uiConfirm('Leave channel?', 'You will stop receiving new messages', {
+      const ok = await uiConfirm('Leave Channel?', 'You will stop receiving new messages', {
         confirmText: 'Leave',
         cancelText: 'Cancel',
         destructive: true,

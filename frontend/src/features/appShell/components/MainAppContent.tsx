@@ -353,6 +353,8 @@ export const MainAppContent = ({
     setMyChannelsError,
     myChannels,
     leaveChannelFromSettings,
+    getLeaveChannelDecisionForIos,
+    leaveChannelFromSettingsIosConfirmed,
     createChannelOpen,
     setCreateChannelOpen,
     createChannelName,
@@ -784,6 +786,8 @@ export const MainAppContent = ({
         myChannels={myChannels}
         enterChannelConversation={enterChannelConversation}
         leaveChannelFromSettings={leaveChannelFromSettings}
+        getLeaveChannelDecisionForIos={getLeaveChannelDecisionForIos}
+        leaveChannelFromSettingsIosConfirmed={leaveChannelFromSettingsIosConfirmed}
         createChannelOpen={createChannelOpen}
         setCreateChannelOpen={setCreateChannelOpen}
         createChannelName={createChannelName}

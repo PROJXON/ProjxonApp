@@ -28,6 +28,25 @@ export type ChannelSearchResult = {
   isMember?: boolean;
 };
 
+export type LeaveChannelDecision =
+  | {
+      kind: 'block';
+      title: string;
+      message: string;
+    }
+  | {
+      kind: 'confirm';
+      title: string;
+      message: string;
+      confirmText: string;
+      cancelText: string;
+      destructive?: boolean;
+    };
+
+export type LeaveChannelResult =
+  | { ok: true }
+  | { ok: false; title: string; message: string };
+
 export function useChannelsFlow({
   apiUrl,
   getIdToken,
@@ -70,6 +89,10 @@ export function useChannelsFlow({
   }>;
   fetchMyChannels: () => Promise<void>;
   leaveChannelFromSettings: (channelId: string) => Promise<void>;
+  // iOS: avoid nested native modal stacking by letting the Channels modal render
+  // the confirmation/alert as a View overlay.
+  getLeaveChannelDecisionForIos: (channelId: string) => Promise<LeaveChannelDecision>;
+  leaveChannelFromSettingsIosConfirmed: (channelId: string) => Promise<LeaveChannelResult>;
 
   // Find Channels
   channelSearchOpen: boolean;
@@ -517,7 +540,9 @@ export function useChannelsFlow({
                 'You are the last member in this channel.\n\nIf you leave, the channel and its message history will be deleted.\n\nYou can recreate the channel later.',
                 { confirmText: 'Leave & Delete', cancelText: 'Cancel', destructive: true },
               );
-              if (!ok) return;
+              if (!ok) {
+                return;
+              }
               // This prompt is the confirmation; do not show a second "Leave channel?" modal.
               skipStandardConfirm = true;
             }
@@ -527,12 +552,14 @@ export function useChannelsFlow({
         }
 
         if (!skipStandardConfirm) {
-          const ok = await promptConfirm('Leave channel?', 'You will stop receiving new messages', {
+          const ok = await promptConfirm('Leave Channel?', 'You will stop receiving new messages', {
             confirmText: 'Leave',
             cancelText: 'Cancel',
             destructive: true,
           });
-          if (!ok) return;
+          if (!ok) {
+            return;
+          }
         }
 
         const resp = await fetch(`${base}/channels/leave`, {
@@ -573,7 +600,158 @@ export function useChannelsFlow({
         void promptAlert('Unable to leave', e instanceof Error ? e.message : 'Leave failed');
       }
     },
-    [apiUrl, currentConversationId, enterChannelConversation, promptAlert, promptConfirm],
+    [
+      apiUrl,
+      currentConversationId,
+      enterChannelConversation,
+      promptAlert,
+      promptConfirm,
+    ],
+  );
+
+  const getLeaveChannelDecisionForIos = React.useCallback(
+    async (channelId: string): Promise<LeaveChannelDecision> => {
+      const cid = String(channelId || '').trim();
+      if (!cid) {
+        return {
+          kind: 'block',
+          title: 'Unable to leave',
+          message: 'Invalid channel.',
+        };
+      }
+      if (!apiUrl) {
+        return {
+          kind: 'block',
+          title: 'Unable to leave',
+          message: 'Backend not configured.',
+        };
+      }
+
+      const token = await getIdTokenRef.current();
+      if (!token) {
+        throw new Error('Unable to authenticate');
+      }
+
+      const base = apiUrl.replace(/\/$/, '');
+      try {
+        const rosterResp = await fetch(
+          `${base}/channels/members?channelId=${encodeURIComponent(cid)}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
+        if (rosterResp.ok) {
+          const raw: unknown = await rosterResp.json().catch(() => ({}));
+          const data =
+            raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : ({} as const);
+
+          const me = data.me && typeof data.me === 'object' ? (data.me as Record<string, unknown>) : {};
+          const meIsAdmin = !!me.isAdmin;
+
+          const membersRaw: unknown[] = Array.isArray(data.members) ? data.members : [];
+          const members = membersRaw
+            .map((m) => (m && typeof m === 'object' ? (m as Record<string, unknown>) : null))
+            .filter(Boolean) as Array<Record<string, unknown>>;
+
+          const active = members.filter((m) => String(m.status || '') === 'active');
+          const activeAdmins = active.filter((m) => !!m.isAdmin);
+
+          // If I'm an admin, and there are other active members, require at least one *other* active admin.
+          if (meIsAdmin && active.length > 1 && activeAdmins.length === 1) {
+            return {
+              kind: 'block',
+              title: 'Wait!',
+              message: 'You are the last admin. Promote someone else before leaving.',
+            };
+          }
+
+          if (active.length === 1) {
+            return {
+              kind: 'confirm',
+              title: 'Leave and Delete Channel?',
+              message:
+                'You are the last member in this channel.\n\nIf you leave, the channel and its message history will be deleted.\n\nYou can recreate the channel later.',
+              confirmText: 'Leave & Delete',
+              cancelText: 'Cancel',
+              destructive: true,
+            };
+          }
+        }
+      } catch {
+        // ignore and fall back to basic confirm
+      }
+
+      return {
+        kind: 'confirm',
+        title: 'Leave Channel?',
+        message: 'You will stop receiving new messages',
+        confirmText: 'Leave',
+        cancelText: 'Cancel',
+        destructive: true,
+      };
+    },
+    [apiUrl],
+  );
+
+  const leaveChannelFromSettingsIosConfirmed = React.useCallback(
+    async (channelId: string): Promise<LeaveChannelResult> => {
+      const cid = String(channelId || '').trim();
+      if (!cid) return { ok: false, title: 'Unable to leave', message: 'Invalid channel.' };
+      if (!apiUrl) return { ok: false, title: 'Unable to leave', message: 'Backend not configured.' };
+
+      const leavingActiveChannel = String(currentConversationId || '').trim() === `ch#${cid}`;
+
+      try {
+        const token = await getIdTokenRef.current();
+        if (!token) throw new Error('Unable to authenticate');
+
+        const base = apiUrl.replace(/\/$/, '');
+        const resp = await fetch(`${base}/channels/leave`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channelId: cid }),
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '');
+          let msg = `Leave failed (${resp.status})`;
+          try {
+            const parsed = text ? JSON.parse(text) : null;
+            if (parsed && typeof parsed.message === 'string') msg = parsed.message;
+          } catch {
+            if (text.trim()) msg = `${msg}: ${text.trim()}`;
+          }
+
+          const looksLikeLastAdmin =
+            String(msg || '')
+              .toLowerCase()
+              .includes('last admin') &&
+            String(msg || '')
+              .toLowerCase()
+              .includes('promote');
+
+          return { ok: false, title: looksLikeLastAdmin ? 'Wait!' : 'Unable to leave', message: msg };
+        }
+
+        setMyChannels((prev) =>
+          (Array.isArray(prev) ? prev : []).filter((c) => String(c.channelId) !== cid),
+        );
+
+        // If we left the channel currently being viewed, behave like the in-channel leave action:
+        // navigate back to Global and close any channel modals.
+        if (leavingActiveChannel) {
+          enterChannelConversation('global');
+        } else {
+          setChannelsOpen(false);
+        }
+
+        return { ok: true };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : 'Leave failed';
+        return { ok: false, title: 'Unable to leave', message };
+      }
+    },
+    [apiUrl, currentConversationId, enterChannelConversation],
   );
 
   const submitCreateChannelInline = React.useCallback(async () => {
@@ -662,6 +840,8 @@ export function useChannelsFlow({
     myChannels,
     fetchMyChannels,
     leaveChannelFromSettings,
+    getLeaveChannelDecisionForIos,
+    leaveChannelFromSettingsIosConfirmed,
 
     channelSearchOpen,
     setChannelSearchOpen,
