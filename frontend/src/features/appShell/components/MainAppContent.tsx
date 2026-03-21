@@ -827,21 +827,6 @@ export const MainAppContent = ({
         submitChannelPassword={submitChannelPassword}
       />
 
-      <MainAppBlocklistModal
-        styles={styles}
-        isDark={isDark}
-        blocklistOpen={blocklistOpen}
-        setBlocklistOpen={setBlocklistOpen}
-        blockUsername={blockUsername}
-        setBlockUsername={setBlockUsername}
-        blockError={blockError}
-        setBlockError={setBlockError}
-        addBlockByUsername={addBlockByUsername}
-        blocklistLoading={blocklistLoading}
-        blockedUsers={blockedUsers}
-        unblockUser={unblockUser}
-      />
-
       <MainAppPassphrasePromptModal styles={styles} isDark={isDark} {...passphraseModalProps} />
 
       <View style={{ flex: 1 }}>
@@ -878,6 +863,22 @@ export const MainAppContent = ({
           <View style={{ flex: 1, backgroundColor: appColors.appBackground }} />
         )}
       </View>
+
+      {/* After main chat so iOS blocklist overlay (View, not Modal) paints above the thread. */}
+      <MainAppBlocklistModal
+        styles={styles}
+        isDark={isDark}
+        blocklistOpen={blocklistOpen}
+        setBlocklistOpen={setBlocklistOpen}
+        blockUsername={blockUsername}
+        setBlockUsername={setBlockUsername}
+        blockError={blockError}
+        setBlockError={setBlockError}
+        addBlockByUsername={addBlockByUsername}
+        blocklistLoading={blocklistLoading}
+        blockedUsers={blockedUsers}
+        unblockUser={unblockUser}
+      />
     </View>
   );
 };

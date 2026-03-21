@@ -195,8 +195,8 @@ export function useBlocklistData({
       const subToUnblock = String(blockedSub || '').trim();
       if (!subToUnblock || !apiUrl) return;
       const ok = await promptConfirm(
-        'Unblock user?',
-        `Unblock ${label ? `"${label}"` : 'this user'}?`,
+        'Unblock User?',
+        `Unblock ${label ? `${label}` : 'this user'}?`,
         { confirmText: 'Unblock', cancelText: 'Cancel', destructive: false },
       );
       if (!ok) return;
