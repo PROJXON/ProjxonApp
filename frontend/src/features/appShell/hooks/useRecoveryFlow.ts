@@ -1,6 +1,7 @@
 import * as React from 'react';
 
 import type { BackupBlob } from '../../../types/crypto';
+import { deferForModalTransition } from '../../../utils/deferForModalTransition';
 
 export function useRecoveryFlow({
   apiUrl,
@@ -91,7 +92,9 @@ export function useRecoveryFlow({
       setHasRecoveryBlob(true);
       setRecoveryBlobKnown(true);
       setRecoveryLocked(false);
-      await promptAlert('Recovery reset', 'A new recovery passphrase has been set.');
+      closePrompt();
+      await deferForModalTransition();
+      await promptAlert('Recovery Reset', 'A new recovery passphrase has been set.');
     } catch {
       // cancelled setup
     } finally {
@@ -150,9 +153,13 @@ export function useRecoveryFlow({
         setHasRecoveryBlob(true);
         setRecoveryBlobKnown(true);
         setRecoveryLocked(false);
+        closePrompt();
+        await deferForModalTransition();
         await promptAlert('Recovery Unlocked', 'Your recovery passphrase has been accepted');
         return;
       } catch {
+        closePrompt();
+        await deferForModalTransition();
         await promptAlert(
           'Incorrect passphrase',
           'You have entered an incorrect passphrase. Try again.',
@@ -199,7 +206,9 @@ export function useRecoveryFlow({
       await uploadRecoveryBlob(token, kp.privateKey, nextPass);
       setHasRecoveryBlob(true);
       setRecoveryBlobKnown(true);
-      await promptAlert('Passphrase updated', 'Your recovery passphrase has been updated');
+      closePrompt();
+      await deferForModalTransition();
+      await promptAlert('Passphrase Updated', 'Your recovery passphrase has been updated');
     } catch {
       // cancelled
     } finally {
@@ -237,6 +246,8 @@ export function useRecoveryFlow({
       await uploadRecoveryBlob(token, kp.privateKey, pass);
       setHasRecoveryBlob(true);
       setRecoveryBlobKnown(true);
+      closePrompt();
+      await deferForModalTransition();
       await promptAlert('Recovery set up', 'A recovery passphrase has been set for your account');
     } catch {
       // cancelled

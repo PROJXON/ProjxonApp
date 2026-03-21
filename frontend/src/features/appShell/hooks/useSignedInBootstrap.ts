@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 
 import type { AmplifyUiUser } from '../../../types/amplifyUi';
 import type { BackupBlob } from '../../../types/crypto';
+import { deferForModalTransition } from '../../../utils/deferForModalTransition';
 
 type KeyPair = { privateKey: string; publicKey: string } | null;
 
@@ -212,12 +213,14 @@ export function useSignedInBootstrap({
                   recovered = true;
                   closePrompt();
                 } catch (err) {
+                  // Dismiss passphrase modal before stacking UiPromptModal (iOS nested-modal freeze).
+                  closePrompt();
+                  await deferForModalTransition();
                   await promptAlert(
                     'Incorrect passphrase',
                     'You have entered an incorrect passphrase. Try again.',
                   );
                   console.warn('Recovery attempt failed', err);
-                  closePrompt();
                   // continue prompting
                 }
               }
