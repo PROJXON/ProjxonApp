@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Animated, Platform } from 'react-native';
+import { Animated, Keyboard, Platform } from 'react-native';
 
 export function useMessageActionMenu<TTarget = unknown>() {
   const [open, setOpen] = React.useState(false);
@@ -14,6 +14,9 @@ export function useMessageActionMenu<TTarget = unknown>() {
   const openMenu = React.useCallback(
     (msg: TTarget, nextAnchor?: { x: number; y: number }) => {
       if (!msg) return;
+      // iOS often keeps the IME up on long-press, which clips the anchored menu; Android/web
+      // behave fine without forcing dismiss.
+      if (Platform.OS === 'ios') Keyboard.dismiss();
       setTarget(msg);
       if (nextAnchor && Number.isFinite(nextAnchor.x) && Number.isFinite(nextAnchor.y))
         setAnchor(nextAnchor);
