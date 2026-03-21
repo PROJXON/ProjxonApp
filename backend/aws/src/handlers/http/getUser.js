@@ -64,10 +64,26 @@ exports.handler = async (event) => {
         Limit: 1,
       })
     );
-    const it = resp.Items?.[0];
-    if (!it) {
+    const gsiItem = resp.Items?.[0];
+    if (!gsiItem) {
       return { statusCode: 404, body: JSON.stringify({ message: 'User does not exist' }) };
     }
+
+    // GSI projection may omit `currentPublicKey` (and other attrs). Hydrate from base table by PK.
+    const subFromGsi = String(gsiItem.userSub || '').trim();
+    let it = gsiItem;
+    if (subFromGsi) {
+      try {
+        const full = await ddb.send(
+          new GetCommand({ TableName: usersTable, Key: { userSub: subFromGsi } }),
+        );
+        if (full.Item) it = full.Item;
+      } catch (e) {
+        console.error('getUser: hydrate after GSI failed', { subFromGsi, usernameLower }, e);
+        throw e;
+      }
+    }
+
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },

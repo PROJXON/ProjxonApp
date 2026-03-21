@@ -67,15 +67,16 @@ async function getUserByUsernameLower(usersTable, usernameLower) {
   if (!item) return null;
 
   // IMPORTANT: DynamoDB GSI projection may not include `currentPublicKey`.
-  // Hydrate by PK to ensure we see full user attributes.
+  // Always hydrate by PK so we see full user attributes — otherwise we may return
+  // a partial GSI item and incorrectly reject users who do have keys.
   const sub = safeString(item.userSub);
   if (!sub) return item;
-  if (safeString(item.currentPublicKey)) return item;
   try {
     const full = await getUserBySub(usersTable, sub);
-    return full || item;
-  } catch {
-    return item;
+    return full ?? item;
+  } catch (err) {
+    console.error('getUserByUsernameLower: hydrate failed', { sub, usernameLower: u }, err);
+    throw err;
   }
 }
 
