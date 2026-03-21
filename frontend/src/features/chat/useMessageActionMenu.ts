@@ -14,9 +14,8 @@ export function useMessageActionMenu<TTarget = unknown>() {
   const openMenu = React.useCallback(
     (msg: TTarget, nextAnchor?: { x: number; y: number }) => {
       if (!msg) return;
-      // iOS often keeps the IME up on long-press, which clips the anchored menu; Android/web
-      // behave fine without forcing dismiss.
-      if (Platform.OS === 'ios') Keyboard.dismiss();
+      // Dismiss IME so the anchored menu isn’t clipped; redundant on some platforms but safe.
+      Keyboard.dismiss();
       setTarget(msg);
       if (nextAnchor && Number.isFinite(nextAnchor.x) && Number.isFinite(nextAnchor.y))
         setAnchor(nextAnchor);
