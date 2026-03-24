@@ -244,8 +244,8 @@ export function HeaderMenuModal({
           hasAnchor ? styles.overlayAnchored : null,
           hasAnchor ? null : { paddingTop: insets.top + 10, paddingRight: 10 },
         ]}
-        pointerEvents={open ? 'auto' : 'none'}
       >
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <Animated.View
           style={[
             styles.card,
@@ -268,11 +268,6 @@ export function HeaderMenuModal({
         >
           {cardContent}
         </Animated.View>
-        <Pressable
-          style={StyleSheet.absoluteFill}
-          onPress={onClose}
-          pointerEvents={open ? 'auto' : 'none'}
-        />
       </View>
     </Modal>
   );
