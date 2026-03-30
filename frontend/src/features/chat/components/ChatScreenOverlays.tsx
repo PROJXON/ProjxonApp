@@ -428,7 +428,9 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
         }}
         onPickCamera={() => {
           attach.setOpen(false);
-          setTimeout(() => void attach.openCamera(), 0);
+          // iOS first-run permission prompts can race with modal transitions.
+          // Give the attach modal a brief moment to fully close before opening camera.
+          setTimeout(() => void attach.openCamera(), Platform.OS === 'ios' ? 250 : 0);
         }}
         onPickFile={() => {
           attach.setOpen(false);
