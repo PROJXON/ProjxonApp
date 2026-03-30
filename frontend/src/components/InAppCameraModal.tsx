@@ -3,7 +3,17 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React from 'react';
-import { Alert, Image, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useUiPromptOptional } from '../providers/UiPromptProvider';
@@ -140,6 +150,7 @@ export function InAppCameraModal({
   const [captured, setCaptured] = React.useState<InAppCameraCapture | null>(null);
   const [isRecording, setIsRecording] = React.useState(false);
   const [cameraReady, setCameraReady] = React.useState(false);
+  const [cameraMountReady, setCameraMountReady] = React.useState(false);
   const [mode, setMode] = React.useState<InAppCameraMode>(initialMode ?? 'photo');
   const [camPerm, requestCamPerm] = useCameraPermissions();
   const [micPerm, requestMicPerm] = useMicrophonePermissions();
@@ -218,6 +229,25 @@ export function InAppCameraModal({
       cancelled = true;
     };
   }, [visible, camPerm?.granted, requestCamPerm, showAlert, onClose]);
+
+  React.useEffect(() => {
+    if (!visible) {
+      setCameraMountReady(false);
+      return;
+    }
+    if (!camPerm?.granted) {
+      setCameraMountReady(false);
+      return;
+    }
+    // After iOS permission prompts, mounting CameraView on the very same tick
+    // can intermittently yield a blank surface. Delay one beat for stability on iOS only.
+    if (Platform.OS !== 'ios') {
+      setCameraMountReady(true);
+      return;
+    }
+    const t = setTimeout(() => setCameraMountReady(true), 120);
+    return () => clearTimeout(t);
+  }, [visible, camPerm?.granted]);
 
   React.useEffect(() => {
     if (!visible) return;
@@ -422,7 +452,7 @@ export function InAppCameraModal({
             ) : (
               <VideoPreview uri={captured.uri} />
             )
-          ) : (
+          ) : cameraMountReady ? (
             <CameraView
               ref={cameraRef}
               facing={facing}
@@ -450,6 +480,11 @@ export function InAppCameraModal({
                 showAlert('Camera failed', String(msg));
               }}
             />
+          ) : (
+            <View style={styles.permissionWait}>
+              <ActivityIndicator color={APP_COLORS.dark.text.primary} />
+              <Text style={styles.permissionWaitText}>Preparing camera...</Text>
+            </View>
           )}
         </View>
 
@@ -660,6 +695,19 @@ const styles = StyleSheet.create({
   modePillText: { color: withAlpha(PALETTE.white, 0.85), fontWeight: '900', fontSize: 12 },
   modePillTextActive: { color: APP_COLORS.dark.text.primary },
   preview: { width: '100%', height: '100%', backgroundColor: PALETTE.black },
+  permissionWait: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: PALETTE.black,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  permissionWaitText: {
+    color: withAlpha(PALETTE.white, 0.9),
+    fontSize: 13,
+    fontWeight: '700',
+  },
   bottomBar: {
     paddingHorizontal: 16,
     flexDirection: 'row',
