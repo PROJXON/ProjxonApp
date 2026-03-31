@@ -50,7 +50,8 @@ export const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 10,
+    paddingLeft: 12,
+    paddingRight: 8,
     paddingVertical: 6,
     borderRadius: 10,
     backgroundColor: APP_COLORS.light.bg.app,
@@ -61,7 +62,7 @@ export const styles = StyleSheet.create({
     backgroundColor: APP_COLORS.dark.bg.surface,
     borderColor: APP_COLORS.dark.border.subtle,
   },
-  // Web-only: avoid browser default teal/blue accent that can bleed into the native Switch implementation.
+  // Web + iOS: custom toggle (Android uses native Switch).
   webToggleTrack: {
     width: 44,
     height: 26,
@@ -79,11 +80,9 @@ export const styles = StyleSheet.create({
     height: 22,
     borderRadius: 999,
     backgroundColor: APP_COLORS.light.bg.app,
-    transform: [{ translateX: 0 }],
   },
   webToggleThumbOn: {
     backgroundColor: APP_COLORS.dark.border.subtle,
-    transform: [{ translateX: 18 }],
   },
   menuIconBtn: {
     width: 40,

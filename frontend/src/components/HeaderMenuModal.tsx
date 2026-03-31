@@ -105,7 +105,11 @@ export function HeaderMenuModal({
   const cardContent = (
     <>
       <View style={styles.topRightCloseRow}>
-        {headerRight ? <View style={styles.headerRightSlot}>{headerRight}</View> : null}
+        {headerRight ? (
+          <View style={styles.headerLeftSlot}>
+            <View style={styles.headerRightSlot}>{headerRight}</View>
+          </View>
+        ) : null}
         <Pressable
           onPress={onClose}
           style={({ pressed }) => [
@@ -300,11 +304,21 @@ const styles = StyleSheet.create({
   },
   topRightCloseRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
+    justifyContent: 'space-between',
     alignItems: 'center',
     paddingTop: 8,
     paddingHorizontal: 8,
     gap: 8,
+  },
+  // Match list layout: list padding 8, then row paddingHorizontal 12 (same as styles.row).
+  // Left slot starts at 8px (same as row Pressable); ThemeToggle adds its own paddingLeft 12 so the
+  // sun lines up with "Chats" / "Channels" label text (8 + 12 = 20px from card).
+  headerLeftSlot: {
+    flex: 1,
+    minWidth: 0,
+    paddingLeft: 0,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
   },
   headerRightSlot: { flexDirection: 'row', alignItems: 'center' },
   closeIconBtn: {
