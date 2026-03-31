@@ -1,5 +1,5 @@
 import React from 'react';
-import { Platform, Pressable, Switch, Text, View } from 'react-native';
+import { Animated, Easing, Platform, Pressable, Switch, Text, View } from 'react-native';
 
 import type { ChatScreenStyles } from '../../../screens/ChatScreen.styles';
 import { APP_COLORS } from '../../../theme/colors';
@@ -17,12 +17,24 @@ function MiniToggle({
   isDark: boolean;
   styles: ChatScreenStyles;
 }): React.JSX.Element {
+  const slide = React.useRef(new Animated.Value(value ? 10 : 0)).current;
+
+  React.useEffect(() => {
+    Animated.timing(slide, {
+      toValue: value ? 10 : 0,
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [slide, value]);
+
   return (
     <Pressable
       onPress={() => {
         if (disabled) return;
         onValueChange(!value);
       }}
+      hitSlop={{ top: 8, bottom: 8, left: 10, right: 10 }}
       accessibilityRole="switch"
       accessibilityState={{ checked: value, disabled: !!disabled }}
       style={({ pressed }) => [
@@ -34,11 +46,11 @@ function MiniToggle({
         pressed && !disabled ? styles.miniTogglePressed : null,
       ]}
     >
-      <View
+      <Animated.View
         style={[
           styles.miniToggleThumb,
           isDark ? styles.miniToggleThumbDark : null,
-          value ? styles.miniToggleThumbOn : null,
+          { transform: [{ translateX: slide }] },
         ]}
       />
     </Pressable>
@@ -125,6 +137,14 @@ export function DmSettingsPanel({
                   isDark={isDark}
                   styles={styles}
                 />
+              ) : Platform.OS === 'ios' ? (
+                <MiniToggle
+                  value={autoDecrypt}
+                  onValueChange={onToggleAutoDecrypt}
+                  disabled={!myPrivateKeyReady}
+                  isDark={isDark}
+                  styles={styles}
+                />
               ) : (
                 <Switch
                   value={autoDecrypt}
@@ -196,6 +216,13 @@ export function DmSettingsPanel({
                   onValueChange={onToggleReadReceipts}
                 />
               ) : Platform.OS === 'web' ? (
+                <MiniToggle
+                  value={sendReadReceipts}
+                  isDark={isDark}
+                  styles={styles}
+                  onValueChange={onToggleReadReceipts}
+                />
+              ) : Platform.OS === 'ios' ? (
                 <MiniToggle
                   value={sendReadReceipts}
                   isDark={isDark}
