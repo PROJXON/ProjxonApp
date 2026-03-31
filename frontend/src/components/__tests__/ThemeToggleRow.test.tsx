@@ -14,7 +14,7 @@ jest.mock('@expo/vector-icons/Feather', () => {
   };
 });
 
-type PlatformOS = 'ios' | 'web';
+type PlatformOS = 'ios' | 'android' | 'web';
 
 function withPlatformOS<T>(os: PlatformOS, run: () => T): T {
   const originalOS = Platform.OS;
@@ -38,8 +38,8 @@ beforeEach(() => {
 });
 
 describe('ThemeToggleRow (native branch)', () => {
-  test('renders a Switch and maps value changes to onSetTheme', () => {
-    withPlatformOS('ios', () => {
+  test('Android: renders Switch and maps value changes to onSetTheme', () => {
+    withPlatformOS('android', () => {
       const onSetTheme = jest.fn();
 
       const screen = render(
@@ -48,6 +48,21 @@ describe('ThemeToggleRow (native branch)', () => {
 
       const sw = screen.UNSAFE_getByType(Switch);
       sw.props.onValueChange(true);
+
+      expect(onSetTheme).toHaveBeenCalledTimes(1);
+      expect(onSetTheme).toHaveBeenCalledWith('dark');
+    });
+  });
+
+  test('iOS: custom toggle press maps to onSetTheme', () => {
+    withPlatformOS('ios', () => {
+      const onSetTheme = jest.fn();
+
+      const screen = render(
+        <ThemeToggleRow isDark={false} onSetTheme={onSetTheme} styles={styles} />,
+      );
+
+      fireEvent.press(screen.getByLabelText('Toggle theme'));
 
       expect(onSetTheme).toHaveBeenCalledTimes(1);
       expect(onSetTheme).toHaveBeenCalledWith('dark');

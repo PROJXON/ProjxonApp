@@ -99,7 +99,7 @@ export function useDeleteAccountFlow({
       onSignedOut?.();
     }
 
-    await promptAlert('Account deleted', 'Your account deletion request completed.');
+    await promptAlert('Account Deleted', 'Your account deletion request completed.');
   }, [
     apiUrl,
     deleteUser,

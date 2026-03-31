@@ -1,6 +1,8 @@
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons';
 import React from 'react';
 import {
+  Animated,
+  Easing,
   Image,
   Modal,
   Platform,
@@ -40,6 +42,7 @@ import {
 import type { ChatMessage } from '../types';
 
 type ReportNotice = { type: 'success' | 'error'; message: string };
+const MINI_TOGGLE_THUMB_TRAVEL_PX = 10;
 
 function MiniToggle({
   value,
@@ -54,12 +57,23 @@ function MiniToggle({
   isDark: boolean;
   styles: ChatScreenStyles;
 }): React.JSX.Element {
+  const slide = React.useRef(new Animated.Value(value ? MINI_TOGGLE_THUMB_TRAVEL_PX : 0)).current;
+  React.useEffect(() => {
+    Animated.timing(slide, {
+      toValue: value ? MINI_TOGGLE_THUMB_TRAVEL_PX : 0,
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [slide, value]);
+
   return (
     <Pressable
       onPress={() => {
         if (disabled) return;
         onValueChange(!value);
       }}
+      hitSlop={{ top: 8, bottom: 8, left: 10, right: 10 }}
       accessibilityRole="switch"
       accessibilityState={{ checked: value, disabled: !!disabled }}
       style={({ pressed }) => [
@@ -71,11 +85,11 @@ function MiniToggle({
         pressed && !disabled ? styles.miniTogglePressed : null,
       ]}
     >
-      <View
+      <Animated.View
         style={[
           styles.miniToggleThumb,
           isDark ? styles.miniToggleThumbDark : null,
-          value ? styles.miniToggleThumbOn : null,
+          { transform: [{ translateX: slide }] },
         ]}
       />
     </Pressable>
@@ -254,15 +268,7 @@ export function ReportModal({
                 >
                   Message
                 </Text>
-                {Platform.OS === 'web' ? (
-                  <MiniToggle
-                    value={reportKind === 'user'}
-                    disabled={submitting}
-                    isDark={isDark}
-                    styles={styles}
-                    onValueChange={onToggleKind}
-                  />
-                ) : (
+                {Platform.OS === 'android' ? (
                   <Switch
                     value={reportKind === 'user'}
                     disabled={submitting}
@@ -272,6 +278,14 @@ export function ReportModal({
                       true: APP_COLORS.light.border.default,
                     }}
                     thumbColor={isDark ? APP_COLORS.dark.border.subtle : APP_COLORS.light.bg.app}
+                  />
+                ) : (
+                  <MiniToggle
+                    value={reportKind === 'user'}
+                    disabled={submitting}
+                    isDark={isDark}
+                    styles={styles}
+                    onValueChange={onToggleKind}
                   />
                 )}
                 <Text
