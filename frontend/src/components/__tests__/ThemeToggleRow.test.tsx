@@ -14,7 +14,7 @@ jest.mock('@expo/vector-icons/Feather', () => {
   };
 });
 
-type PlatformOS = 'ios' | 'web';
+type PlatformOS = 'ios' | 'android' | 'web';
 
 function withPlatformOS<T>(os: PlatformOS, run: () => T): T {
   const originalOS = Platform.OS;
