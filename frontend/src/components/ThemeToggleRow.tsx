@@ -24,9 +24,7 @@ function AnimatedCustomToggleThumb({
   isDark: boolean;
   styles: ThemeToggleRowStyles;
 }): React.JSX.Element {
-  const slide = React.useRef(
-    new Animated.Value(isDark ? WEB_TOGGLE_THUMB_TRAVEL_PX : 0),
-  ).current;
+  const slide = React.useRef(new Animated.Value(isDark ? WEB_TOGGLE_THUMB_TRAVEL_PX : 0)).current;
 
   React.useEffect(() => {
     Animated.timing(slide, {
