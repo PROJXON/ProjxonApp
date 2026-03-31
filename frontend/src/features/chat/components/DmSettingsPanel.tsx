@@ -107,143 +107,209 @@ export function DmSettingsPanel({
   return (
     <>
       {isDm ? (
-        <View style={styles.dmSettingsRow}>
-          <View style={styles.dmSettingSlotLeft}>
-            <View style={styles.dmSettingGroup}>
-              <Text
-                style={[
-                  styles.decryptLabel,
-                  isDark ? styles.decryptLabelDark : null,
-                  styles.dmSettingLabel,
-                  compact ? styles.dmSettingLabelCompact : null,
-                ]}
-                numberOfLines={1}
-              >
-                Auto‑Decrypt
-              </Text>
-              {compact ? (
-                <MiniToggle
-                  value={autoDecrypt}
-                  onValueChange={onToggleAutoDecrypt}
-                  disabled={!myPrivateKeyReady}
-                  isDark={isDark}
-                  styles={styles}
-                />
-              ) : Platform.OS === 'web' ? (
-                <MiniToggle
-                  value={autoDecrypt}
-                  onValueChange={onToggleAutoDecrypt}
-                  disabled={!myPrivateKeyReady}
-                  isDark={isDark}
-                  styles={styles}
-                />
-              ) : Platform.OS === 'ios' ? (
-                <MiniToggle
-                  value={autoDecrypt}
-                  onValueChange={onToggleAutoDecrypt}
-                  disabled={!myPrivateKeyReady}
-                  isDark={isDark}
-                  styles={styles}
-                />
-              ) : (
-                <Switch
-                  value={autoDecrypt}
-                  onValueChange={onToggleAutoDecrypt}
-                  disabled={!myPrivateKeyReady}
-                  trackColor={{
-                    false: APP_COLORS.light.border.default,
-                    true: APP_COLORS.light.border.default,
-                  }}
-                  thumbColor={isDark ? APP_COLORS.dark.border.subtle : APP_COLORS.light.bg.app}
-                  ios_backgroundColor={APP_COLORS.light.border.default}
-                />
-              )}
-            </View>
-          </View>
-
-          <View style={styles.dmSettingSlotCenter}>
-            <View style={styles.dmSettingGroup}>
-              <Text
-                style={[
-                  styles.decryptLabel,
-                  isDark ? styles.decryptLabelDark : null,
-                  styles.dmSettingLabel,
-                  compact ? styles.dmSettingLabelCompact : null,
-                ]}
-                numberOfLines={1}
-              >
-                Self‑Destruct
-              </Text>
-              <Pressable
-                style={[
-                  styles.ttlChip,
-                  isDark ? styles.ttlChipDark : null,
-                  compact ? styles.ttlChipCompact : null,
-                ]}
-                onPress={onOpenTtlPicker}
-              >
+        compact ? (
+          <View
+            style={[
+              styles.dmSettingsRow,
+              { flexDirection: 'column', alignItems: 'stretch', gap: 6 },
+            ]}
+          >
+            <View
+              style={{
+                width: '100%',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'flex-start',
+                columnGap: 14,
+              }}
+            >
+              <View style={[styles.dmSettingGroup, { minWidth: 0 }]}>
                 <Text
                   style={[
-                    styles.ttlChipText,
-                    isDark ? styles.ttlChipTextDark : null,
-                    String(ttlLabel).trim().toLowerCase() === 'off' ? styles.ttlChipTextOff : null,
+                    styles.decryptLabel,
+                    isDark ? styles.decryptLabelDark : null,
+                    styles.dmSettingLabel,
+                    styles.dmSettingLabelCompact,
                   ]}
+                  numberOfLines={1}
                 >
-                  {ttlLabel}
+                  Auto‑Decrypt
                 </Text>
-              </Pressable>
+                <MiniToggle
+                  value={autoDecrypt}
+                  onValueChange={onToggleAutoDecrypt}
+                  disabled={!myPrivateKeyReady}
+                  isDark={isDark}
+                  styles={styles}
+                />
+              </View>
+              <View style={[styles.dmSettingGroup, { minWidth: 0, marginLeft: 'auto' }]}>
+                <Text
+                  style={[
+                    styles.decryptLabel,
+                    isDark ? styles.decryptLabelDark : null,
+                    styles.dmSettingLabel,
+                    styles.dmSettingLabelCompact,
+                  ]}
+                  numberOfLines={1}
+                >
+                  Self‑Destruct
+                </Text>
+                <Pressable
+                  style={[
+                    styles.ttlChip,
+                    isDark ? styles.ttlChipDark : null,
+                    styles.ttlChipCompact,
+                  ]}
+                  onPress={onOpenTtlPicker}
+                >
+                  <Text
+                    style={[
+                      styles.ttlChipText,
+                      isDark ? styles.ttlChipTextDark : null,
+                      String(ttlLabel).trim().toLowerCase() === 'off'
+                        ? styles.ttlChipTextOff
+                        : null,
+                    ]}
+                  >
+                    {ttlLabel}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+            <View
+              style={{
+                width: '100%',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'flex-end',
+              }}
+            >
+              <View style={[styles.dmSettingGroup, { minWidth: 0 }]}>
+                <Text
+                  style={[
+                    styles.decryptLabel,
+                    isDark ? styles.decryptLabelDark : null,
+                    styles.dmSettingLabel,
+                    styles.dmSettingLabelCompact,
+                  ]}
+                  numberOfLines={1}
+                >
+                  Read Receipts
+                </Text>
+                <MiniToggle
+                  value={sendReadReceipts}
+                  isDark={isDark}
+                  styles={styles}
+                  onValueChange={onToggleReadReceipts}
+                />
+              </View>
             </View>
           </View>
+        ) : (
+          <View style={styles.dmSettingsRow}>
+            <View style={styles.dmSettingSlotLeft}>
+              <View style={styles.dmSettingGroup}>
+                <Text
+                  style={[
+                    styles.decryptLabel,
+                    isDark ? styles.decryptLabelDark : null,
+                    styles.dmSettingLabel,
+                  ]}
+                  numberOfLines={1}
+                >
+                  Auto‑Decrypt
+                </Text>
+                {Platform.OS === 'web' || Platform.OS === 'ios' ? (
+                  <MiniToggle
+                    value={autoDecrypt}
+                    onValueChange={onToggleAutoDecrypt}
+                    disabled={!myPrivateKeyReady}
+                    isDark={isDark}
+                    styles={styles}
+                  />
+                ) : (
+                  <Switch
+                    value={autoDecrypt}
+                    onValueChange={onToggleAutoDecrypt}
+                    disabled={!myPrivateKeyReady}
+                    trackColor={{
+                      false: APP_COLORS.light.border.default,
+                      true: APP_COLORS.light.border.default,
+                    }}
+                    thumbColor={isDark ? APP_COLORS.dark.border.subtle : APP_COLORS.light.bg.app}
+                    ios_backgroundColor={APP_COLORS.light.border.default}
+                  />
+                )}
+              </View>
+            </View>
 
-          <View style={styles.dmSettingSlotRight}>
-            <View style={styles.dmSettingGroup}>
-              <Text
-                style={[
-                  styles.decryptLabel,
-                  isDark ? styles.decryptLabelDark : null,
-                  styles.dmSettingLabel,
-                  compact ? styles.dmSettingLabelCompact : null,
-                ]}
-                numberOfLines={1}
-              >
-                Read Receipts
-              </Text>
-              {compact ? (
-                <MiniToggle
-                  value={sendReadReceipts}
-                  isDark={isDark}
-                  styles={styles}
-                  onValueChange={onToggleReadReceipts}
-                />
-              ) : Platform.OS === 'web' ? (
-                <MiniToggle
-                  value={sendReadReceipts}
-                  isDark={isDark}
-                  styles={styles}
-                  onValueChange={onToggleReadReceipts}
-                />
-              ) : Platform.OS === 'ios' ? (
-                <MiniToggle
-                  value={sendReadReceipts}
-                  isDark={isDark}
-                  styles={styles}
-                  onValueChange={onToggleReadReceipts}
-                />
-              ) : (
-                <Switch
-                  value={sendReadReceipts}
-                  onValueChange={onToggleReadReceipts}
-                  trackColor={{
-                    false: APP_COLORS.light.border.default,
-                    true: APP_COLORS.light.border.default,
-                  }}
-                  thumbColor={isDark ? APP_COLORS.dark.border.subtle : APP_COLORS.light.bg.app}
-                  ios_backgroundColor={APP_COLORS.light.border.default}
-                />
-              )}
+            <View style={styles.dmSettingSlotCenter}>
+              <View style={styles.dmSettingGroup}>
+                <Text
+                  style={[
+                    styles.decryptLabel,
+                    isDark ? styles.decryptLabelDark : null,
+                    styles.dmSettingLabel,
+                  ]}
+                  numberOfLines={1}
+                >
+                  Self‑Destruct
+                </Text>
+                <Pressable
+                  style={[styles.ttlChip, isDark ? styles.ttlChipDark : null]}
+                  onPress={onOpenTtlPicker}
+                >
+                  <Text
+                    style={[
+                      styles.ttlChipText,
+                      isDark ? styles.ttlChipTextDark : null,
+                      String(ttlLabel).trim().toLowerCase() === 'off'
+                        ? styles.ttlChipTextOff
+                        : null,
+                    ]}
+                  >
+                    {ttlLabel}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+
+            <View style={styles.dmSettingSlotRight}>
+              <View style={styles.dmSettingGroup}>
+                <Text
+                  style={[
+                    styles.decryptLabel,
+                    isDark ? styles.decryptLabelDark : null,
+                    styles.dmSettingLabel,
+                  ]}
+                  numberOfLines={1}
+                >
+                  Read Receipts
+                </Text>
+                {Platform.OS === 'web' || Platform.OS === 'ios' ? (
+                  <MiniToggle
+                    value={sendReadReceipts}
+                    isDark={isDark}
+                    styles={styles}
+                    onValueChange={onToggleReadReceipts}
+                  />
+                ) : (
+                  <Switch
+                    value={sendReadReceipts}
+                    onValueChange={onToggleReadReceipts}
+                    trackColor={{
+                      false: APP_COLORS.light.border.default,
+                      true: APP_COLORS.light.border.default,
+                    }}
+                    thumbColor={isDark ? APP_COLORS.dark.border.subtle : APP_COLORS.light.bg.app}
+                    ios_backgroundColor={APP_COLORS.light.border.default}
+                  />
+                )}
+              </View>
             </View>
           </View>
-        </View>
+        )
       ) : null}
 
       {isGroup ? (
