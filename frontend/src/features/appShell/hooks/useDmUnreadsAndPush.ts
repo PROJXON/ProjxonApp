@@ -2,6 +2,7 @@ import * as React from 'react';
 import { Platform } from 'react-native';
 
 import type { AmplifyUiUser } from '../../../types/amplifyUi';
+import { isUserInDirectDmConversation } from '../../../utils/conversationAccess';
 
 export function useDmUnreadsAndPush({
   user,
@@ -18,8 +19,11 @@ export function useDmUnreadsAndPush({
   upsertDmThread,
   fetchUnreads,
   registerForDmPushNotifications,
+  myUserSubRef,
 }: {
   user: AmplifyUiUser;
+  /** Latest Cognito sub; notification deep-links must not open another user's 1:1 DM. */
+  myUserSubRef: React.MutableRefObject<string | null>;
   conversationId: string;
   setConversationId: (v: string) => void;
   setPeer: (v: string | null) => void;
@@ -101,6 +105,10 @@ export function useDmUnreadsAndPush({
       const senderName = typeof data.senderDisplayName === 'string' ? data.senderDisplayName : '';
 
       if ((kind === 'dm' || kind === 'group') && convId) {
+        if (convId.startsWith('dm#')) {
+          const me = String(myUserSubRef.current || '').trim();
+          if (!me || !isUserInDirectDmConversation(convId, me)) return;
+        }
         setSearchOpen(false);
         setPeerInput('');
         setSearchError(null);

@@ -856,7 +856,7 @@ export default function ChatScreen({
   const lastAccessDeniedConvRef = React.useRef<string>('');
   React.useEffect(() => {
     const cid = String(activeConversationId || '').trim() || 'global';
-    if (!(cid.startsWith('ch#') || cid.startsWith('gdm#'))) return;
+    if (!(cid.startsWith('ch#') || cid.startsWith('gdm#') || cid.startsWith('dm#'))) return;
     const msg = String(error || '').trim();
     if (!msg) return;
     const m = msg.toLowerCase();

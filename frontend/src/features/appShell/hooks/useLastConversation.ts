@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as React from 'react';
 
+import { isUserInDirectDmConversation } from '../../../utils/conversationAccess';
 import type { ServerConversation, UnreadDmMap } from './useChatsInboxData';
 
 function isValidConversationId(v: string): boolean {
@@ -109,13 +110,38 @@ export function useLastConversation({
     let mounted = true;
     (async () => {
       try {
-        const userKey = getUserStorageKey(userSub);
-        const raw =
-          (userKey ? await AsyncStorage.getItem(userKey) : null) ||
-          (await AsyncStorage.getItem(getDeviceStorageKey()));
-        const v = typeof raw === 'string' ? raw.trim() : '';
+        const sub = typeof userSub === 'string' ? userSub.trim() : '';
+        const userKey = getUserStorageKey(sub || null);
+        const fromUser = userKey ? await AsyncStorage.getItem(userKey) : null;
+        let candidate = typeof fromUser === 'string' ? fromUser.trim() : '';
+        if (!candidate) {
+          candidate = ((await AsyncStorage.getItem(getDeviceStorageKey())) || '').trim();
+        }
         if (!mounted) return;
-        if (!isValidConversationId(v)) return;
+        if (!isValidConversationId(candidate)) return;
+
+        // Device key is shared across accounts; never restore encrypted threads from it alone.
+        const restoredFromDeviceOnly = !userKey || !String(fromUser || '').trim();
+        if (
+          restoredFromDeviceOnly &&
+          (candidate.startsWith('dm#') || candidate.startsWith('gdm#'))
+        ) {
+          return;
+        }
+
+        if (candidate.startsWith('dm#')) {
+          if (!sub || !isUserInDirectDmConversation(candidate, sub)) {
+            try {
+              if (userKey) await AsyncStorage.removeItem(userKey);
+              await AsyncStorage.removeItem(getDeviceStorageKey());
+            } catch {
+              // ignore
+            }
+            return;
+          }
+        }
+
+        const v = candidate;
 
         const current = String(latestConversationIdRef.current || '').trim() || 'global';
         // If something already put us into a DM (e.g. opened-from-notification), don't override it.

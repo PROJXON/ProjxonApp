@@ -112,7 +112,7 @@ export function MainAppMenuAndAboutOverlays({
   unregisterDmPushNotifications: () => Promise<void>;
   // Amplify's `signOut` typing varies across versions; treat as sync/async.
   signOut: () => void | Promise<void>;
-  onSignedOut?: () => void;
+  onSignedOut?: () => void | Promise<void>;
 
   globalAboutOpen: boolean;
   dismissGlobalAbout: () => void | Promise<void>;
@@ -235,7 +235,7 @@ export function MainAppMenuAndAboutOverlays({
             await unregisterDmPushNotifications();
             await Promise.resolve(signOut());
           } finally {
-            onSignedOut?.();
+            await Promise.resolve(onSignedOut?.());
           }
         },
       },

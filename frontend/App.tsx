@@ -31,6 +31,7 @@ import { useStoredTheme } from './src/hooks/useStoredTheme';
 import { UiPromptProvider } from './src/providers/UiPromptProvider';
 import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
 import { getAppThemeColors } from './src/theme/colors';
+import { clearSessionCachesOnSignOut } from './src/utils/clearSessionCachesOnSignOut';
 
 // Keep the native splash visible until we explicitly hide it (prevents a brief
 // "white screen + spinner" flash while JS bootstraps and we check auth session).
@@ -263,7 +264,8 @@ export default function App(): React.JSX.Element {
                     components={authComponents}
                   >
                     <MainAppContent
-                      onSignedOut={() => {
+                      onSignedOut={async () => {
+                        await clearSessionCachesOnSignOut();
                         setSignedInRehydrateReady(false);
                         setRootMode('guest');
                       }}
