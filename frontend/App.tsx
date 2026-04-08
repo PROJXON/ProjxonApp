@@ -24,13 +24,13 @@ import {
 } from 'react-native-safe-area-context';
 
 import { styles } from './App.styles';
+import { IosCommunityTermsFirstRun } from './src/components/legal/IosCommunityTermsFirstRun';
 import { AuthModal } from './src/components/modals/AuthModal';
 import { MainAppContent } from './src/features/appShell/components/MainAppContent';
 import { useAmplifyAuthenticatorConfig } from './src/features/auth/amplifyAuthenticator';
+import { useIosCommunityTermsGate } from './src/hooks/useIosCommunityTermsGate';
 import { useStoredTheme } from './src/hooks/useStoredTheme';
 import { UiPromptProvider } from './src/providers/UiPromptProvider';
-import { IosCommunityTermsFirstRun } from './src/components/legal/IosCommunityTermsFirstRun';
-import { useIosCommunityTermsGate } from './src/hooks/useIosCommunityTermsGate';
 import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
 import { getAppColors, getAppThemeColors } from './src/theme/colors';
 import { clearSessionCachesOnSignOut } from './src/utils/clearSessionCachesOnSignOut';

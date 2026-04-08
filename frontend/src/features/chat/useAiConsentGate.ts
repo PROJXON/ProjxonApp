@@ -74,12 +74,7 @@ export function useAiConsentGate(isEncryptedChat: boolean): {
     if (isEncryptedChat) return !sessionEncryptedGranted;
     if (!unencryptedStorageReady) return true;
     return !unencryptedEverAccepted;
-  }, [
-    isEncryptedChat,
-    sessionEncryptedGranted,
-    unencryptedEverAccepted,
-    unencryptedStorageReady,
-  ]);
+  }, [isEncryptedChat, sessionEncryptedGranted, unencryptedEverAccepted, unencryptedStorageReady]);
 
   const aiConsentGranted = !needsModal();
 

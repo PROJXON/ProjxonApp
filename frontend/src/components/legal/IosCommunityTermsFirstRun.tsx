@@ -22,7 +22,9 @@ export function IosCommunityTermsFirstRun({ colors, onAccept }: Props): React.JS
   }, []);
 
   return (
-    <View style={[styles.root, { backgroundColor: colors.bg.app, paddingBottom: insets.bottom + 16 }]}>
+    <View
+      style={[styles.root, { backgroundColor: colors.bg.app, paddingBottom: insets.bottom + 16 }]}
+    >
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[
@@ -33,13 +35,14 @@ export function IosCommunityTermsFirstRun({ colors, onAccept }: Props): React.JS
       >
         <Text style={[styles.title, { color: text }]}>Before you continue</Text>
         <Text style={[styles.body, { color: muted }]}>
-          OrkaChat includes messages and media from other people. By continuing, you agree to our Terms of Use and
-          community rules.
+          OrkaChat includes messages and media from other people. By continuing, you agree to our
+          Terms of Use and community rules.
         </Text>
         <Text style={[styles.body, { color: muted, marginTop: 12 }]}>
-          There is <Text style={{ fontWeight: '600', color: text }}>no tolerance</Text> for objectionable content or
-          abusive behavior. You can report content and block users from the app. We review reports and take action,
-          including removing content and restricting accounts when appropriate.
+          There is <Text style={{ fontWeight: '600', color: text }}>no tolerance</Text> for
+          objectionable content or abusive behavior. You can report content and block users from the
+          app. We review reports and take action, including removing content and restricting
+          accounts when appropriate.
         </Text>
         <Pressable
           onPress={openTerms}
