@@ -20,17 +20,24 @@ export function useDeleteConversationFromList({
   setServerConversations: React.Dispatch<React.SetStateAction<ServerConversation[]>>;
   setDmThreads: React.Dispatch<React.SetStateAction<DmThreads>>;
   setUnreadDmMap: React.Dispatch<React.SetStateAction<UnreadDmMap>>;
-}): { deleteConversationFromList: (conversationIdToDelete: string) => Promise<void> } {
+}): {
+  deleteConversationFromList: (
+    conversationIdToDelete: string,
+    opts?: { skipConfirm?: boolean },
+  ) => Promise<void>;
+} {
   const deleteConversationFromList = React.useCallback(
-    async (conversationIdToDelete: string) => {
+    async (conversationIdToDelete: string, opts?: { skipConfirm?: boolean }) => {
       const convId = String(conversationIdToDelete || '').trim();
       if (!convId || !apiUrl) return;
-      const ok = await promptConfirm(
-        'Remove chat?',
-        'This removes the selected chat from your Chats list. If they message you again, it will reappear.\n\nThis does not delete message history.',
-        { confirmText: 'Remove', cancelText: 'Cancel', destructive: true },
-      );
-      if (!ok) return;
+      if (!opts?.skipConfirm) {
+        const ok = await promptConfirm(
+          'Remove chat?',
+          'This removes the selected chat from your Chats list. If they message you again, it will reappear.\n\nThis does not delete message history.',
+          { confirmText: 'Remove', cancelText: 'Cancel', destructive: true },
+        );
+        if (!ok) return;
+      }
 
       try {
         const { tokens } = await fetchAuthSession();

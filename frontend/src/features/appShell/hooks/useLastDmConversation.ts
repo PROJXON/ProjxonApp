@@ -36,9 +36,11 @@ export function useLastDmConversation({
     (async () => {
       try {
         const userKey = getUserStorageKey(userSub);
-        const raw =
-          (userKey ? await AsyncStorage.getItem(userKey) : null) ||
-          (await AsyncStorage.getItem(getDeviceStorageKey()));
+        // If we know the signed-in user, only trust that user's DM pointer.
+        // Device fallback is only for pre-auth restore before user attrs are available.
+        const raw = userKey
+          ? await AsyncStorage.getItem(userKey)
+          : await AsyncStorage.getItem(getDeviceStorageKey());
         const v = typeof raw === 'string' ? raw.trim() : '';
         if (!mounted) return;
         if (v.startsWith('dm#') || v.startsWith('gdm#')) {
