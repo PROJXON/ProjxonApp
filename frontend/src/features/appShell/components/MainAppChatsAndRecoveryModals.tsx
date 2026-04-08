@@ -1,6 +1,6 @@
 import Feather from '@expo/vector-icons/Feather';
 import React from 'react';
-import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import type { AppStyles } from '../../../../App.styles';
 import { AnimatedDots } from '../../../components/AnimatedDots';
@@ -14,6 +14,7 @@ export function MainAppChatsAndRecoveryModals({
   styles,
   isDark,
   // Recovery
+  myUserSub,
   recoveryOpen,
   setRecoveryOpen,
   recoveryLocked,
@@ -35,6 +36,7 @@ export function MainAppChatsAndRecoveryModals({
   styles: AppStyles;
   isDark: boolean;
 
+  myUserSub: string | null;
   recoveryOpen: boolean;
   setRecoveryOpen: (v: boolean) => void;
   recoveryLocked: boolean;
@@ -93,6 +95,40 @@ export function MainAppChatsAndRecoveryModals({
       ),
     [chatsKb.keyboardVisible, chatsKb.remainingOverlap, chatsKb.windowHeight, chatsSheetHeight],
   );
+
+  const clearLocalRecoveryKeyDevOnly = React.useCallback(() => {
+    if (!__DEV__) return;
+    if (!myUserSub) {
+      Alert.alert('No user', 'Sign in first so we know which local key to clear.');
+      return;
+    }
+    Alert.alert(
+      'DEV ONLY: Clear local recovery key?',
+      'This deletes the local secure key for the current account on this device. Next sign-in should behave like first-time local recovery.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear key',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                const SecureStore =
+                  require('expo-secure-store') as typeof import('expo-secure-store');
+                await SecureStore.deleteItemAsync(`crypto_keys_${myUserSub}`);
+                Alert.alert(
+                  'Cleared',
+                  'Local recovery key removed for this account. Sign out and sign back in to retest.',
+                );
+              } catch {
+                Alert.alert('Failed', 'Could not clear local key.');
+              }
+            })();
+          },
+        },
+      ],
+    );
+  }, [myUserSub]);
 
   // Chats panel content (shared by Modal and iOS View overlay).
   const chatsPanelContent = (
@@ -347,6 +383,22 @@ export function MainAppChatsAndRecoveryModals({
                   Reset Recovery
                 </Text>
               </Pressable>
+              {__DEV__ ? (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.modalButton,
+                    isDark ? styles.modalButtonDark : null,
+                    pressed ? { opacity: 0.9 } : null,
+                  ]}
+                  onPress={clearLocalRecoveryKeyDevOnly}
+                  accessibilityRole="button"
+                  accessibilityLabel="Dev only clear local recovery key"
+                >
+                  <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                    DEV ONLY: Clear Local Recovery Key
+                  </Text>
+                </Pressable>
+              ) : null}
             </View>
 
             <View style={[styles.modalButtons, { justifyContent: 'flex-end', marginTop: 10 }]}>
