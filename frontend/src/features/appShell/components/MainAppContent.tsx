@@ -19,6 +19,10 @@ import { getAppThemeColors } from '../../../theme/colors';
 import type { AmplifyUiUser } from '../../../types/amplifyUi';
 import { formatChatActivityDate } from '../../../utils/chatDates';
 import {
+  isConversationActiveInRoster,
+  isUserInDirectDmConversation,
+} from '../../../utils/conversationAccess';
+import {
   decryptPrivateKey,
   derivePublicKey,
   encryptPrivateKey,
@@ -107,7 +111,7 @@ export const MainAppContent = ({
   onSignedOut,
   onRehydrateReady,
 }: {
-  onSignedOut?: () => void;
+  onSignedOut?: () => void | Promise<void>;
   onRehydrateReady?: (ready: boolean) => void;
 }) => {
   const { user } = useAuthenticator();
@@ -121,6 +125,10 @@ export const MainAppContent = ({
   const cdn = useCdnUrlCache(CDN_URL);
   const [displayName, setDisplayName] = useState<string>(() => readCachedDisplayNameSync());
   const [myUserSub, setMyUserSub] = React.useState<string | null>(null);
+  const myUserSubRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    myUserSubRef.current = myUserSub;
+  }, [myUserSub]);
   // Bump this whenever we change/recover/reset keys so ChatScreen reloads them from storage.
   const [keyEpoch, setKeyEpoch] = React.useState<number>(0);
 
@@ -314,7 +322,13 @@ export const MainAppContent = ({
     dmThreadsList,
     chatsList,
     fetchUnreads,
-  } = useChatsInboxData({ apiUrl: API_URL, fetchAuthSession, chatsOpen });
+    conversationsRosterHydrated,
+  } = useChatsInboxData({
+    apiUrl: API_URL,
+    fetchAuthSession,
+    chatsOpen,
+    userSub: myUserSub,
+  });
 
   const isDmMode = conversationId.startsWith('dm#') || conversationId.startsWith('gdm#');
   const isChannelMode = !isDmMode;
@@ -335,6 +349,27 @@ export const MainAppContent = ({
     userSub: myUserSub,
     conversationId,
   });
+
+  // 1:1 DMs encode both subs in the id; never stay in a dm# that cannot belong to this account.
+  React.useEffect(() => {
+    const cid = String(conversationId || '').trim();
+    if (!cid.startsWith('dm#')) return;
+    const me = typeof myUserSub === 'string' ? myUserSub.trim() : '';
+    if (!me) return;
+    if (isUserInDirectDmConversation(cid, me)) return;
+    setConversationId('global');
+    setPeer(null);
+  }, [conversationId, myUserSub]);
+
+  // Group DMs use opaque ids; after `/conversations` succeeds, leave stale `gdm#` from storage/restore.
+  React.useEffect(() => {
+    const cid = String(conversationId || '').trim();
+    if (!cid.startsWith('gdm#')) return;
+    if (!conversationsRosterHydrated) return;
+    if (isConversationActiveInRoster(cid, serverConversations)) return;
+    setConversationId('global');
+    setPeer(null);
+  }, [conversationId, conversationsRosterHydrated, serverConversations]);
 
   const rehydrateReady = channelRestoreDone && conversationRestoreDone;
   React.useEffect(() => {
@@ -392,6 +427,7 @@ export const MainAppContent = ({
     enterChannelConversation,
   } = useChannelsFlow({
     apiUrl: API_URL,
+    userSub: myUserSub,
     getIdToken,
     promptAlert,
     promptConfirm,
@@ -575,6 +611,7 @@ export const MainAppContent = ({
 
   const { hasUnreadDms, unreadEntries, handleNewDmNotification } = useDmUnreadsAndPush({
     user,
+    myUserSubRef,
     conversationId,
     setConversationId,
     setPeer,

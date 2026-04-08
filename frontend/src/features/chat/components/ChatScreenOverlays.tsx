@@ -137,6 +137,8 @@ export type ChatScreenOverlaysProps = {
 
   // AI summary + consent
   aiSummary: { open: boolean; loading: boolean; text: string; close: () => void };
+  /** DM / group: show copy that decrypted message text is sent to OpenAI. */
+  isEncryptedChatForAiConsent: boolean;
   aiConsentGate: {
     open: boolean;
     onProceed: (run: (a: 'summary' | 'helper') => void) => void;
@@ -314,6 +316,7 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
     styles,
     insets,
     aiSummary,
+    isEncryptedChatForAiConsent,
     aiConsentGate,
     runAiAction,
     attach,
@@ -412,6 +415,7 @@ export function ChatScreenOverlays(props: ChatScreenOverlaysProps): React.JSX.El
       <AiConsentModal
         visible={aiConsentGate.open}
         isDark={isDark}
+        isEncryptedChat={isEncryptedChatForAiConsent}
         styles={styles}
         onProceed={() => aiConsentGate.onProceed(runAiAction)}
         onCancel={aiConsentGate.onCancel}

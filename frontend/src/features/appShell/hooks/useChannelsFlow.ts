@@ -47,6 +47,7 @@ export type LeaveChannelResult = { ok: true } | { ok: false; title: string; mess
 
 export function useChannelsFlow({
   apiUrl,
+  userSub,
   getIdToken,
   promptAlert,
   promptConfirm,
@@ -59,6 +60,8 @@ export function useChannelsFlow({
   setSearchError,
 }: {
   apiUrl: string;
+  /** When this changes (new sign-in), channel list/search state must not leak from the previous user. */
+  userSub?: string | null;
   getIdToken: () => Promise<string | null>;
   promptAlert: (title: string, message: string) => Promise<void>;
   promptConfirm: (
@@ -175,14 +178,23 @@ export function useChannelsFlow({
   // (DMs already have dm:threads + conversations:cache; channels need a similar local cache.)
   const [channelNamesRestoreDone, setChannelNamesRestoreDone] = React.useState<boolean>(false);
 
+  // Re-load names from storage when identity is known; deps include userSub so a stale async read
+  // cannot merge another user's map after account switch (see effect below).
   React.useEffect(() => {
-    let mounted = true;
+    const sub = typeof userSub === 'string' ? userSub.trim() : '';
+    if (!sub) {
+      setChannelNamesRestoreDone(false);
+      return;
+    }
+    let cancelled = false;
     (async () => {
       try {
-        // localStorage sync hydration is handled in the state initializer; AsyncStorage is the fallback.
         const raw = await AsyncStorage.getItem('ui:channelNamesById:v1');
-        if (!mounted) return;
-        if (!raw) return;
+        if (cancelled) return;
+        if (!raw) {
+          setChannelNamesRestoreDone(true);
+          return;
+        }
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
           setChannelNameById((prev) => ({ ...parsed, ...prev }));
@@ -190,13 +202,27 @@ export function useChannelsFlow({
       } catch {
         // ignore
       } finally {
-        if (mounted) setChannelNamesRestoreDone(true);
+        if (!cancelled) setChannelNamesRestoreDone(true);
       }
     })();
     return () => {
-      mounted = false;
+      cancelled = true;
     };
-  }, []);
+  }, [userSub]);
+
+  // Drop in-memory channel roster/search state whenever the signed-in Cognito identity changes.
+  React.useEffect(() => {
+    const sub = typeof userSub === 'string' ? userSub.trim() : '';
+    if (!sub) return;
+    setMyChannels([]);
+    setMyChannelsError(null);
+    setChannelsResults([]);
+    setChannelsError(null);
+    setChannelJoinError(null);
+    setGlobalUserCount(null);
+    setChannelsQuery('');
+    setChannelNameById({});
+  }, [userSub]);
 
   React.useEffect(() => {
     // Avoid clobbering storage with {} before the restore runs.

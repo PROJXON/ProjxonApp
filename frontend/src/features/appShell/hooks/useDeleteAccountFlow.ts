@@ -24,7 +24,7 @@ export function useDeleteAccountFlow({
   fetchAuthSession: () => Promise<{ tokens?: { idToken?: { toString: () => string } } }>;
   deleteUser: () => Promise<void>;
   signOut: () => Promise<void> | void;
-  onSignedOut?: () => void;
+  onSignedOut?: () => void | Promise<void>;
   getErrorMessage: (e: unknown) => string;
 }): { deleteMyAccount: () => Promise<void> } {
   const deleteMyAccount = React.useCallback(async () => {
@@ -96,7 +96,7 @@ export function useDeleteAccountFlow({
     } catch {
       // ignore
     } finally {
-      onSignedOut?.();
+      await Promise.resolve(onSignedOut?.());
     }
 
     await promptAlert('Account Deleted', 'Your account deletion request completed.');

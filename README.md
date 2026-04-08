@@ -253,6 +253,7 @@ After deploying those files, set up **Google Search Console**:
 ## Legal & support
 
 - Legal index: `https://projxon.github.io/OrkaChat/index.html`
+- Terms of use: `https://projxon.github.io/OrkaChat/terms.html`
 - Privacy policy: `https://projxon.github.io/OrkaChat/privacy.html`
 - Delete account: `https://projxon.github.io/OrkaChat/delete-account.html`
 

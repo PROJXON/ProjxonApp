@@ -33,10 +33,13 @@ export function useChatsInboxData({
   apiUrl,
   fetchAuthSession,
   chatsOpen,
+  userSub,
 }: {
   apiUrl: string;
   fetchAuthSession: () => Promise<{ tokens?: { idToken?: { toString: () => string } } }>;
   chatsOpen: boolean;
+  /** Used to run one roster fetch on sign-in so group DMs can be validated against `/conversations`. */
+  userSub: string | null;
 }): {
   unreadDmMap: UnreadDmMap;
   setUnreadDmMap: React.Dispatch<React.SetStateAction<UnreadDmMap>>;
@@ -58,6 +61,9 @@ export function useChatsInboxData({
 
   fetchConversations: () => Promise<void>;
   fetchUnreads: () => Promise<void>;
+
+  /** True after a successful `/conversations` response for the current session (see boot fetch). */
+  conversationsRosterHydrated: boolean;
 } {
   const [unreadDmMap, setUnreadDmMap] = React.useState<UnreadDmMap>(() => ({}));
   // Local-only DM thread list (v1): used to power "Chats" inbox UI.
@@ -67,6 +73,9 @@ export function useChatsInboxData({
   const [serverConversations, setServerConversations] = React.useState<ServerConversation[]>([]);
   const [chatsLoading, setChatsLoading] = React.useState<boolean>(false);
   const [conversationsCacheAt, setConversationsCacheAt] = React.useState<number>(0);
+  const [conversationsRosterHydrated, setConversationsRosterHydrated] =
+    React.useState<boolean>(false);
+  const bootConversationsFetchedForSubRef = React.useRef<string | null>(null);
 
   // Local title overrides (source of truth from in-chat group meta).
   // Used to keep Chats list + unread labels consistent even if serverConversations is stale.
@@ -155,6 +164,7 @@ export function useChatsInboxData({
       );
       setServerConversations(parsedWithOverrides);
       setConversationsCacheAt(Date.now());
+      setConversationsRosterHydrated(true);
       try {
         await AsyncStorage.setItem(
           'conversations:cache:v1',
@@ -291,6 +301,20 @@ export function useChatsInboxData({
     })();
   }, [dmThreads]);
 
+  // One roster fetch per signed-in user so MainApp can validate `gdm#` against the server (not just 403).
+  React.useEffect(() => {
+    const sub = typeof userSub === 'string' ? userSub.trim() : '';
+    if (!sub || !apiUrl) {
+      bootConversationsFetchedForSubRef.current = null;
+      setConversationsRosterHydrated(false);
+      return;
+    }
+    if (bootConversationsFetchedForSubRef.current === sub) return;
+    bootConversationsFetchedForSubRef.current = sub;
+    setConversationsRosterHydrated(false);
+    void fetchConversations();
+  }, [apiUrl, userSub, fetchConversations]);
+
   // Refresh conversation list when opening the Chats modal.
   React.useEffect(() => {
     if (!chatsOpen) return;
@@ -335,5 +359,6 @@ export function useChatsInboxData({
     chatsList,
     fetchConversations,
     fetchUnreads,
+    conversationsRosterHydrated,
   };
 }
