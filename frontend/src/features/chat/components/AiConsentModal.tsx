@@ -33,12 +33,12 @@ export function AiConsentModal({
             {isEncryptedChat ? (
               <>
                 <Text style={[styles.summaryText, isDark ? styles.summaryTextDark : null]}>
-                  <Text style={{ fontWeight: '700' }}>Encrypted chat:</Text> this DM or group is
-                  encrypted between participants. Summarize and AI Helper only use message text that
-                  is already decrypted on your device for this view, then send that text to{' '}
-                  <Text style={{ fontWeight: '700' }}>OpenAI</Text> (OpenAI, L.L.C.) so it can
-                  return a summary or suggested reply. OpenAI receives the content in readable form
-                  for this request only after you tap Continue.
+                  <Text style={{ fontWeight: '700' }}>Encrypted chat:</Text> Using AI Helper &
+                  Summarizer will send message content to an external AI provider. These AI tools
+                  will use message text that is already decrypted on your device for this view, then
+                  send that text to <Text style={{ fontWeight: '700' }}>OpenAI</Text> (OpenAI,
+                  L.L.C.) so it can return a summary or suggested reply. OpenAI receives the content
+                  in readable form for this request only after you tap Continue.
                 </Text>
                 <Text
                   style={[

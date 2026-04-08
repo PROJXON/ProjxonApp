@@ -246,7 +246,9 @@ export function MainAppPassphrasePromptModal({
           disabled={submitDisabled || skipRecoveryConfirmVisible}
         >
           {processing ? (
-            <Text style={[styles.modalButtonText, styles.modalButtonCtaText, { textAlign: 'center' }]}>
+            <Text
+              style={[styles.modalButtonText, styles.modalButtonCtaText, { textAlign: 'center' }]}
+            >
               {busyLabel}
             </Text>
           ) : (

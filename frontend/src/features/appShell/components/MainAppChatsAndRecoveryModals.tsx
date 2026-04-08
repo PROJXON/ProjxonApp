@@ -1,6 +1,15 @@
 import Feather from '@expo/vector-icons/Feather';
 import React from 'react';
-import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 import type { AppStyles } from '../../../../App.styles';
 import { AnimatedDots } from '../../../components/AnimatedDots';
@@ -394,7 +403,9 @@ export function MainAppChatsAndRecoveryModals({
                   accessibilityRole="button"
                   accessibilityLabel="Dev only clear local recovery key"
                 >
-                  <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                  <Text
+                    style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}
+                  >
                     DEV ONLY: Clear Local Recovery Key
                   </Text>
                 </Pressable>
