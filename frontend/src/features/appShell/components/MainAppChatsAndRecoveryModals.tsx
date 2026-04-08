@@ -66,13 +66,21 @@ export function MainAppChatsAndRecoveryModals({
     unreadCount?: number;
   }>;
   goToConversation: (conversationId: string) => void;
-  deleteConversationFromList: (conversationId: string) => void | Promise<void>;
+  deleteConversationFromList: (
+    conversationId: string,
+    opts?: { skipConfirm?: boolean },
+  ) => void | Promise<void>;
   formatChatActivityDate: (ts: number) => string;
 }): React.JSX.Element {
   const recoveryKb = useKeyboardOverlap({ enabled: recoveryOpen });
   const chatsKb = useKeyboardOverlap({ enabled: chatsOpen });
   const [recoverySheetHeight, setRecoverySheetHeight] = React.useState<number>(0);
   const [chatsSheetHeight, setChatsSheetHeight] = React.useState<number>(0);
+  const [deleteChatIosPrompt, setDeleteChatIosPrompt] = React.useState<null | {
+    conversationId: string;
+    label: string;
+  }>(null);
+  const [deleteChatIosBusy, setDeleteChatIosBusy] = React.useState<boolean>(false);
   const recoveryBottomPad = React.useMemo(
     () =>
       calcCenteredModalBottomPadding(
@@ -225,9 +233,14 @@ export function MainAppChatsAndRecoveryModals({
                     </View>
                   ) : null}
                   <Pressable
-                    onPress={() =>
-                      void Promise.resolve(deleteConversationFromList(t.conversationId))
-                    }
+                    onPress={() => {
+                      if (Platform.OS === 'ios') {
+                        const label = String(t.peer || 'Direct Message').trim() || 'Direct Message';
+                        setDeleteChatIosPrompt({ conversationId: t.conversationId, label });
+                        return;
+                      }
+                      void Promise.resolve(deleteConversationFromList(t.conversationId));
+                    }}
                     style={({ pressed }) => [
                       styles.chatDeleteBtn,
                       isDark ? styles.chatDeleteBtnDark : null,
@@ -266,6 +279,65 @@ export function MainAppChatsAndRecoveryModals({
           </Pressable>
         </View>
       </View>
+      {Platform.OS === 'ios' && deleteChatIosPrompt ? (
+        <View
+          style={[
+            StyleSheet.absoluteFillObject,
+            styles.modalOverlay,
+            { zIndex: 1000, elevation: 1000 },
+          ]}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setDeleteChatIosPrompt(null)} />
+          <View style={[styles.modalContent, isDark ? styles.modalContentDark : null]}>
+            <Text style={[styles.modalTitle, isDark ? styles.modalTitleDark : null]}>
+              Remove chat?
+            </Text>
+            <Text style={[styles.modalHelperText, isDark ? styles.modalHelperTextDark : null]}>
+              {`Remove "${deleteChatIosPrompt.label}" from your Chats list? If they message you again, it will reappear.\n\nThis does not delete message history.`}
+            </Text>
+            <View style={styles.modalButtons}>
+              <Pressable
+                style={[
+                  styles.modalButton,
+                  styles.modalButtonCta,
+                  isDark ? styles.modalButtonCtaDark : null,
+                  deleteChatIosBusy ? { opacity: 0.5 } : null,
+                ]}
+                disabled={deleteChatIosBusy}
+                onPress={() => {
+                  if (deleteChatIosBusy) return;
+                  const target = deleteChatIosPrompt;
+                  if (!target) return;
+                  setDeleteChatIosBusy(true);
+                  void Promise.resolve(
+                    deleteConversationFromList(target.conversationId, { skipConfirm: true }),
+                  ).finally(() => {
+                    setDeleteChatIosBusy(false);
+                    setDeleteChatIosPrompt(null);
+                  });
+                }}
+              >
+                <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>
+                  {deleteChatIosBusy ? 'Removing' : 'Remove'}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.modalButton,
+                  isDark ? styles.modalButtonDark : null,
+                  deleteChatIosBusy ? { opacity: 0.5 } : null,
+                ]}
+                disabled={deleteChatIosBusy}
+                onPress={() => setDeleteChatIosPrompt(null)}
+              >
+                <Text style={[styles.modalButtonText, isDark ? styles.modalButtonTextDark : null]}>
+                  Cancel
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 
