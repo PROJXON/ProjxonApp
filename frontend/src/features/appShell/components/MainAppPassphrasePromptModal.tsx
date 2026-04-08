@@ -4,7 +4,6 @@ import type { TextInput } from 'react-native';
 import { Image, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { AppStyles } from '../../../../App.styles';
-import { AnimatedDots } from '../../../components/AnimatedDots';
 import { AppTextInput } from '../../../components/AppTextInput';
 import {
   calcCenteredModalBottomPadding,
@@ -247,27 +246,11 @@ export function MainAppPassphrasePromptModal({
           disabled={submitDisabled || skipRecoveryConfirmVisible}
         >
           {processing ? (
-            mode === 'reset' || mode === 'setup' || mode === 'change' ? (
-              // Setup / change / reset: short label only (no dots) — long label + dots overflowed narrow CTA on iOS.
-              <Text
-                style={[styles.modalButtonText, styles.modalButtonCtaText, { textAlign: 'center' }]}
-              >
-                {busyLabel}
-              </Text>
-            ) : (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 2,
-                  width: '100%',
-                }}
-              >
-                <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>{busyLabel}</Text>
-                <AnimatedDots color={APP_COLORS.dark.text.primary} size={18} />
-              </View>
-            )
+            <Text
+              style={[styles.modalButtonText, styles.modalButtonCtaText, { textAlign: 'center' }]}
+            >
+              {busyLabel}
+            </Text>
           ) : (
             <Text style={[styles.modalButtonText, styles.modalButtonCtaText]}>Submit</Text>
           )}

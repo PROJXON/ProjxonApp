@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Platform } from 'react-native';
+import { Alert, Platform } from 'react-native';
 
 type PassphrasePromptMode = 'setup' | 'restore' | 'change' | 'reset';
 
@@ -122,6 +122,34 @@ export function usePassphrasePrompt({
       const isSetup = passphrasePrompt.mode === 'setup';
       const isRestore = passphrasePrompt.mode === 'restore';
       if (isRestore) {
+        if (Platform.OS === 'ios') {
+          Alert.alert('Forgot your recovery passphrase?', '', [
+            {
+              text: 'Try Again',
+              onPress: () => {
+                setPassphraseInput('');
+                setPassphraseConfirmInput('');
+                setPassphraseError(null);
+              },
+            },
+            {
+              text: 'Try Later',
+              onPress: () => {
+                closePrompt();
+                passphrasePrompt.reject(new Error('Prompt cancelled'));
+              },
+            },
+            {
+              text: 'Reset recovery',
+              style: 'destructive',
+              onPress: () => {
+                closePrompt();
+                passphrasePrompt.reject(new Error('Recovery reset requested'));
+              },
+            },
+          ]);
+          return;
+        }
         // Restore flow: allow reset, try again immediately, or try again later.
         const choice = (await promptChoice3({
           title: 'Forgot your recovery passphrase?',

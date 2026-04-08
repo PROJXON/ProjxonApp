@@ -795,6 +795,7 @@ export const MainAppContent = ({
       <MainAppChatsAndRecoveryModals
         styles={styles}
         isDark={isDark}
+        myUserSub={myUserSub}
         recoveryOpen={recoveryOpen}
         setRecoveryOpen={setRecoveryOpen}
         recoveryLocked={recoveryLocked}
