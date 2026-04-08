@@ -52,7 +52,7 @@ import { sortReactionSubs } from '../features/chat/reactionsUi';
 import { renderChatListItem } from '../features/chat/renderChatListItem';
 import type { ChatMessage } from '../features/chat/types';
 import { MAX_ATTACHMENTS_PER_MESSAGE } from '../features/chat/uploads';
-import { useAiDmConsentGate } from '../features/chat/useAiDmConsent';
+import { useAiConsentGate } from '../features/chat/useAiConsentGate';
 import { useAiHelper } from '../features/chat/useAiHelper';
 import { useAiSummary } from '../features/chat/useAiSummary';
 import { useChannelAboutModalActions } from '../features/chat/useChannelAboutModalActions';
@@ -912,7 +912,7 @@ export default function ChatScreen({
     openInfo,
   });
 
-  const aiConsentGate = useAiDmConsentGate({ isDm, isGroup });
+  const aiConsentGate = useAiConsentGate(isEncryptedChat);
 
   const runAiAction = React.useCallback(
     (action: 'summary' | 'helper') => {
@@ -2196,6 +2196,7 @@ export default function ChatScreen({
     styles,
     insets: { top: insets.top, bottom: insets.bottom },
     aiSummary,
+    isEncryptedChatForAiConsent: isEncryptedChat,
     aiConsentGate,
     runAiAction,
     attach: {

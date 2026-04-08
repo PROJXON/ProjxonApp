@@ -29,8 +29,10 @@ import { MainAppContent } from './src/features/appShell/components/MainAppConten
 import { useAmplifyAuthenticatorConfig } from './src/features/auth/amplifyAuthenticator';
 import { useStoredTheme } from './src/hooks/useStoredTheme';
 import { UiPromptProvider } from './src/providers/UiPromptProvider';
+import { IosCommunityTermsFirstRun } from './src/components/legal/IosCommunityTermsFirstRun';
+import { useIosCommunityTermsGate } from './src/hooks/useIosCommunityTermsGate';
 import GuestGlobalScreen from './src/screens/GuestGlobalScreen';
-import { getAppThemeColors } from './src/theme/colors';
+import { getAppColors, getAppThemeColors } from './src/theme/colors';
 import { clearSessionCachesOnSignOut } from './src/utils/clearSessionCachesOnSignOut';
 
 // Keep the native splash visible until we explicitly hide it (prevents a brief
@@ -99,6 +101,10 @@ export default function App(): React.JSX.Element {
   });
   const appReady = !booting && themeReady && iconFontsReady;
   const appColors = getAppThemeColors(isDark);
+  const appSemanticColors = getAppColors(isDark);
+  const iosCommunityTerms = useIosCommunityTermsGate();
+  const iosBlockMainUi =
+    Platform.OS === 'ios' && (!iosCommunityTerms.ready || !iosCommunityTerms.accepted);
 
   // Keep the app portrait by default, but allow camera UI to temporarily unlock orientation.
   React.useEffect(() => {
@@ -222,7 +228,8 @@ export default function App(): React.JSX.Element {
   // theme persistence handled by useStoredTheme
 
   const { amplifyTheme, authComponents } = useAmplifyAuthenticatorConfig(isDark);
-  const showRootSpinnerOverlay = booting || (rootMode === 'app' && !signedInRehydrateReady);
+  const showRootSpinnerOverlay =
+    booting || (rootMode === 'app' && !signedInRehydrateReady && !iosBlockMainUi);
 
   return (
     <AppSafeAreaProvider>
@@ -239,6 +246,24 @@ export default function App(): React.JSX.Element {
                 // Keep the signed-in/guest trees unmounted until auth check completes.
                 // The root overlay spinner (below) provides UI feedback.
                 <View style={{ flex: 1 }} />
+              ) : iosBlockMainUi ? (
+                !iosCommunityTerms.ready ? (
+                  <View
+                    style={{
+                      flex: 1,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: appColors.appBackground,
+                    }}
+                  >
+                    <ActivityIndicator color={appColors.appForeground} />
+                  </View>
+                ) : (
+                  <IosCommunityTermsFirstRun
+                    colors={appSemanticColors}
+                    onAccept={iosCommunityTerms.accept}
+                  />
+                )
               ) : rootMode === 'guest' ? (
                 <>
                   <GuestGlobalScreen onSignIn={() => setAuthModalOpen(true)} />
