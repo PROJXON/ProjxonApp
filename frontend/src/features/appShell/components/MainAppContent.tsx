@@ -651,15 +651,25 @@ export const MainAppContent = ({
     }
     const v = String(lastDmConversationIdRef.current || '').trim();
     if (v.startsWith('dm#') || v.startsWith('gdm#')) {
-      goToConversation(v);
-      return;
+      const existsInChats = chatsList.some((c) => String(c.conversationId || '').trim() === v);
+      if (existsInChats) {
+        goToConversation(v);
+        return;
+      }
+      // Stale pointer (e.g. user removed/left that DM). Clear persisted "last DM" and fallback to Start DM.
+      lastDmConversationIdRef.current = '';
+      void AsyncStorage.removeItem('ui:lastDmConversationId').catch(() => {});
+      const userKey = myUserSub ? `ui:lastDmConversationId:${myUserSub}` : '';
+      if (userKey) void AsyncStorage.removeItem(userKey).catch(() => {});
     }
     // First-time / no last DM: fallback to showing Enter Names row.
     setSearchOpen(true);
   }, [
+    chatsList,
     goToConversation,
     isDmMode,
     lastDmConversationIdRef,
+    myUserSub,
     setPeerInput,
     setSearchError,
     setSearchOpen,

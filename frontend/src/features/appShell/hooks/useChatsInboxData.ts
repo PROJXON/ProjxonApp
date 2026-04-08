@@ -29,6 +29,11 @@ export type ChatsListEntry = {
   unreadCount: number;
 };
 
+function isDmLikeConversationId(conversationId: string): boolean {
+  const id = String(conversationId || '').trim();
+  return id.startsWith('dm#') || id.startsWith('gdm#');
+}
+
 export function useChatsInboxData({
   apiUrl,
   fetchAuthSession,
@@ -239,7 +244,13 @@ export function useChatsInboxData({
           count,
         };
         const lastAt = Number(it.lastMessageCreatedAt || 0);
-        upsertDmThread(convId, sender, Number.isFinite(lastAt) && lastAt > 0 ? lastAt : Date.now());
+        if (isDmLikeConversationId(convId)) {
+          upsertDmThread(
+            convId,
+            sender,
+            Number.isFinite(lastAt) && lastAt > 0 ? lastAt : Date.now(),
+          );
+        }
       }
       setUnreadDmMap((prev) => {
         // Prefer freshly fetched unread info, but apply any local group title overrides
@@ -256,6 +267,7 @@ export function useChatsInboxData({
     const mapUnread = unreadDmMap;
     if (serverConversations.length) {
       return serverConversations
+        .filter((c) => isDmLikeConversationId(c.conversationId))
         .map((c) => ({
           conversationId: c.conversationId,
           peer: c.peerDisplayName || mapUnread[c.conversationId]?.user || 'Direct Message',
@@ -266,7 +278,7 @@ export function useChatsInboxData({
         }))
         .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
     }
-    return dmThreadsList;
+    return dmThreadsList.filter((c) => isDmLikeConversationId(c.conversationId));
   }, [dmThreadsList, serverConversations, unreadDmMap]);
 
   // Load persisted DM threads (best-effort).
