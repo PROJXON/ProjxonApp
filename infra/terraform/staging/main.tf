@@ -24,6 +24,7 @@ locals {
   unreads_table         = "UnreadDmConversations-${local.suffix}"
   channels_table        = "Channels-${local.suffix}"
   channel_members_table = "ChannelMembers-${local.suffix}"
+  calls_table           = "Calls-${local.suffix}"
 
   lambda_runtime = "nodejs20.x"
 
@@ -262,6 +263,27 @@ resource "aws_dynamodb_table" "channel_members" {
 }
 
 # -------------------------
+# DynamoDB: Calls-tf-staging (voice call sessions)
+# -------------------------
+resource "aws_dynamodb_table" "calls" {
+  name         = local.calls_table
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "callId"
+
+  attribute {
+    name = "callId"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expiresAt"
+    enabled        = true
+  }
+
+  tags = local.tags
+}
+
+# -------------------------
 # IAM: Trust policy for Lambda
 # -------------------------
 data "aws_iam_policy_document" "lambda_assume_role" {
@@ -323,8 +345,24 @@ data "aws_iam_policy_document" "lambda_http_inline" {
       aws_dynamodb_table.channels.arn,
       "${aws_dynamodb_table.channels.arn}/index/*",
       aws_dynamodb_table.channel_members.arn,
-      "${aws_dynamodb_table.channel_members.arn}/index/*"
+      "${aws_dynamodb_table.channel_members.arn}/index/*",
+      aws_dynamodb_table.calls.arn,
+      "${aws_dynamodb_table.calls.arn}/index/*"
     ]
+  }
+
+  # Chime SDK Meetings (us-east-1 by default; cross-region from Lambdas in aws_region)
+  statement {
+    effect = "Allow"
+    actions = [
+      "chime:CreateMeeting",
+      "chime:CreateAttendee",
+      "chime:GetMeeting",
+      "chime:GetAttendee",
+      "chime:ListAttendees",
+      "chime:DeleteMeeting"
+    ]
+    resources = ["*"]
   }
 
   # Cognito admin delete user (used by /account/delete)
@@ -629,6 +667,60 @@ resource "aws_lambda_function" "channels_update" {
       CHANNELS_TABLE        = aws_dynamodb_table.channels.name
       CHANNEL_MEMBERS_TABLE = aws_dynamodb_table.channel_members.name
       USERS_TABLE           = aws_dynamodb_table.users.name
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_lambda_function" "calls_start" {
+  function_name    = "callsStart-${local.suffix}"
+  role             = aws_iam_role.lambda_http_exec.arn
+  runtime          = local.lambda_runtime
+  filename         = var.lambda_zip_path
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
+  handler          = "handlers/http/callsStart.handler"
+
+  environment {
+    variables = {
+      CALLS_TABLE      = aws_dynamodb_table.calls.name
+      CHIME_SDK_REGION = var.chime_sdk_region
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_lambda_function" "calls_accept" {
+  function_name    = "callsAccept-${local.suffix}"
+  role             = aws_iam_role.lambda_http_exec.arn
+  runtime          = local.lambda_runtime
+  filename         = var.lambda_zip_path
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
+  handler          = "handlers/http/callsAccept.handler"
+
+  environment {
+    variables = {
+      CALLS_TABLE      = aws_dynamodb_table.calls.name
+      CHIME_SDK_REGION = var.chime_sdk_region
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_lambda_function" "calls_end" {
+  function_name    = "callsEnd-${local.suffix}"
+  role             = aws_iam_role.lambda_http_exec.arn
+  runtime          = local.lambda_runtime
+  filename         = var.lambda_zip_path
+  source_code_hash = filebase64sha256(var.lambda_zip_path)
+  handler          = "handlers/http/callsEnd.handler"
+
+  environment {
+    variables = {
+      CALLS_TABLE      = aws_dynamodb_table.calls.name
+      CHIME_SDK_REGION = var.chime_sdk_region
     }
   }
 
@@ -940,6 +1032,51 @@ resource "aws_apigatewayv2_route" "http_channels_update" {
   target             = "integrations/${aws_apigatewayv2_integration.http_channels_update.id}"
 }
 
+resource "aws_apigatewayv2_integration" "http_calls_start" {
+  api_id                 = aws_apigatewayv2_api.http_api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.calls_start.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "http_calls_start" {
+  api_id             = aws_apigatewayv2_api.http_api.id
+  route_key          = "POST /calls/start"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.http_jwt.id
+  target             = "integrations/${aws_apigatewayv2_integration.http_calls_start.id}"
+}
+
+resource "aws_apigatewayv2_integration" "http_calls_accept" {
+  api_id                 = aws_apigatewayv2_api.http_api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.calls_accept.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "http_calls_accept" {
+  api_id             = aws_apigatewayv2_api.http_api.id
+  route_key          = "POST /calls/accept"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.http_jwt.id
+  target             = "integrations/${aws_apigatewayv2_integration.http_calls_accept.id}"
+}
+
+resource "aws_apigatewayv2_integration" "http_calls_end" {
+  api_id                 = aws_apigatewayv2_api.http_api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.calls_end.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "http_calls_end" {
+  api_id             = aws_apigatewayv2_api.http_api.id
+  route_key          = "POST /calls/end"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.http_jwt.id
+  target             = "integrations/${aws_apigatewayv2_integration.http_calls_end.id}"
+}
+
 resource "aws_lambda_permission" "http_invoke_all" {
   for_each = {
     get_messages           = aws_lambda_function.get_messages.arn
@@ -955,6 +1092,9 @@ resource "aws_lambda_permission" "http_invoke_all" {
     channels_create        = aws_lambda_function.channels_create.arn
     channels_join          = aws_lambda_function.channels_join.arn
     channels_update        = aws_lambda_function.channels_update.arn
+    calls_start            = aws_lambda_function.calls_start.arn
+    calls_accept           = aws_lambda_function.calls_accept.arn
+    calls_end              = aws_lambda_function.calls_end.arn
   }
 
   statement_id  = "AllowInvokeHttpApi-${each.key}"

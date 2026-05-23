@@ -30,3 +30,9 @@ variable "alarm_email" {
   description = "Optional: email to receive CloudWatch alarms. Empty disables alarms."
   default     = ""
 }
+
+variable "chime_sdk_region" {
+  type        = string
+  description = "Region for Amazon Chime SDK Meetings (control + media). App data stays in aws_region."
+  default     = "us-east-1"
+}

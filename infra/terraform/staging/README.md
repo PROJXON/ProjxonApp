@@ -46,7 +46,7 @@ The zip must contain these folders at the **zip root**:
 
 The recommended build is:
 
-1. Install deps in `backend/aws/` (creates `backend/aws/node_modules/`)
+1. `cd backend/aws && npm install` (creates `node_modules/`, including `@aws-sdk/client-chime-sdk-meetings`)
 2. Zip `backend/aws/src/handlers`, `backend/aws/src/lib`, and `backend/aws/node_modules` into `backend/aws/dist/backend.zip`
 
 ## Deploy

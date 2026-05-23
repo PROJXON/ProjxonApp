@@ -151,6 +151,14 @@ Below are the DynamoDB tables referenced by the backend handlers, plus the **GSI
   - **PK**: `userSub` (S)
   - **Projection needs**: `connectionId`
 
+#### Calls (voice / future video)
+
+- **Table**: `Calls`
+- **PK**: `callId` (S)
+- **Attributes used**: `conversationId`, `kind` (`voice`), `status` (`ringing` | `active` | `ended`), `callerSub`, `calleeSub`, `meetingId`, `meeting` (map), `externalMeetingId`, `createdAt`, `updatedAt`, `endedAt`
+- **TTL**: enable DynamoDB TTL using attribute **`expiresAt`** (epoch seconds)
+- **Notes**: Chime SDK Meetings run in **`CHIME_SDK_REGION`** (default `us-east-1`); DynamoDB/API Gateway remain in the app region (e.g. `us-east-2`).
+
 #### AI quota tables (optional)
 
 The AI and media-quota handlers can optionally use DynamoDB for rate/usage tracking:
@@ -300,6 +308,22 @@ The AI and media-quota handlers can optionally use DynamoDB for rate/usage track
     - `MEDIA_SIGNER_QUOTA_TABLE` (preferred) or falls back to `AI_HELPER_TABLE` / `AI_SUMMARY_TABLE` if set
     - `DM_MEDIA_SIGNEDURL_MAX_PER_MINUTE` (default: 60)
     - `DM_MEDIA_SIGNEDURL_MAX_PER_DAY` (default: 5000)
+
+- **POST `/calls/start`** → `http/callsStart.js`
+  - **Auth**: JWT
+  - **Body**: `{ conversationId }` (DM only: `dm#<subA>#<subB>`)
+  - **Returns**: `{ callId, conversationId, status, calleeSub, meeting, attendee }`
+  - **Env**: `CALLS_TABLE`, `CHIME_SDK_REGION` (default `us-east-1`)
+
+- **POST `/calls/accept`** → `http/callsAccept.js`
+  - **Auth**: JWT (callee only)
+  - **Body**: `{ callId }`
+  - **Returns**: `{ callId, conversationId, status, meetingId, meeting, attendee }`
+
+- **POST `/calls/end`** → `http/callsEnd.js`
+  - **Auth**: JWT (caller or callee)
+  - **Body**: `{ callId }`
+  - **Returns**: `{ callId, status: "ended" }`
 
 ### WebSocket API (API Gateway WebSockets)
 
